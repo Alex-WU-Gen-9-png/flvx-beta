@@ -30,4 +30,13 @@ public class TunnelUpdateDto {
     @DecimalMin(value = "0.0", inclusive = false, message = "流量倍率必须大于0.0")
     @DecimalMax(value = "100.0", message = "流量倍率不能大于100.0")
     private BigDecimal trafficRatio;
+
+    // 入口节点配置（可选，为空时不更新节点配置）
+    private List<ChainTunnel> inNodeId;
+
+    // 转发链节点配置（二维数组，每一跳可有多个节点）
+    private List<List<ChainTunnel>> chainNodes;
+
+    // 出口节点配置
+    private List<ChainTunnel> outNodeId;
 }

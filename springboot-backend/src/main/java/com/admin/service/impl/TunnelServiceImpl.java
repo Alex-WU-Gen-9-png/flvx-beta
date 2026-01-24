@@ -322,6 +322,104 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
     public R updateTunnel(TunnelUpdateDto tunnelUpdateDto) {
         Tunnel existingTunnel = this.getById(tunnelUpdateDto.getId());
         if (existingTunnel == null) return R.err("隧道不存在");
+
+        List<ChainTunnel> oldChainTunnels = chainTunnelService.list(
+                new QueryWrapper<ChainTunnel>().eq("tunnel_id", tunnelUpdateDto.getId())
+        );
+
+        boolean hasNodeChanges = detectNodeChanges(oldChainTunnels, tunnelUpdateDto);
+
+        if (hasNodeChanges && tunnelUpdateDto.getInNodeId() != null) {
+            List<ChainTunnel> backupChains = deepCopyChainTunnels(oldChainTunnels);
+
+            List<Long> nodeIds = new ArrayList<>();
+            Map<Long, Node> nodes = new HashMap<>();
+
+            for (ChainTunnel inNode : tunnelUpdateDto.getInNodeId()) {
+                nodeIds.add(inNode.getNodeId());
+                Node node = nodeService.getById(inNode.getNodeId());
+                if (node == null) return R.err("入口节点不存在: " + inNode.getNodeId());
+                if (node.getStatus() != 1) return R.err("入口节点不在线: " + node.getName());
+                nodes.put(node.getId(), node);
+            }
+
+            List<ChainTunnel> newChainTunnels = new ArrayList<>();
+            for (ChainTunnel inNode : tunnelUpdateDto.getInNodeId()) {
+                inNode.setTunnelId(existingTunnel.getId());
+                inNode.setChainType(1);
+                newChainTunnels.add(inNode);
+            }
+
+            if (existingTunnel.getType() == 2) {
+                if (tunnelUpdateDto.getOutNodeId() == null || tunnelUpdateDto.getOutNodeId().isEmpty()) {
+                    return R.err("隧道转发类型必须配置出口节点");
+                }
+
+                List<List<ChainTunnel>> chainNodes = tunnelUpdateDto.getChainNodes() == null ?
+                        new ArrayList<>() : tunnelUpdateDto.getChainNodes();
+
+                int inx = 1;
+                for (List<ChainTunnel> hop : chainNodes) {
+                    for (ChainTunnel chainNode : hop) {
+                        nodeIds.add(chainNode.getNodeId());
+                        Node node = nodeService.getById(chainNode.getNodeId());
+                        if (node == null) return R.err("转发链节点不存在: " + chainNode.getNodeId());
+                        if (node.getStatus() != 1) return R.err("转发链节点不在线: " + node.getName());
+                        nodes.put(node.getId(), node);
+
+                        Integer port = getNodePort(chainNode.getNodeId());
+                        chainNode.setPort(port);
+                        chainNode.setInx(inx);
+                        chainNode.setChainType(2);
+                        chainNode.setTunnelId(existingTunnel.getId());
+                        newChainTunnels.add(chainNode);
+                    }
+                    inx++;
+                }
+
+                for (ChainTunnel outNode : tunnelUpdateDto.getOutNodeId()) {
+                    nodeIds.add(outNode.getNodeId());
+                    Node node = nodeService.getById(outNode.getNodeId());
+                    if (node == null) return R.err("出口节点不存在: " + outNode.getNodeId());
+                    if (node.getStatus() != 1) return R.err("出口节点不在线: " + node.getName());
+                    nodes.put(node.getId(), node);
+
+                    Integer port = getNodePort(outNode.getNodeId());
+                    outNode.setPort(port);
+                    outNode.setChainType(3);
+                    outNode.setTunnelId(existingTunnel.getId());
+                    newChainTunnels.add(outNode);
+                }
+            }
+
+            Set<Long> nodeIdSet = new HashSet<>(nodeIds);
+            if (nodeIdSet.size() != nodeIds.size()) {
+                return R.err("节点配置重复");
+            }
+
+            try {
+                cleanupGostConfig(oldChainTunnels, existingTunnel.getId());
+
+                chainTunnelService.remove(
+                        new QueryWrapper<ChainTunnel>().eq("tunnel_id", existingTunnel.getId())
+                );
+
+                R applyResult = applyNewGostConfig(tunnelUpdateDto, existingTunnel, nodes);
+                if (applyResult.getCode() != 0) {
+                    chainTunnelService.saveBatch(backupChains);
+                    rebuildGostConfig(backupChains, existingTunnel);
+                    return R.err("更新失败，已回滚: " + applyResult.getMsg());
+                }
+
+                chainTunnelService.saveBatch(newChainTunnels);
+
+            } catch (Exception e) {
+                chainTunnelService.saveBatch(backupChains);
+                rebuildGostConfig(backupChains, existingTunnel);
+                return R.err("更新失败，已回滚: " + e.getMessage());
+            }
+        }
+
         Tunnel tunnel = new Tunnel();
         tunnel.setId(tunnelUpdateDto.getId());
         tunnel.setName(tunnelUpdateDto.getName());
@@ -329,18 +427,23 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
         tunnel.setTrafficRatio(tunnelUpdateDto.getTrafficRatio());
         tunnel.setInIp(tunnelUpdateDto.getInIp());
 
-        if (StringUtils.isEmpty(tunnel.getInIp())){
-            StringBuilder in_ip = new StringBuilder();
-            List<ChainTunnel> chainTunnels = chainTunnelService.list(new QueryWrapper<ChainTunnel>().eq("tunnel_id", tunnel.getId()).eq("chain_type", 1));
+        if (StringUtils.isEmpty(tunnel.getInIp())) {
+            StringBuilder inIp = new StringBuilder();
+            List<ChainTunnel> chainTunnels = chainTunnelService.list(
+                    new QueryWrapper<ChainTunnel>().eq("tunnel_id", tunnel.getId()).eq("chain_type", 1)
+            );
             for (ChainTunnel chainTunnel : chainTunnels) {
                 Node node = nodeService.getById(chainTunnel.getNodeId());
-                if (node == null)return R.err("隧道节点数据错误，部分节点不存在");
-                in_ip.append(node.getServerIp()).append(",");
+                if (node == null) return R.err("隧道节点数据错误，部分节点不存在");
+                inIp.append(node.getServerIp()).append(",");
             }
-            in_ip.deleteCharAt(in_ip.length() - 1);
-            tunnel.setInIp(in_ip.toString());
+            if (inIp.length() > 0) {
+                inIp.deleteCharAt(inIp.length() - 1);
+            }
+            tunnel.setInIp(inIp.toString());
         }
 
+        tunnel.setUpdatedTime(System.currentTimeMillis());
         this.updateById(tunnel);
         return R.ok();
     }
@@ -703,6 +806,232 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
             result.setAverageTime(-1.0);
             result.setPacketLoss(100.0);
             return result;
+        }
+    }
+
+    private boolean detectNodeChanges(List<ChainTunnel> oldChains, TunnelUpdateDto dto) {
+        if (dto.getInNodeId() == null) {
+            return false;
+        }
+        
+        List<ChainTunnel> oldInNodes = oldChains.stream()
+                .filter(ct -> ct.getChainType() != null && ct.getChainType() == 1)
+                .collect(Collectors.toList());
+        List<ChainTunnel> oldChainNodes = oldChains.stream()
+                .filter(ct -> ct.getChainType() != null && ct.getChainType() == 2)
+                .collect(Collectors.toList());
+        List<ChainTunnel> oldOutNodes = oldChains.stream()
+                .filter(ct -> ct.getChainType() != null && ct.getChainType() == 3)
+                .collect(Collectors.toList());
+
+        Set<Long> oldInNodeIds = oldInNodes.stream().map(ChainTunnel::getNodeId).collect(Collectors.toSet());
+        Set<Long> newInNodeIds = dto.getInNodeId().stream().map(ChainTunnel::getNodeId).collect(Collectors.toSet());
+        if (!oldInNodeIds.equals(newInNodeIds)) {
+            return true;
+        }
+
+        List<ChainTunnel> flatNewChainNodes = (dto.getChainNodes() == null) ? new ArrayList<>() :
+                dto.getChainNodes().stream().flatMap(List::stream).collect(Collectors.toList());
+        if (oldChainNodes.size() != flatNewChainNodes.size()) {
+            return true;
+        }
+        for (int i = 0; i < oldChainNodes.size(); i++) {
+            ChainTunnel oldCt = oldChainNodes.get(i);
+            boolean found = flatNewChainNodes.stream().anyMatch(newCt ->
+                    Objects.equals(oldCt.getNodeId(), newCt.getNodeId()) &&
+                    Objects.equals(oldCt.getProtocol(), newCt.getProtocol()) &&
+                    Objects.equals(oldCt.getStrategy(), newCt.getStrategy()) &&
+                    Objects.equals(oldCt.getInx(), newCt.getInx())
+            );
+            if (!found) {
+                return true;
+            }
+        }
+
+        List<ChainTunnel> newOutNodes = (dto.getOutNodeId() == null) ? new ArrayList<>() : dto.getOutNodeId();
+        if (oldOutNodes.size() != newOutNodes.size()) {
+            return true;
+        }
+        Set<Long> oldOutNodeIds = oldOutNodes.stream().map(ChainTunnel::getNodeId).collect(Collectors.toSet());
+        Set<Long> newOutNodeIds = newOutNodes.stream().map(ChainTunnel::getNodeId).collect(Collectors.toSet());
+        if (!oldOutNodeIds.equals(newOutNodeIds)) {
+            return true;
+        }
+        for (ChainTunnel oldOut : oldOutNodes) {
+            boolean found = newOutNodes.stream().anyMatch(newOut ->
+                    Objects.equals(oldOut.getNodeId(), newOut.getNodeId()) &&
+                    Objects.equals(oldOut.getProtocol(), newOut.getProtocol()) &&
+                    Objects.equals(oldOut.getStrategy(), newOut.getStrategy())
+            );
+            if (!found) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void cleanupGostConfig(List<ChainTunnel> chainTunnels, Long tunnelId) {
+        for (ChainTunnel chainTunnel : chainTunnels) {
+            if (chainTunnel.getChainType() == 1) {
+                GostUtil.DeleteChains(chainTunnel.getNodeId(), "chains_" + tunnelId);
+            } else if (chainTunnel.getChainType() == 2) {
+                GostUtil.DeleteChains(chainTunnel.getNodeId(), "chains_" + tunnelId);
+                JSONArray services = new JSONArray();
+                services.add(tunnelId + "_tls");
+                GostUtil.DeleteService(chainTunnel.getNodeId(), services);
+            } else if (chainTunnel.getChainType() == 3) {
+                JSONArray services = new JSONArray();
+                services.add(tunnelId + "_tls");
+                GostUtil.DeleteService(chainTunnel.getNodeId(), services);
+            }
+        }
+    }
+
+    private List<ChainTunnel> deepCopyChainTunnels(List<ChainTunnel> original) {
+        List<ChainTunnel> copy = new ArrayList<>();
+        for (ChainTunnel ct : original) {
+            ChainTunnel newCt = new ChainTunnel();
+            newCt.setId(ct.getId());
+            newCt.setTunnelId(ct.getTunnelId());
+            newCt.setChainType(ct.getChainType());
+            newCt.setNodeId(ct.getNodeId());
+            newCt.setPort(ct.getPort());
+            newCt.setStrategy(ct.getStrategy());
+            newCt.setInx(ct.getInx());
+            newCt.setProtocol(ct.getProtocol());
+            copy.add(newCt);
+        }
+        return copy;
+    }
+
+    private R applyNewGostConfig(TunnelUpdateDto dto, Tunnel tunnel, Map<Long, Node> nodes) {
+        List<JSONObject> chainSuccess = new ArrayList<>();
+        List<JSONObject> serviceSuccess = new ArrayList<>();
+
+        if (tunnel.getType() == 2) {
+            List<List<ChainTunnel>> chainNodes = dto.getChainNodes() == null ? new ArrayList<>() : dto.getChainNodes();
+
+            for (ChainTunnel inNode : dto.getInNodeId()) {
+                GostDto gostDto;
+                if (chainNodes.isEmpty()) {
+                    gostDto = GostUtil.AddChains(inNode.getNodeId(), dto.getOutNodeId(), nodes);
+                } else {
+                    gostDto = GostUtil.AddChains(inNode.getNodeId(), chainNodes.get(0), nodes);
+                }
+                if (!Objects.equals(gostDto.getMsg(), "OK")) {
+                    rollbackGostChanges(chainSuccess, serviceSuccess);
+                    return R.err("创建入口Chain失败: " + gostDto.getMsg());
+                }
+                JSONObject data = new JSONObject();
+                data.put("node_id", inNode.getNodeId());
+                data.put("name", "chains_" + tunnel.getId());
+                chainSuccess.add(data);
+            }
+
+            for (int i = 0; i < chainNodes.size(); i++) {
+                List<ChainTunnel> currentHop = chainNodes.get(i);
+                for (ChainTunnel chainTunnel : currentHop) {
+                    GostDto gostDto;
+                    if (i + 1 >= chainNodes.size()) {
+                        gostDto = GostUtil.AddChains(chainTunnel.getNodeId(), dto.getOutNodeId(), nodes);
+                    } else {
+                        gostDto = GostUtil.AddChains(chainTunnel.getNodeId(), chainNodes.get(i + 1), nodes);
+                    }
+                    if (!Objects.equals(gostDto.getMsg(), "OK")) {
+                        rollbackGostChanges(chainSuccess, serviceSuccess);
+                        return R.err("创建转发链Chain失败: " + gostDto.getMsg());
+                    }
+                    JSONObject chainData = new JSONObject();
+                    chainData.put("node_id", chainTunnel.getNodeId());
+                    chainData.put("name", "chains_" + tunnel.getId());
+                    chainSuccess.add(chainData);
+
+                    GostDto serviceResult = GostUtil.AddChainService(chainTunnel.getNodeId(), chainTunnel, nodes);
+                    if (!Objects.equals(serviceResult.getMsg(), "OK")) {
+                        rollbackGostChanges(chainSuccess, serviceSuccess);
+                        return R.err("创建转发链Service失败: " + serviceResult.getMsg());
+                    }
+                    JSONObject serviceData = new JSONObject();
+                    serviceData.put("node_id", chainTunnel.getNodeId());
+                    serviceData.put("name", tunnel.getId() + "_tls");
+                    serviceSuccess.add(serviceData);
+                }
+            }
+
+            for (ChainTunnel outNode : dto.getOutNodeId()) {
+                GostDto gostDto = GostUtil.AddChainService(outNode.getNodeId(), outNode, nodes);
+                if (!Objects.equals(gostDto.getMsg(), "OK")) {
+                    rollbackGostChanges(chainSuccess, serviceSuccess);
+                    return R.err("创建出口Service失败: " + gostDto.getMsg());
+                }
+                JSONObject serviceData = new JSONObject();
+                serviceData.put("node_id", outNode.getNodeId());
+                serviceData.put("name", tunnel.getId() + "_tls");
+                serviceSuccess.add(serviceData);
+            }
+        }
+
+        return R.ok();
+    }
+
+    private void rollbackGostChanges(List<JSONObject> chainSuccess, List<JSONObject> serviceSuccess) {
+        for (JSONObject chain : chainSuccess) {
+            GostUtil.DeleteChains(chain.getLong("node_id"), chain.getString("name"));
+        }
+        for (JSONObject service : serviceSuccess) {
+            JSONArray services = new JSONArray();
+            services.add(service.getString("name"));
+            GostUtil.DeleteService(service.getLong("node_id"), services);
+        }
+    }
+
+    private void rebuildGostConfig(List<ChainTunnel> chainTunnels, Tunnel tunnel) {
+        Map<Long, Node> nodes = new HashMap<>();
+        for (ChainTunnel ct : chainTunnels) {
+            Node node = nodeService.getById(ct.getNodeId());
+            if (node != null) {
+                nodes.put(node.getId(), node);
+            }
+        }
+
+        List<ChainTunnel> inNodes = chainTunnels.stream()
+                .filter(ct -> ct.getChainType() == 1)
+                .collect(Collectors.toList());
+        Map<Integer, List<ChainTunnel>> chainNodesMap = chainTunnels.stream()
+                .filter(ct -> ct.getChainType() == 2)
+                .collect(Collectors.groupingBy(ct -> ct.getInx() != null ? ct.getInx() : 0));
+        List<List<ChainTunnel>> chainNodesList = chainNodesMap.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .map(Map.Entry::getValue)
+                .collect(Collectors.toList());
+        List<ChainTunnel> outNodes = chainTunnels.stream()
+                .filter(ct -> ct.getChainType() == 3)
+                .collect(Collectors.toList());
+
+        if (tunnel.getType() == 2) {
+            for (ChainTunnel inNode : inNodes) {
+                if (chainNodesList.isEmpty()) {
+                    GostUtil.AddChains(inNode.getNodeId(), outNodes, nodes);
+                } else {
+                    GostUtil.AddChains(inNode.getNodeId(), chainNodesList.get(0), nodes);
+                }
+            }
+
+            for (int i = 0; i < chainNodesList.size(); i++) {
+                for (ChainTunnel chainTunnel : chainNodesList.get(i)) {
+                    if (i + 1 >= chainNodesList.size()) {
+                        GostUtil.AddChains(chainTunnel.getNodeId(), outNodes, nodes);
+                    } else {
+                        GostUtil.AddChains(chainTunnel.getNodeId(), chainNodesList.get(i + 1), nodes);
+                    }
+                    GostUtil.AddChainService(chainTunnel.getNodeId(), chainTunnel, nodes);
+                }
+            }
+
+            for (ChainTunnel outNode : outNodes) {
+                GostUtil.AddChainService(outNode.getNodeId(), outNode, nodes);
+            }
         }
     }
 
