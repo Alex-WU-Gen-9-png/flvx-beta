@@ -35,4 +35,10 @@ public class Tunnel extends BaseEntity {
     private BigDecimal trafficRatio;
 
     private String inIp;
+
+    /**
+     * Display/order index for drag-sorting in admin UI.
+     * Lower value appears first.
+     */
+    private Integer inx;
 }

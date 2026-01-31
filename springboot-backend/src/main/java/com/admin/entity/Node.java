@@ -40,4 +40,10 @@ public class Node extends BaseEntity {
 
     private String udpListenAddr;
 
+    /**
+     * Display/order index for drag-sorting in admin UI.
+     * Lower value appears first.
+     */
+    private Integer inx;
+
 }

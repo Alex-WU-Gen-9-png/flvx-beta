@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS node (
   updated_time INTEGER,
   status INTEGER NOT NULL,
   tcp_listen_addr VARCHAR(100) NOT NULL DEFAULT '[::]',
-  udp_listen_addr VARCHAR(100) NOT NULL DEFAULT '[::]'
+  udp_listen_addr VARCHAR(100) NOT NULL DEFAULT '[::]',
+  inx INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS speed_limit (
@@ -72,7 +73,8 @@ CREATE TABLE IF NOT EXISTS tunnel (
   created_time INTEGER NOT NULL,
   updated_time INTEGER NOT NULL,
   status INTEGER NOT NULL,
-  in_ip TEXT
+  in_ip TEXT,
+  inx INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS chain_tunnel (
@@ -123,4 +125,3 @@ CREATE TABLE IF NOT EXISTS vite_config (
   value VARCHAR(200) NOT NULL,
   time INTEGER NOT NULL
 );
-

@@ -14,6 +14,12 @@ import java.util.List;
 public class TunnelDetailDto {
     
     private Long id;
+
+    /**
+     * Display/order index for drag-sorting in admin UI.
+     * Lower value appears first.
+     */
+    private Integer inx;
     
     private String name;
     
@@ -40,4 +46,3 @@ public class TunnelDetailDto {
     // 出口节点列表
     private List<ChainTunnel> outNodeId = new ArrayList<>();
 }
-
