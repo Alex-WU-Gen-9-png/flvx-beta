@@ -72,6 +72,7 @@ interface Node {
 interface NodeForm {
   id: number | null;
   name: string;
+  serverHost: string;
   serverIpV4: string;
   serverIpV6: string;
   port: string;
@@ -99,6 +100,7 @@ export default function NodePage() {
   const [form, setForm] = useState<NodeForm>({
     id: null,
     name: '',
+    serverHost: '',
     serverIpV4: '',
     serverIpV6: '',
     port: '1000-65535',
@@ -409,6 +411,15 @@ export default function NodePage() {
   const validateIpv4Literal = (ip: string): boolean => ipv4Regex.test(ip.trim());
   const validateIpv6Literal = (ip: string): boolean => ipv6Regex.test(ip.trim());
 
+  // Hostname/domain validation (no scheme/port)
+  const hostnameRegex = /^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(?:\.(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?))*$/;
+  const validateHostname = (host: string): boolean => {
+    const v = host.trim();
+    if (!v) return false;
+    if (v === 'localhost') return true;
+    return hostnameRegex.test(v);
+  };
+
   // 验证端口格式：支持 80,443,100-600
   const validatePort = (portStr: string): { valid: boolean; error?: string } => {
     if (!portStr || !portStr.trim()) {
@@ -474,16 +485,22 @@ export default function NodePage() {
     
     const v4 = form.serverIpV4.trim();
     const v6 = form.serverIpV6.trim();
+    const host = form.serverHost.trim();
 
-    if (!v4 && !v6) {
-      newErrors.serverIpV4 = '请至少填写一个IPv4或IPv6地址';
-      newErrors.serverIpV6 = '请至少填写一个IPv4或IPv6地址';
+    if (!v4 && !v6 && !host) {
+      const msg = '请至少填写一个 IPv4/IPv6 地址或域名';
+      newErrors.serverIpV4 = msg;
+      newErrors.serverIpV6 = msg;
+      newErrors.serverHost = msg;
     } else {
       if (v4 && !validateIpv4Literal(v4)) {
         newErrors.serverIpV4 = '请输入有效的IPv4地址';
       }
       if (v6 && !validateIpv6Literal(v6)) {
         newErrors.serverIpV6 = '请输入有效的IPv6地址';
+      }
+      if (host && !validateHostname(host)) {
+        newErrors.serverHost = '请输入有效的域名/主机名';
       }
     }
     
@@ -510,11 +527,18 @@ export default function NodePage() {
   const handleEdit = (node: Node) => {
     setDialogTitle('编辑节点');
     setIsEdit(true);
+
+    const legacy = (node.serverIp || '').trim();
+    const normalizedV4 = node.serverIpV4?.trim() || (validateIpv4Literal(legacy) ? legacy : '');
+    const normalizedV6 = node.serverIpV6?.trim() || (validateIpv6Literal(legacy) ? legacy : '');
+    const normalizedHost = (!normalizedV4 && !normalizedV6 && legacy) ? legacy : '';
+
     setForm({
       id: node.id,
       name: node.name,
-      serverIpV4: node.serverIpV4?.trim() || (validateIpv4Literal((node.serverIp || '').trim()) ? (node.serverIp || '').trim() : ''),
-      serverIpV6: node.serverIpV6?.trim() || (validateIpv6Literal((node.serverIp || '').trim()) ? (node.serverIp || '').trim() : ''),
+      serverHost: normalizedHost,
+      serverIpV4: normalizedV4,
+      serverIpV6: normalizedV6,
       port: node.port || '1000-65535',
       tcpListenAddr: node.tcpListenAddr || '[::]',
       udpListenAddr: node.udpListenAddr || '[::]',
@@ -605,9 +629,10 @@ export default function NodePage() {
     
     try {
       const apiCall = isEdit ? updateNode : createNode;
-      const data = { 
-        ...form,
-        serverIp: form.serverIpV4?.trim() || form.serverIpV6?.trim() || ''
+      const { serverHost: _serverHost, ...rest } = form;
+      const data = {
+        ...rest,
+        serverIp: form.serverIpV4?.trim() || form.serverIpV6?.trim() || form.serverHost?.trim() || ''
       };
       
       const res = await apiCall(data);
@@ -616,22 +641,22 @@ export default function NodePage() {
         setDialogVisible(false);
         
         if (isEdit) {
-          setNodeList(prev => prev.map(n => 
-            n.id === form.id ? {
-              ...n,
-              name: form.name,
-              serverIp: form.serverIpV4?.trim() || form.serverIpV6?.trim() || '',
-              serverIpV4: form.serverIpV4,
-              serverIpV6: form.serverIpV6,
-              port: form.port,
-              tcpListenAddr: form.tcpListenAddr,
-              udpListenAddr: form.udpListenAddr,
-              interfaceName: form.interfaceName,
-              http: form.http,
-              tls: form.tls,
-              socks: form.socks
-            } : n
-          ));
+            setNodeList(prev => prev.map(n => 
+              n.id === form.id ? {
+                ...n,
+                name: form.name,
+                serverIp: form.serverIpV4?.trim() || form.serverIpV6?.trim() || form.serverHost?.trim() || '',
+                serverIpV4: form.serverIpV4,
+                serverIpV6: form.serverIpV6,
+                port: form.port,
+                tcpListenAddr: form.tcpListenAddr,
+                udpListenAddr: form.udpListenAddr,
+                interfaceName: form.interfaceName,
+                http: form.http,
+                tls: form.tls,
+                socks: form.socks
+              } : n
+            ));
         } else {
           loadNodes();
         }
@@ -650,6 +675,7 @@ export default function NodePage() {
     setForm({
       id: null,
       name: '',
+      serverHost: '',
       serverIpV4: '',
       serverIpV6: '',
       port: '1000-65535',
@@ -1059,6 +1085,17 @@ export default function NodePage() {
                   variant="bordered"
                 />
 
+                <Input
+                  label="服务器域名/主机名"
+                  placeholder="例如: node.example.com"
+                  value={form.serverHost}
+                  onChange={(e) => setForm(prev => ({ ...prev, serverHost: e.target.value }))}
+                  isInvalid={!!errors.serverHost}
+                  errorMessage={errors.serverHost}
+                  variant="bordered"
+                  description="可选：不带协议、不带端口。至少填写一个 IPv4/IPv6/域名"
+                />
+
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <Input
                     label="服务器IPv4"
@@ -1079,7 +1116,7 @@ export default function NodePage() {
                     isInvalid={!!errors.serverIpV6}
                     errorMessage={errors.serverIpV6}
                     variant="bordered"
-                    description="至少填写一个 IPv4/IPv6 地址"
+                    description="至少填写一个 IPv4/IPv6/域名"
                   />
                 </div>
 
