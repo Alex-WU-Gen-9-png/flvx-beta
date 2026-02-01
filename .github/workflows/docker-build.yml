@@ -150,7 +150,11 @@ jobs:
 
       - name: Prepare build args
         run: |
-          echo "VITE_GITHUB_REPO=https://github.com/${{ github.repository }}" > ./vite-frontend/.env.production
+          VERSION="${{ needs.check-version.outputs.version }}"
+          {
+            echo "VITE_GITHUB_REPO=https://github.com/${{ github.repository }}"
+            echo "VITE_APP_VERSION=$VERSION"
+          } > ./vite-frontend/.env.production
 
       - name: Build and push Vite Docker images
         run: |
