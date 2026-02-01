@@ -333,8 +333,14 @@ public class GostUtil {
     }
 
     private static boolean supportsV4(Node node) {
+        // New dual-stack fields take precedence over legacy serverIp.
+        // If user explicitly provided only v6, treat as v6-only.
         if (StrUtil.isNotBlank(node.getServerIpV4())) {
             return true;
+        }
+
+        if (StrUtil.isNotBlank(node.getServerIpV6())) {
+            return false;
         }
 
         String legacy = node.getServerIp();
@@ -355,8 +361,14 @@ public class GostUtil {
     }
 
     private static boolean supportsV6(Node node) {
+        // New dual-stack fields take precedence over legacy serverIp.
+        // If user explicitly provided only v4, treat as v4-only.
         if (StrUtil.isNotBlank(node.getServerIpV6())) {
             return true;
+        }
+
+        if (StrUtil.isNotBlank(node.getServerIpV4())) {
+            return false;
         }
 
         String legacy = node.getServerIp();
