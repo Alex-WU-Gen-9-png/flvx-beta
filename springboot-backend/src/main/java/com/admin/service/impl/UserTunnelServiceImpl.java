@@ -17,7 +17,9 @@ import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -64,20 +66,21 @@ public class UserTunnelServiceImpl extends ServiceImpl<UserTunnelMapper, UserTun
         User user = userService.getById(batchAssignDto.getUserId());
         if (user == null) return R.err("用户不存在");
 
-        List<Integer> requestedTunnelIds = batchAssignDto.getTunnels().stream()
-                .map(UserTunnelBatchAssignDto.TunnelAssignItem::getTunnelId)
-                .collect(Collectors.toList());
+        Map<Integer, UserTunnelBatchAssignDto.TunnelAssignItem> uniqueTunnels = new LinkedHashMap<>();
+        for (UserTunnelBatchAssignDto.TunnelAssignItem item : batchAssignDto.getTunnels()) {
+            uniqueTunnels.putIfAbsent(item.getTunnelId(), item);
+        }
 
         Set<Integer> existingTunnelIds = this.list(
                 new QueryWrapper<UserTunnel>()
                         .eq("user_id", batchAssignDto.getUserId())
-                        .in("tunnel_id", requestedTunnelIds)
+                        .in("tunnel_id", uniqueTunnels.keySet())
         ).stream().map(UserTunnel::getTunnelId).collect(Collectors.toSet());
 
         List<UserTunnel> toSave = new ArrayList<>();
         List<Integer> skippedIds = new ArrayList<>();
 
-        for (UserTunnelBatchAssignDto.TunnelAssignItem item : batchAssignDto.getTunnels()) {
+        for (UserTunnelBatchAssignDto.TunnelAssignItem item : uniqueTunnels.values()) {
             if (existingTunnelIds.contains(item.getTunnelId())) {
                 skippedIds.add(item.getTunnelId());
                 continue;
