@@ -30,7 +30,6 @@ import {
   User, 
   UserForm, 
   UserTunnel, 
-  UserTunnelForm, 
   TunnelAssignItem,
   Tunnel, 
   SpeedLimit, 
@@ -42,7 +41,6 @@ import {
   updateUser,
   deleteUser,
   getTunnelList,
-  assignUserTunnel,
   batchAssignUserTunnel,
   getUserTunnelList,
   removeUserTunnel,
@@ -136,14 +134,6 @@ export default function UserPage() {
   const [tunnelListLoading, setTunnelListLoading] = useState(false);  
   
   // 分配新隧道权限相关状态
-  const [tunnelForm, setTunnelForm] = useState<UserTunnelForm>({
-    tunnelId: null,
-    flow: 100,
-    num: 10,
-    expTime: null,
-    flowResetTime: 0,
-    speedId: null
-  });
   const [assignLoading, setAssignLoading] = useState(false);
   const [batchTunnelSelections, setBatchTunnelSelections] = useState<Map<number, number | null>>(new Map());
 
@@ -337,56 +327,9 @@ export default function UserPage() {
   // 隧道权限管理操作
   const handleManageTunnels = (user: User) => {
     setCurrentUser(user);
-    setTunnelForm({
-      tunnelId: null,
-      flow: 100,
-      num: 10,
-      expTime: null,
-      flowResetTime: 0,
-      speedId: null
-    });
     setBatchTunnelSelections(new Map());
     onTunnelModalOpen();
     loadUserTunnels(user.id);
-  };
-
-  const handleAssignTunnel = async () => {
-    if (!tunnelForm.tunnelId || !tunnelForm.expTime || !currentUser) {
-      toast.error('请填写完整信息');
-      return;
-    }
-
-    setAssignLoading(true);
-    try {
-      const response = await assignUserTunnel({
-        userId: currentUser.id,
-        tunnelId: tunnelForm.tunnelId,
-        flow: tunnelForm.flow,
-        num: tunnelForm.num,
-        expTime: tunnelForm.expTime.getTime(),
-        flowResetTime: tunnelForm.flowResetTime,
-        speedId: tunnelForm.speedId
-      });
-
-      if (response.code === 0) {
-        toast.success('分配成功');
-        setTunnelForm({
-          tunnelId: null,
-          flow: 100,
-          num: 10,
-          expTime: null,
-          flowResetTime: 0,
-          speedId: null
-        });
-        loadUserTunnels(currentUser.id);
-      } else {
-        toast.error(response.msg || '分配失败');
-      }
-    } catch (error) {
-      toast.error('分配失败');
-    } finally {
-      setAssignLoading(false);
-    }
   };
 
   const handleBatchAssignTunnel = async () => {
@@ -547,15 +490,6 @@ export default function UserPage() {
       setResetTunnelFlowLoading(false);
     }
   };
-
-  // 过滤数据
-  const availableTunnels = tunnels.filter(
-    tunnel => !userTunnels.some(ut => ut.tunnelId === tunnel.id)
-  );
-
-  const availableSpeedLimits = speedLimits.filter(
-    speedLimit => speedLimit.tunnelId === tunnelForm.tunnelId
-  );
 
   const editAvailableSpeedLimits = speedLimits.filter(
     speedLimit => speedLimit.tunnelId === editTunnelForm?.tunnelId
