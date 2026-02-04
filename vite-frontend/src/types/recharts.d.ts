@@ -1,5 +1,5 @@
-declare module 'recharts' {
-  import * as React from 'react';
+declare module "recharts" {
+  import * as React from "react";
 
   export const LineChart: React.ComponentType<Record<string, unknown>>;
   export const Line: React.ComponentType<Record<string, unknown>>;
@@ -7,5 +7,7 @@ declare module 'recharts' {
   export const YAxis: React.ComponentType<Record<string, unknown>>;
   export const CartesianGrid: React.ComponentType<Record<string, unknown>>;
   export const Tooltip: React.ComponentType<Record<string, unknown>>;
-  export const ResponsiveContainer: React.ComponentType<Record<string, unknown>>;
+  export const ResponsiveContainer: React.ComponentType<
+    Record<string, unknown>
+  >;
 }
