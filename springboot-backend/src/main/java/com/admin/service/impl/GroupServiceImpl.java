@@ -583,7 +583,7 @@ public class GroupServiceImpl implements GroupService {
 
     private Set<Long> buildGroupManagedUserTunnelIds(Set<Long> userTunnelIds) {
         if (userTunnelIds.isEmpty()) {
-            return Collections.emptySet();
+            return new HashSet<>();
         }
 
         return groupPermissionGrantMapper.selectList(new QueryWrapper<GroupPermissionGrant>()
