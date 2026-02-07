@@ -313,7 +313,7 @@ func (h *Handler) controlForwardServices(forward *forwardRecord, commandType str
 	}
 	base := buildForwardServiceBase(forward.ID, forward.UserID, userTunnelID)
 	payload := map[string]interface{}{
-		"services": []string{base, base + "_tcp", base + "_udp"},
+		"services": buildForwardControlServiceNames(base, commandType),
 	}
 	seen := map[int64]struct{}{}
 	for _, fp := range ports {
@@ -850,6 +850,14 @@ func parseTargetAddress(addr string) (string, int, error) {
 
 func buildForwardServiceBase(forwardID, userID, userTunnelID int64) string {
 	return fmt.Sprintf("%d_%d_%d", forwardID, userID, userTunnelID)
+}
+
+func buildForwardControlServiceNames(base, commandType string) []string {
+	names := []string{base + "_tcp", base + "_udp"}
+	if strings.EqualFold(strings.TrimSpace(commandType), "DeleteService") {
+		return append([]string{base}, names...)
+	}
+	return names
 }
 
 func buildForwardServiceConfigs(baseName string, forward *forwardRecord, tunnel *tunnelRecord, node *nodeRecord, port int, limiter *int) []map[string]interface{} {
