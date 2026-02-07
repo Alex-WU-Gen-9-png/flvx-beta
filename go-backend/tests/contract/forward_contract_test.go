@@ -37,6 +37,25 @@ func TestForwardOwnershipAndScopeContracts(t *testing.T) {
 		t.Fatalf("get tunnel id: %v", err)
 	}
 
+	nodeRes, err := repo.DB().Exec(`
+		INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "entry-node", "entry-secret", "10.0.0.10", "10.0.0.10", "", "20000-20010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0)
+	if err != nil {
+		t.Fatalf("insert node: %v", err)
+	}
+	entryNodeID, err := nodeRes.LastInsertId()
+	if err != nil {
+		t.Fatalf("get node id: %v", err)
+	}
+
+	if _, err := repo.DB().Exec(`
+		INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol)
+		VALUES(?, 1, ?, 20001, 'round', 1, 'tls')
+	`, tunnelID, entryNodeID); err != nil {
+		t.Fatalf("insert chain_tunnel: %v", err)
+	}
+
 	resAdmin, err := repo.DB().Exec(`
 		INSERT INTO forward(user_id, user_name, name, tunnel_id, remote_addr, strategy, in_flow, out_flow, created_time, updated_time, status, inx)
 		VALUES(?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 1, ?)
@@ -64,6 +83,10 @@ func TestForwardOwnershipAndScopeContracts(t *testing.T) {
 	userToken, err := auth.GenerateToken(2, "normal_user", 1, secret)
 	if err != nil {
 		t.Fatalf("generate user token: %v", err)
+	}
+	adminToken, err := auth.GenerateToken(1, "admin_user", 0, secret)
+	if err != nil {
+		t.Fatalf("generate admin token: %v", err)
 	}
 
 	t.Run("non-owner cannot delete another user's forward", func(t *testing.T) {
@@ -106,7 +129,7 @@ func TestForwardOwnershipAndScopeContracts(t *testing.T) {
 		}
 	})
 
-	t.Run("diagnose no longer returns hardcoded success", func(t *testing.T) {
+	t.Run("forward diagnose returns structured payload", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/forward/diagnose", bytes.NewBufferString(`{"forwardId":`+jsonNumber(userForwardID)+`}`))
 		req.Header.Set("Authorization", userToken)
 		res := httptest.NewRecorder()
@@ -117,8 +140,59 @@ func TestForwardOwnershipAndScopeContracts(t *testing.T) {
 		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
 			t.Fatalf("decode response: %v", err)
 		}
-		if out.Code == 0 {
-			t.Fatalf("expected non-zero code for missing runtime path, got success")
+		if out.Code != 0 {
+			t.Fatalf("expected code 0, got %d (%s)", out.Code, out.Msg)
+		}
+
+		payload, ok := out.Data.(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected object payload, got %T", out.Data)
+		}
+		results, ok := payload["results"].([]interface{})
+		if !ok || len(results) == 0 {
+			t.Fatalf("expected non-empty results, got %v", payload["results"])
+		}
+		first, ok := results[0].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected result object, got %T", results[0])
+		}
+		if _, ok := first["message"]; !ok {
+			t.Fatalf("expected message field in diagnosis result")
+		}
+		if got := int(first["fromChainType"].(float64)); got != 1 {
+			t.Fatalf("expected fromChainType=1, got %d", got)
+		}
+	})
+
+	t.Run("tunnel diagnose returns structured payload", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tunnel/diagnose", bytes.NewBufferString(`{"tunnelId":`+jsonNumber(tunnelID)+`}`))
+		req.Header.Set("Authorization", adminToken)
+		res := httptest.NewRecorder()
+
+		router.ServeHTTP(res, req)
+
+		var out response.R
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if out.Code != 0 {
+			t.Fatalf("expected code 0, got %d (%s)", out.Code, out.Msg)
+		}
+
+		payload, ok := out.Data.(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected object payload, got %T", out.Data)
+		}
+		results, ok := payload["results"].([]interface{})
+		if !ok || len(results) == 0 {
+			t.Fatalf("expected non-empty results, got %v", payload["results"])
+		}
+		first, ok := results[0].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected result object, got %T", results[0])
+		}
+		if _, ok := first["message"]; !ok {
+			t.Fatalf("expected message field in tunnel diagnosis result")
 		}
 	})
 }

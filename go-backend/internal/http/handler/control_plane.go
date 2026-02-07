@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +44,7 @@ type nodeRecord struct {
 	ID            int64
 	Name          string
 	ServerIP      string
+	PortRange     string
 	TCPListenAddr string
 	UDPListenAddr string
 	InterfaceName string
@@ -52,7 +54,14 @@ type chainNodeRecord struct {
 	ChainType int
 	Inx       int64
 	NodeID    int64
+	Port      int
 	NodeName  string
+}
+
+type diagnosisTarget struct {
+	Address string
+	IP      string
+	Port    int
 }
 
 func (h *Handler) resolveForwardAccess(r *http.Request, forwardID int64) (*forwardRecord, int64, int, error) {
@@ -183,22 +192,24 @@ func (h *Handler) listForwardPorts(forwardID int64) ([]forwardPortRecord, error)
 
 func (h *Handler) getNodeRecord(nodeID int64) (*nodeRecord, error) {
 	row := h.repo.DB().QueryRow(`
-		SELECT id, name, server_ip, tcp_listen_addr, udp_listen_addr, interface_name
+		SELECT id, name, server_ip, port, tcp_listen_addr, udp_listen_addr, interface_name
 		FROM node
 		WHERE id = ?
 		LIMIT 1
 	`, nodeID)
 	var n nodeRecord
+	var portRange sql.NullString
 	var tcpListen sql.NullString
 	var udpListen sql.NullString
 	var iface sql.NullString
-	err := row.Scan(&n.ID, &n.Name, &n.ServerIP, &tcpListen, &udpListen, &iface)
+	err := row.Scan(&n.ID, &n.Name, &n.ServerIP, &portRange, &tcpListen, &udpListen, &iface)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, errors.New("节点不存在")
 		}
 		return nil, err
 	}
+	n.PortRange = strings.TrimSpace(portRange.String)
 	n.TCPListenAddr = strings.TrimSpace(tcpListen.String)
 	n.UDPListenAddr = strings.TrimSpace(udpListen.String)
 	n.InterfaceName = strings.TrimSpace(iface.String)
@@ -343,68 +354,102 @@ func (h *Handler) diagnoseForwardRuntime(forward *forwardRecord) (map[string]int
 	if forward == nil {
 		return nil, errForwardNotFound
 	}
-	targets := splitRemoteTargets(forward.RemoteAddr)
-	if len(targets) == 0 {
-		return nil, errors.New("目标地址不能为空")
-	}
-	ip, port, err := parseTargetAddress(targets[0])
-	if err != nil {
-		return nil, errors.New("目标地址格式错误")
-	}
-
-	ports, err := h.listForwardPorts(forward.ID)
+	targets, err := resolveDiagnosisTargets(forward.RemoteAddr)
 	if err != nil {
 		return nil, err
 	}
-	if len(ports) == 0 {
-		return nil, errors.New("转发入口端口不存在")
+
+	tunnel, err := h.getTunnelRecord(forward.TunnelID)
+	if err != nil {
+		return nil, err
 	}
 
-	results := make([]map[string]interface{}, 0, len(ports))
-	seen := map[int64]struct{}{}
-	for _, fp := range ports {
-		if _, ok := seen[fp.NodeID]; ok {
-			continue
-		}
-		seen[fp.NodeID] = struct{}{}
-		node, nodeErr := h.getNodeRecord(fp.NodeID)
-		nodeName := fmt.Sprintf("node_%d", fp.NodeID)
-		if nodeErr == nil {
-			nodeName = node.Name
-		}
+	chainRows, err := h.listChainNodesForTunnel(forward.TunnelID)
+	if err != nil {
+		return nil, err
+	}
+	if len(chainRows) == 0 {
+		return nil, errors.New("隧道配置不完整")
+	}
 
-		resultItem := map[string]interface{}{
-			"nodeName":    nodeName,
-			"nodeId":      strconv.FormatInt(fp.NodeID, 10),
-			"targetIp":    ip,
-			"targetPort":  port,
-			"averageTime": 0,
-			"packetLoss":  100,
-		}
+	inNodes, chainHops, outNodes := splitChainNodeGroups(chainRows)
+	results := make([]map[string]interface{}, 0, len(chainRows)*2+len(targets))
+	nodeCache := map[int64]*nodeRecord{}
 
-		if nodeErr != nil {
-			resultItem["success"] = false
-			resultItem["description"] = "节点信息读取失败"
-			resultItem["errorMessage"] = nodeErr.Error()
-			results = append(results, resultItem)
-			continue
-		}
-
-		pingData, pingErr := h.tcpPingViaNode(fp.NodeID, ip, port)
-		if pingErr != nil {
-			resultItem["success"] = false
-			resultItem["description"] = "诊断失败"
-			resultItem["errorMessage"] = pingErr.Error()
-		} else {
-			resultItem["success"] = asBool(pingData["success"], false)
-			resultItem["description"] = "诊断完成"
-			resultItem["averageTime"] = asFloat(pingData["averageTime"], 0)
-			resultItem["packetLoss"] = asFloat(pingData["packetLoss"], 100)
-			if msg := asString(pingData["errorMessage"]); msg != "" {
-				resultItem["errorMessage"] = msg
+	switch tunnel.Type {
+	case 1:
+		for _, inNode := range inNodes {
+			for _, target := range targets {
+				description := fmt.Sprintf("入口(%s)->目标(%s)", inNode.NodeName, target.Address)
+				h.appendPathDiagnosis(&results, nodeCache, inNode.NodeID, target.IP, target.Port, description, map[string]interface{}{
+					"fromChainType": 1,
+				})
 			}
 		}
-		results = append(results, resultItem)
+	case 2:
+		for _, inNode := range inNodes {
+			if len(chainHops) > 0 {
+				for _, firstNode := range chainHops[0] {
+					description := fmt.Sprintf("入口(%s)->第1跳(%s)", inNode.NodeName, firstNode.NodeName)
+					h.appendChainHopDiagnosis(&results, nodeCache, inNode.NodeID, firstNode, description, map[string]interface{}{
+						"fromChainType": 1,
+						"toChainType":   2,
+						"toInx":         firstNode.Inx,
+					})
+				}
+			} else {
+				for _, outNode := range outNodes {
+					description := fmt.Sprintf("入口(%s)->出口(%s)", inNode.NodeName, outNode.NodeName)
+					h.appendChainHopDiagnosis(&results, nodeCache, inNode.NodeID, outNode, description, map[string]interface{}{
+						"fromChainType": 1,
+						"toChainType":   3,
+					})
+				}
+			}
+		}
+
+		for i, hop := range chainHops {
+			for _, currentNode := range hop {
+				if i+1 < len(chainHops) {
+					for _, nextNode := range chainHops[i+1] {
+						description := fmt.Sprintf("第%d跳(%s)->第%d跳(%s)", i+1, currentNode.NodeName, i+2, nextNode.NodeName)
+						h.appendChainHopDiagnosis(&results, nodeCache, currentNode.NodeID, nextNode, description, map[string]interface{}{
+							"fromChainType": 2,
+							"fromInx":       currentNode.Inx,
+							"toChainType":   2,
+							"toInx":         nextNode.Inx,
+						})
+					}
+				} else {
+					for _, outNode := range outNodes {
+						description := fmt.Sprintf("第%d跳(%s)->出口(%s)", i+1, currentNode.NodeName, outNode.NodeName)
+						h.appendChainHopDiagnosis(&results, nodeCache, currentNode.NodeID, outNode, description, map[string]interface{}{
+							"fromChainType": 2,
+							"fromInx":       currentNode.Inx,
+							"toChainType":   3,
+						})
+					}
+				}
+			}
+		}
+
+		for _, outNode := range outNodes {
+			for _, target := range targets {
+				description := fmt.Sprintf("出口(%s)->目标(%s)", outNode.NodeName, target.Address)
+				h.appendPathDiagnosis(&results, nodeCache, outNode.NodeID, target.IP, target.Port, description, map[string]interface{}{
+					"fromChainType": 3,
+				})
+			}
+		}
+	default:
+		for _, inNode := range inNodes {
+			for _, target := range targets {
+				description := fmt.Sprintf("入口(%s)->目标(%s)", inNode.NodeName, target.Address)
+				h.appendPathDiagnosis(&results, nodeCache, inNode.NodeID, target.IP, target.Port, description, map[string]interface{}{
+					"fromChainType": 1,
+				})
+			}
+		}
 	}
 
 	payload := map[string]interface{}{
@@ -437,53 +482,78 @@ func (h *Handler) diagnoseTunnelRuntime(tunnelID int64) (map[string]interface{},
 		return nil, errors.New("隧道配置不完整")
 	}
 
-	results := make([]map[string]interface{}, 0, len(chainRows))
-	seen := map[int64]struct{}{}
-	for _, row := range chainRows {
-		if _, ok := seen[row.NodeID]; ok {
-			continue
-		}
-		seen[row.NodeID] = struct{}{}
+	inNodes, chainHops, outNodes := splitChainNodeGroups(chainRows)
+	results := make([]map[string]interface{}, 0, len(chainRows)*2)
+	nodeCache := map[int64]*nodeRecord{}
 
-		desc := fmt.Sprintf("节点(%s)->外网", row.NodeName)
-		switch row.ChainType {
-		case 1:
-			desc = fmt.Sprintf("入口(%s)->外网", row.NodeName)
-		case 2:
-			desc = fmt.Sprintf("中继(%s)->外网", row.NodeName)
-		case 3:
-			desc = fmt.Sprintf("出口(%s)->外网", row.NodeName)
+	switch tunnel.Type {
+	case 1:
+		for _, inNode := range inNodes {
+			description := fmt.Sprintf("入口(%s)->外网", inNode.NodeName)
+			h.appendPathDiagnosis(&results, nodeCache, inNode.NodeID, "www.google.com", 443, description, map[string]interface{}{
+				"fromChainType": 1,
+			})
 		}
-
-		resultItem := map[string]interface{}{
-			"nodeName":      row.NodeName,
-			"nodeId":        strconv.FormatInt(row.NodeID, 10),
-			"targetIp":      "www.google.com",
-			"targetPort":    443,
-			"averageTime":   0,
-			"packetLoss":    100,
-			"fromChainType": row.ChainType,
-			"description":   desc,
-		}
-		if row.ChainType == 2 {
-			resultItem["fromInx"] = row.Inx
-		}
-
-		pingData, pingErr := h.tcpPingViaNode(row.NodeID, "www.google.com", 443)
-		if pingErr != nil {
-			resultItem["success"] = false
-			resultItem["description"] = desc + " 连通性检查失败"
-			resultItem["errorMessage"] = pingErr.Error()
-		} else {
-			resultItem["success"] = asBool(pingData["success"], false)
-			resultItem["description"] = desc + " 连通性检查完成"
-			resultItem["averageTime"] = asFloat(pingData["averageTime"], 0)
-			resultItem["packetLoss"] = asFloat(pingData["packetLoss"], 100)
-			if msg := asString(pingData["errorMessage"]); msg != "" {
-				resultItem["errorMessage"] = msg
+	case 2:
+		for _, inNode := range inNodes {
+			if len(chainHops) > 0 {
+				for _, firstNode := range chainHops[0] {
+					description := fmt.Sprintf("入口(%s)->第1跳(%s)", inNode.NodeName, firstNode.NodeName)
+					h.appendChainHopDiagnosis(&results, nodeCache, inNode.NodeID, firstNode, description, map[string]interface{}{
+						"fromChainType": 1,
+						"toChainType":   2,
+						"toInx":         firstNode.Inx,
+					})
+				}
+			} else {
+				for _, outNode := range outNodes {
+					description := fmt.Sprintf("入口(%s)->出口(%s)", inNode.NodeName, outNode.NodeName)
+					h.appendChainHopDiagnosis(&results, nodeCache, inNode.NodeID, outNode, description, map[string]interface{}{
+						"fromChainType": 1,
+						"toChainType":   3,
+					})
+				}
 			}
 		}
-		results = append(results, resultItem)
+
+		for i, hop := range chainHops {
+			for _, currentNode := range hop {
+				if i+1 < len(chainHops) {
+					for _, nextNode := range chainHops[i+1] {
+						description := fmt.Sprintf("第%d跳(%s)->第%d跳(%s)", i+1, currentNode.NodeName, i+2, nextNode.NodeName)
+						h.appendChainHopDiagnosis(&results, nodeCache, currentNode.NodeID, nextNode, description, map[string]interface{}{
+							"fromChainType": 2,
+							"fromInx":       currentNode.Inx,
+							"toChainType":   2,
+							"toInx":         nextNode.Inx,
+						})
+					}
+				} else {
+					for _, outNode := range outNodes {
+						description := fmt.Sprintf("第%d跳(%s)->出口(%s)", i+1, currentNode.NodeName, outNode.NodeName)
+						h.appendChainHopDiagnosis(&results, nodeCache, currentNode.NodeID, outNode, description, map[string]interface{}{
+							"fromChainType": 2,
+							"fromInx":       currentNode.Inx,
+							"toChainType":   3,
+						})
+					}
+				}
+			}
+		}
+
+		for _, outNode := range outNodes {
+			description := fmt.Sprintf("出口(%s)->外网", outNode.NodeName)
+			h.appendPathDiagnosis(&results, nodeCache, outNode.NodeID, "www.google.com", 443, description, map[string]interface{}{
+				"fromChainType": 3,
+			})
+		}
+	default:
+		for _, inNode := range inNodes {
+			description := fmt.Sprintf("入口(%s)->外网", inNode.NodeName)
+			h.appendPathDiagnosis(&results, nodeCache, inNode.NodeID, "www.google.com", 443, description, map[string]interface{}{
+				"fromChainType": 1,
+			})
+		}
 	}
 
 	payload := map[string]interface{}{
@@ -495,9 +565,198 @@ func (h *Handler) diagnoseTunnelRuntime(tunnelID int64) (map[string]interface{},
 	return payload, nil
 }
 
+func splitChainNodeGroups(rows []chainNodeRecord) ([]chainNodeRecord, [][]chainNodeRecord, []chainNodeRecord) {
+	inNodes := make([]chainNodeRecord, 0)
+	outNodes := make([]chainNodeRecord, 0)
+	chainByInx := map[int64][]chainNodeRecord{}
+	hopOrder := make([]int64, 0)
+
+	for _, row := range rows {
+		switch row.ChainType {
+		case 1:
+			inNodes = append(inNodes, row)
+		case 2:
+			if _, ok := chainByInx[row.Inx]; !ok {
+				hopOrder = append(hopOrder, row.Inx)
+			}
+			chainByInx[row.Inx] = append(chainByInx[row.Inx], row)
+		case 3:
+			outNodes = append(outNodes, row)
+		}
+	}
+
+	sort.Slice(hopOrder, func(i, j int) bool { return hopOrder[i] < hopOrder[j] })
+	chainHops := make([][]chainNodeRecord, 0, len(hopOrder))
+	for _, inx := range hopOrder {
+		chainHops = append(chainHops, chainByInx[inx])
+	}
+
+	return inNodes, chainHops, outNodes
+}
+
+func resolveDiagnosisTargets(remoteAddr string) ([]diagnosisTarget, error) {
+	rawTargets := splitRemoteTargets(remoteAddr)
+	if len(rawTargets) == 0 {
+		return nil, errors.New("目标地址不能为空")
+	}
+
+	targets := make([]diagnosisTarget, 0, len(rawTargets))
+	for _, raw := range rawTargets {
+		ip, port, err := parseTargetAddress(raw)
+		if err != nil {
+			continue
+		}
+		targets = append(targets, diagnosisTarget{Address: raw, IP: ip, Port: port})
+	}
+	if len(targets) == 0 {
+		return nil, errors.New("目标地址格式错误")
+	}
+	return targets, nil
+}
+
+func (h *Handler) cachedNode(nodeCache map[int64]*nodeRecord, nodeID int64) (*nodeRecord, error) {
+	if node, ok := nodeCache[nodeID]; ok {
+		return node, nil
+	}
+	node, err := h.getNodeRecord(nodeID)
+	if err != nil {
+		return nil, err
+	}
+	nodeCache[nodeID] = node
+	return node, nil
+}
+
+func newDiagnosisResultItem(fromNodeID int64, targetIP string, targetPort int, description string, metadata map[string]interface{}) map[string]interface{} {
+	item := map[string]interface{}{
+		"nodeName":    fmt.Sprintf("node_%d", fromNodeID),
+		"nodeId":      strconv.FormatInt(fromNodeID, 10),
+		"targetIp":    targetIP,
+		"targetPort":  targetPort,
+		"description": description,
+		"averageTime": 0,
+		"packetLoss":  100,
+	}
+	for k, v := range metadata {
+		item[k] = v
+	}
+	return item
+}
+
+func (h *Handler) appendFailedDiagnosis(results *[]map[string]interface{}, nodeCache map[int64]*nodeRecord, fromNodeID int64, targetIP string, targetPort int, description string, metadata map[string]interface{}, message string) {
+	item := newDiagnosisResultItem(fromNodeID, targetIP, targetPort, description, metadata)
+	if node, err := h.cachedNode(nodeCache, fromNodeID); err == nil {
+		item["nodeName"] = node.Name
+	}
+	if strings.TrimSpace(message) == "" {
+		message = "TCP连接失败"
+	}
+	item["success"] = false
+	item["message"] = message
+	*results = append(*results, item)
+}
+
+func (h *Handler) appendPathDiagnosis(results *[]map[string]interface{}, nodeCache map[int64]*nodeRecord, fromNodeID int64, targetIP string, targetPort int, description string, metadata map[string]interface{}) {
+	item := newDiagnosisResultItem(fromNodeID, targetIP, targetPort, description, metadata)
+
+	fromNode, err := h.cachedNode(nodeCache, fromNodeID)
+	if err != nil {
+		item["success"] = false
+		item["message"] = err.Error()
+		*results = append(*results, item)
+		return
+	}
+	item["nodeName"] = fromNode.Name
+
+	pingData, pingErr := h.tcpPingViaNode(fromNodeID, targetIP, targetPort)
+	if pingErr != nil {
+		item["success"] = false
+		item["message"] = pingErr.Error()
+		*results = append(*results, item)
+		return
+	}
+
+	success := asBool(pingData["success"], false)
+	item["success"] = success
+	item["averageTime"] = asFloat(pingData["averageTime"], 0)
+	item["packetLoss"] = asFloat(pingData["packetLoss"], 100)
+
+	message := strings.TrimSpace(asString(pingData["message"]))
+	if success {
+		if message == "" {
+			message = "TCP连接成功"
+		}
+	} else {
+		if message == "" {
+			message = strings.TrimSpace(asString(pingData["errorMessage"]))
+		}
+		if message == "" {
+			message = "TCP连接失败"
+		}
+	}
+	item["message"] = message
+	*results = append(*results, item)
+}
+
+func (h *Handler) appendChainHopDiagnosis(results *[]map[string]interface{}, nodeCache map[int64]*nodeRecord, fromNodeID int64, toNode chainNodeRecord, description string, metadata map[string]interface{}) {
+	targetNode, err := h.cachedNode(nodeCache, toNode.NodeID)
+	if err != nil {
+		h.appendFailedDiagnosis(results, nodeCache, fromNodeID, "", 0, description, metadata, err.Error())
+		return
+	}
+	targetIP, targetPort, err := resolveChainProbeTarget(targetNode, toNode.Port)
+	if err != nil {
+		h.appendFailedDiagnosis(results, nodeCache, fromNodeID, strings.Trim(strings.TrimSpace(targetNode.ServerIP), "[]"), toNode.Port, description, metadata, err.Error())
+		return
+	}
+	h.appendPathDiagnosis(results, nodeCache, fromNodeID, targetIP, targetPort, description, metadata)
+}
+
+func resolveChainProbeTarget(targetNode *nodeRecord, preferredPort int) (string, int, error) {
+	if targetNode == nil {
+		return "", 0, errors.New("目标节点不存在")
+	}
+	host := strings.Trim(strings.TrimSpace(targetNode.ServerIP), "[]")
+	if host == "" {
+		return "", 0, errors.New("目标节点地址为空")
+	}
+	port := preferredPort
+	if port <= 0 {
+		port = firstPortFromRange(targetNode.PortRange)
+	}
+	if port <= 0 {
+		port = 443
+	}
+	return host, port, nil
+}
+
+func firstPortFromRange(portRange string) int {
+	portRange = strings.TrimSpace(portRange)
+	if portRange == "" {
+		return 0
+	}
+	first := strings.Split(portRange, ",")[0]
+	first = strings.TrimSpace(first)
+	if strings.Contains(first, "-") {
+		parts := strings.SplitN(first, "-", 2)
+		if len(parts) != 2 {
+			return 0
+		}
+		p, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+		if err != nil || p <= 0 {
+			return 0
+		}
+		return p
+	}
+	p, err := strconv.Atoi(first)
+	if err != nil || p <= 0 {
+		return 0
+	}
+	return p
+}
+
 func (h *Handler) listChainNodesForTunnel(tunnelID int64) ([]chainNodeRecord, error) {
 	rows, err := h.repo.DB().Query(`
-		SELECT ct.chain_type, COALESCE(ct.inx, 0), ct.node_id, n.name
+		SELECT ct.chain_type, COALESCE(ct.inx, 0), ct.node_id, COALESCE(ct.port, 0), n.name
 		FROM chain_tunnel ct
 		LEFT JOIN node n ON n.id = ct.node_id
 		WHERE ct.tunnel_id = ?
@@ -512,7 +771,7 @@ func (h *Handler) listChainNodesForTunnel(tunnelID int64) ([]chainNodeRecord, er
 	for rows.Next() {
 		var item chainNodeRecord
 		var name sql.NullString
-		if err := rows.Scan(&item.ChainType, &item.Inx, &item.NodeID, &name); err != nil {
+		if err := rows.Scan(&item.ChainType, &item.Inx, &item.NodeID, &item.Port, &name); err != nil {
 			return nil, err
 		}
 		if strings.TrimSpace(name.String) == "" {

@@ -443,13 +443,18 @@ func (h *Handler) userTunnelVisibleList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	userID, err := userIDFromRequest(r)
+	userID, roleID, err := userRoleFromRequest(r)
 	if err != nil {
 		response.WriteJSON(w, response.Err(401, "无效的token或token已过期"))
 		return
 	}
 
-	items, err := h.repo.ListUserAccessibleTunnels(userID)
+	items := make([]map[string]interface{}, 0)
+	if roleID == 0 {
+		items, err = h.repo.ListEnabledTunnelSummaries()
+	} else {
+		items, err = h.repo.ListUserAccessibleTunnels(userID)
+	}
 	if err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return

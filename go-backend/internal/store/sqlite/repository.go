@@ -656,12 +656,44 @@ func (r *Repository) ListUserAccessibleTunnels(userID int64) ([]map[string]inter
 	}
 
 	rows, err := r.db.Query(`
-		SELECT t.id, t.name
+		SELECT DISTINCT t.id, t.name
 		FROM user_tunnel ut
 		JOIN tunnel t ON t.id = ut.tunnel_id
-		WHERE ut.user_id = ? AND ut.status = 1
+		WHERE ut.user_id = ? AND t.status = 1
 		ORDER BY t.inx ASC, t.id ASC
 	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		var id int64
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		items = append(items, map[string]interface{}{"id": id, "name": name})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (r *Repository) ListEnabledTunnelSummaries() ([]map[string]interface{}, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("repository not initialized")
+	}
+
+	rows, err := r.db.Query(`
+		SELECT id, name
+		FROM tunnel
+		WHERE status = 1
+		ORDER BY inx ASC, id ASC
+	`)
 	if err != nil {
 		return nil, err
 	}
