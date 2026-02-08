@@ -212,8 +212,8 @@ jobs:
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --push \
-            -t ${{ env.REGISTRY }}/${OWNER}/go-backend:latest \
-            -t ${{ env.REGISTRY }}/${OWNER}/go-backend:${VERSION} \
+            -t ${{ env.REGISTRY }}/${OWNER}/flux-panel-backend:latest \
+            -t ${{ env.REGISTRY }}/${OWNER}/flux-panel-backend:${VERSION} \
             ./go-backend
 
   create-release:
@@ -253,9 +253,9 @@ jobs:
           cp docker-compose-v6.yml ./artifacts/docker-compose-v6.yml
 
           # 替换镜像地址为 GHCR
-          sed -i "s|image: .*go-backend:[^[:space:]]*|image: ${{ env.REGISTRY }}/${OWNER}/go-backend:${VERSION}|g" ./artifacts/docker-compose-v4.yml
+          sed -i "s|image: .*flux-panel-backend:[^[:space:]]*|image: ${{ env.REGISTRY }}/${OWNER}/flux-panel-backend:${VERSION}|g" ./artifacts/docker-compose-v4.yml
           sed -i "s|image: .*vite-frontend:[^[:space:]]*|image: ${{ env.REGISTRY }}/${OWNER}/vite-frontend:${VERSION}|g" ./artifacts/docker-compose-v4.yml
-          sed -i "s|image: .*go-backend:[^[:space:]]*|image: ${{ env.REGISTRY }}/${OWNER}/go-backend:${VERSION}|g" ./artifacts/docker-compose-v6.yml
+          sed -i "s|image: .*flux-panel-backend:[^[:space:]]*|image: ${{ env.REGISTRY }}/${OWNER}/flux-panel-backend:${VERSION}|g" ./artifacts/docker-compose-v6.yml
           sed -i "s|image: .*vite-frontend:[^[:space:]]*|image: ${{ env.REGISTRY }}/${OWNER}/vite-frontend:${VERSION}|g" ./artifacts/docker-compose-v6.yml
 
           # 复制并修改安装脚本
@@ -295,7 +295,7 @@ jobs:
 
           \`\`\`bash
           # Backend
-          docker pull ${{ env.REGISTRY }}/${OWNER}/go-backend:${VERSION}
+          docker pull ${{ env.REGISTRY }}/${OWNER}/flux-panel-backend:${VERSION}
 
           # Frontend
           docker pull ${{ env.REGISTRY }}/${OWNER}/vite-frontend:${VERSION}
