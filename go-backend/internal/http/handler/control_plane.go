@@ -283,6 +283,32 @@ func (h *Handler) listUserTunnelIDs(userID, tunnelID int64) ([]int64, error) {
 	return out, nil
 }
 
+func (h *Handler) listUserTunnelIDsByUser(userID int64) ([]int64, error) {
+	rows, err := h.repo.DB().Query(`
+		SELECT id
+		FROM user_tunnel
+		WHERE user_id = ?
+		ORDER BY id ASC
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (h *Handler) syncForwardServices(forward *forwardRecord, method string, allowFallbackAdd bool) error {
 	if h == nil || forward == nil {
 		return errors.New("invalid forward sync context")
@@ -342,7 +368,14 @@ func (h *Handler) controlForwardServices(forward *forwardRecord, commandType str
 	if err != nil {
 		return err
 	}
-	bases := buildForwardServiceBaseCandidates(forward.ID, forward.UserID, userTunnelID, userTunnelIDs)
+	allUserTunnelIDs, err := h.listUserTunnelIDsByUser(forward.UserID)
+	if err != nil {
+		return err
+	}
+	candidateTunnelIDs := make([]int64, 0, len(userTunnelIDs)+len(allUserTunnelIDs))
+	candidateTunnelIDs = append(candidateTunnelIDs, userTunnelIDs...)
+	candidateTunnelIDs = append(candidateTunnelIDs, allUserTunnelIDs...)
+	bases := buildForwardServiceBaseCandidates(forward.ID, forward.UserID, userTunnelID, candidateTunnelIDs)
 	seen := map[int64]struct{}{}
 	for _, fp := range ports {
 		if _, ok := seen[fp.NodeID]; ok {

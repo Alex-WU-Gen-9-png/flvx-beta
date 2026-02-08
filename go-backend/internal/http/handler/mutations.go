@@ -948,6 +948,11 @@ func (h *Handler) forwardUpdate(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
+	oldPorts, err := h.listForwardPorts(id)
+	if err != nil {
+		response.WriteJSON(w, response.Err(-2, err.Error()))
+		return
+	}
 
 	tunnelID := asInt64(req["tunnelId"], forward.TunnelID)
 	if tunnelID <= 0 {
@@ -1000,13 +1005,19 @@ func (h *Handler) forwardUpdate(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	_ = h.replaceForwardPorts(id, tunnelID, port)
+	if err := h.replaceForwardPorts(id, tunnelID, port); err != nil {
+		h.rollbackForwardMutation(forward, oldPorts)
+		response.WriteJSON(w, response.Err(-2, err.Error()))
+		return
+	}
 	updatedForward, err := h.getForwardRecord(id)
 	if err != nil {
+		h.rollbackForwardMutation(forward, oldPorts)
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
 	if err := h.syncForwardServices(updatedForward, "UpdateService", true); err != nil {
+		h.rollbackForwardMutation(forward, oldPorts)
 		response.WriteJSON(w, response.ErrDefault(err.Error()))
 		return
 	}
@@ -1291,6 +1302,11 @@ func (h *Handler) forwardBatchChangeTunnel(w http.ResponseWriter, r *http.Reques
 			fail++
 			continue
 		}
+		oldPorts, listPortsErr := h.listForwardPorts(id)
+		if listPortsErr != nil {
+			fail++
+			continue
+		}
 		var port sql.NullInt64
 		_ = h.repo.DB().QueryRow(`SELECT MIN(port) FROM forward_port WHERE forward_id = ?`, id).Scan(&port)
 		_, err := h.repo.DB().Exec(`UPDATE forward SET tunnel_id = ?, updated_time = ? WHERE id = ?`, req.TargetTunnelID, time.Now().UnixMilli(), id)
@@ -1305,13 +1321,19 @@ func (h *Handler) forwardBatchChangeTunnel(w http.ResponseWriter, r *http.Reques
 		if p <= 0 {
 			p = h.pickTunnelPort(req.TargetTunnelID)
 		}
-		_ = h.replaceForwardPorts(id, req.TargetTunnelID, p)
+		if err := h.replaceForwardPorts(id, req.TargetTunnelID, p); err != nil {
+			h.rollbackForwardMutation(forward, oldPorts)
+			fail++
+			continue
+		}
 		updatedForward, fetchErr := h.getForwardRecord(id)
 		if fetchErr != nil {
+			h.rollbackForwardMutation(forward, oldPorts)
 			fail++
 			continue
 		}
 		if err := h.syncForwardServices(updatedForward, "UpdateService", true); err != nil {
+			h.rollbackForwardMutation(forward, oldPorts)
 			fail++
 			continue
 		}
@@ -2407,12 +2429,56 @@ func (h *Handler) replaceForwardPorts(forwardID, tunnelID int64, port int) error
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	_, _ = tx.Exec(`DELETE FROM forward_port WHERE forward_id = ?`, forwardID)
-	entryNodes, _ := h.tunnelEntryNodeIDs(tunnelID)
+	if _, err := tx.Exec(`DELETE FROM forward_port WHERE forward_id = ?`, forwardID); err != nil {
+		return err
+	}
+	entryNodes, err := h.tunnelEntryNodeIDs(tunnelID)
+	if err != nil {
+		return err
+	}
 	for _, nodeID := range entryNodes {
-		_, _ = tx.Exec(`INSERT INTO forward_port(forward_id, node_id, port) VALUES(?, ?, ?)`, forwardID, nodeID, port)
+		if _, err := tx.Exec(`INSERT INTO forward_port(forward_id, node_id, port) VALUES(?, ?, ?)`, forwardID, nodeID, port); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
+}
+
+func (h *Handler) replaceForwardPortsWithRecords(forwardID int64, ports []forwardPortRecord) error {
+	tx, err := h.repo.DB().Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec(`DELETE FROM forward_port WHERE forward_id = ?`, forwardID); err != nil {
+		return err
+	}
+	for _, fp := range ports {
+		if _, err := tx.Exec(`INSERT INTO forward_port(forward_id, node_id, port) VALUES(?, ?, ?)`, forwardID, fp.NodeID, fp.Port); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (h *Handler) rollbackForwardMutation(oldForward *forwardRecord, oldPorts []forwardPortRecord) {
+	if h == nil || oldForward == nil || h.repo == nil || h.repo.DB() == nil {
+		return
+	}
+
+	_, _ = h.repo.DB().Exec(`
+		UPDATE forward
+		SET user_id = ?, user_name = ?, name = ?, tunnel_id = ?, remote_addr = ?, strategy = ?, status = ?, updated_time = ?
+		WHERE id = ?
+	`, oldForward.UserID, oldForward.UserName, oldForward.Name, oldForward.TunnelID, oldForward.RemoteAddr, oldForward.Strategy, oldForward.Status, time.Now().UnixMilli(), oldForward.ID)
+
+	if err := h.replaceForwardPortsWithRecords(oldForward.ID, oldPorts); err != nil {
+		return
+	}
+
+	_ = h.syncForwardServices(oldForward, "UpdateService", true)
 }
 
 func (h *Handler) upsertUserTunnel(req map[string]interface{}) error {
