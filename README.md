@@ -2,9 +2,13 @@
 
 > 📞 **联系我们**: [Telegram群组](https://t.me/flvxpanel)
 
-## Project Modifications
+## Original Project
+- **Name**: flux-panel
+- **Source**: https://github.com/bqlpfy/flux-panel
+- **License**: Apache License 2.0
 
-We have made significant changes:
+## Modifications
+The following major changes and additions have been made in this fork (FLVX):
 
 ### 1. Backend Architecture (Replaced)
 - **Removed**: The original `springboot-backend/` (Java/Spring Boot) has been entirely removed.
