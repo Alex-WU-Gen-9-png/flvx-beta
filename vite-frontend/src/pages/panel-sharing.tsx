@@ -36,6 +36,7 @@ interface PeerShare {
   portRangeEnd: number;
   isActive: number;
   allowedDomains?: string;
+  allowedIps?: string;
 }
 
 export default function PanelSharingPage() {
@@ -57,6 +58,7 @@ export default function PanelSharingPage() {
     portRangeStart: 10000,
     portRangeEnd: 20000,
     allowedDomains: "",
+    allowedIps: "",
   });
 
   const [importForm, setImportForm] = useState({
@@ -129,6 +131,7 @@ export default function PanelSharingPage() {
         portRangeStart: shareForm.portRangeStart,
         portRangeEnd: shareForm.portRangeEnd,
         allowedDomains: shareForm.allowedDomains,
+        allowedIps: shareForm.allowedIps,
       });
       if (res.code === 0) {
         toast.success("创建成功");
@@ -224,6 +227,7 @@ export default function PanelSharingPage() {
                       <CardBody className="text-sm space-y-2">
                         <p>端口范围: {share.portRangeStart} - {share.portRangeEnd}</p>
                         {share.allowedDomains && <p>允许域名: {share.allowedDomains}</p>}
+                        {share.allowedIps && <p>允许API IP: {share.allowedIps}</p>}
                         <p>过期时间: {share.expiryTime === 0 ? "永久" : new Date(share.expiryTime).toLocaleDateString()}</p>
                         <div className="flex gap-2">
                           <Input readOnly size="sm" value={share.token} />
@@ -304,6 +308,13 @@ export default function PanelSharingPage() {
               description="限制使用此Token的来源面板域名，多个域名用逗号分隔，留空不限制"
               value={shareForm.allowedDomains}
               onChange={(e) => setShareForm({ ...shareForm, allowedDomains: e.target.value })}
+            />
+            <Input
+              label="允许的API IP (可选)"
+              placeholder="203.0.113.10, 2001:db8::10, 198.51.100.0/24"
+              description="仅白名单IP可导入此分享，支持IPv4/IPv6/CIDR，多个用逗号分隔"
+              value={shareForm.allowedIps}
+              onChange={(e) => setShareForm({ ...shareForm, allowedIps: e.target.value })}
             />
           </ModalBody>
           <ModalFooter>
