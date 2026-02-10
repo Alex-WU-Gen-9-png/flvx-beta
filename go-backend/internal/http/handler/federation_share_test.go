@@ -237,6 +237,148 @@ func TestFederationShareListIncludesRemoteUsedPorts(t *testing.T) {
 	}
 }
 
+func TestFederationShareDeleteCleansUpRuntimes(t *testing.T) {
+	repo, err := sqlite.Open(filepath.Join(t.TempDir(), "panel.db"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+
+	h := New(repo, "test-jwt-secret")
+	now := time.Now().UnixMilli()
+
+	if err := repo.CreatePeerShare(&sqlite.PeerShare{
+		Name:           "delete-cleanup-share",
+		NodeID:         99,
+		Token:          "delete-cleanup-token",
+		MaxBandwidth:   4096,
+		PortRangeStart: 40000,
+		PortRangeEnd:   40010,
+		IsActive:       1,
+		CreatedTime:    now,
+		UpdatedTime:    now,
+	}); err != nil {
+		t.Fatalf("create peer share: %v", err)
+	}
+
+	share, err := repo.GetPeerShareByToken("delete-cleanup-token")
+	if err != nil || share == nil {
+		t.Fatalf("load peer share: %v", err)
+	}
+
+	if _, err := repo.DB().Exec(`
+		INSERT INTO peer_share_runtime(share_id, node_id, reservation_id, resource_key, binding_id, role, chain_name, service_name, protocol, strategy, port, target, applied, status, created_time, updated_time)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?),
+		      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		share.ID, 99, "dc-r1", "dc-rk1", "dc-b1", "exit", "", "fed_svc_dc1", "tls", "round", 40001, "", 1, 1, now, now,
+		share.ID, 99, "dc-r2", "dc-rk2", "dc-b2", "middle", "fed_chain_dc2", "fed_svc_dc2", "tls", "round", 40002, "", 1, 1, now, now,
+	); err != nil {
+		t.Fatalf("insert peer_share_runtime rows: %v", err)
+	}
+
+	var runtimeCount int
+	if err := repo.DB().QueryRow(`SELECT COUNT(1) FROM peer_share_runtime WHERE share_id = ? AND status = 1`, share.ID).Scan(&runtimeCount); err != nil {
+		t.Fatalf("count active runtimes before: %v", err)
+	}
+	if runtimeCount != 2 {
+		t.Fatalf("expected 2 active runtimes before delete, got %d", runtimeCount)
+	}
+
+	body, err := json.Marshal(deletePeerShareRequest{ID: share.ID})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/federation/share/delete", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	res := httptest.NewRecorder()
+
+	h.federationShareDelete(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, res.Code)
+	}
+	var payload response.R
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Code != 0 {
+		t.Fatalf("expected response code 0, got %d (%s)", payload.Code, payload.Msg)
+	}
+
+	var shareCount int
+	if err := repo.DB().QueryRow(`SELECT COUNT(1) FROM peer_share WHERE id = ?`, share.ID).Scan(&shareCount); err != nil {
+		t.Fatalf("count peer_share after: %v", err)
+	}
+	if shareCount != 0 {
+		t.Fatalf("expected peer_share deleted, got %d rows", shareCount)
+	}
+
+	var runtimeCountAfter int
+	if err := repo.DB().QueryRow(`SELECT COUNT(1) FROM peer_share_runtime WHERE share_id = ?`, share.ID).Scan(&runtimeCountAfter); err != nil {
+		t.Fatalf("count peer_share_runtime after: %v", err)
+	}
+	if runtimeCountAfter != 0 {
+		t.Fatalf("expected all peer_share_runtime rows deleted, got %d", runtimeCountAfter)
+	}
+}
+
+func TestFederationRemoteUsageListSyncErrorFallback(t *testing.T) {
+	repo, err := sqlite.Open(filepath.Join(t.TempDir(), "panel.db"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+
+	h := New(repo, "test-jwt-secret")
+	now := time.Now().UnixMilli()
+
+	if _, err := repo.DB().Exec(`
+		INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx, is_remote, remote_url, remote_token, remote_config)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "sync-error-node", "sync-error-secret", "10.50.60.70", "10.50.60.70", "", "32000-32010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0, 1, "http://unreachable.invalid:9999", "bad-token", `{"shareId":42,"maxBandwidth":5368709120,"currentFlow":999999,"portRangeStart":32000,"portRangeEnd":32010}`); err != nil {
+		t.Fatalf("insert remote node: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/federation/share/remote-usage/list", nil)
+	res := httptest.NewRecorder()
+	h.federationRemoteUsageList(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, res.Code)
+	}
+
+	var payload response.R
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Code != 0 {
+		t.Fatalf("expected response code 0, got %d (%s)", payload.Code, payload.Msg)
+	}
+
+	rows, ok := payload.Data.([]interface{})
+	if !ok || len(rows) == 0 {
+		t.Fatalf("expected non-empty usage list, got %T", payload.Data)
+	}
+
+	first, ok := rows[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected row map, got %T", rows[0])
+	}
+
+	if int64(first["shareId"].(float64)) != 42 {
+		t.Fatalf("expected stale shareId=42 on sync failure, got %v", first["shareId"])
+	}
+	if int64(first["currentFlow"].(float64)) != 999999 {
+		t.Fatalf("expected stale currentFlow=999999 on sync failure, got %v", first["currentFlow"])
+	}
+
+	syncErr, _ := first["syncError"].(string)
+	if syncErr == "" {
+		t.Fatalf("expected non-empty syncError field on unreachable provider")
+	}
+}
+
 func TestFederationShareResetFlow(t *testing.T) {
 	repo, err := sqlite.Open(filepath.Join(t.TempDir(), "panel.db"))
 	if err != nil {
