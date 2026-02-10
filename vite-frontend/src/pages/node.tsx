@@ -1138,16 +1138,6 @@ export default function NodePage() {
                             </h3>
                           </div>
                           <div className="flex items-center gap-1.5 ml-2">
-                            {isRemoteNode && (
-                              <Chip
-                                className="text-xs"
-                                color="secondary"
-                                size="sm"
-                                variant="flat"
-                              >
-                                远程
-                              </Chip>
-                            )}
                             <div
                               className="cursor-grab active:cursor-grabbing p-2 text-default-400 hover:text-default-600 transition-colors touch-manipulation opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
                               {...listeners}
@@ -1162,6 +1152,16 @@ export default function NodePage() {
                                 <path d="M7 2a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 2zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 8zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 14zm6-8a2 2 0 1 1-.001-4.001A2 2 0 0 1 13 6zm0 2a2 2 0 1 1 .001 4.001A2 2 0 0 1 13 8zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 13 14z" />
                               </svg>
                             </div>
+                            {isRemoteNode && (
+                              <Chip
+                                className="text-xs"
+                                color="secondary"
+                                size="sm"
+                                variant="flat"
+                              >
+                                远程
+                              </Chip>
+                            )}
                             <Chip
                               className="text-xs"
                               color={
