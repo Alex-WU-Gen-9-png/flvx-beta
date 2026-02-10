@@ -117,9 +117,11 @@ type remoteUsageNodeItem struct {
 	PortRangeEnd     int                      `json:"portRangeEnd"`
 	MaxBandwidth     int64                    `json:"maxBandwidth"`
 	CurrentFlow      int64                    `json:"currentFlow"`
+	ExpiryTime       int64                    `json:"expiryTime"`
 	UsedPorts        []int                    `json:"usedPorts"`
 	Bindings         []remoteUsageBindingItem `json:"bindings"`
 	ActiveBindingNum int                      `json:"activeBindingNum"`
+	SyncError        string                   `json:"syncError,omitempty"`
 }
 
 func (h *Handler) federationShareList(w http.ResponseWriter, r *http.Request) {
@@ -279,6 +281,8 @@ func (h *Handler) federationShareDelete(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	h.cleanupPeerShareRuntimes(req.ID)
+
 	if err := h.repo.DeletePeerShare(req.ID); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
@@ -328,7 +332,7 @@ func (h *Handler) federationRemoteUsageList(w http.ResponseWriter, r *http.Reque
 	}
 
 	rows, err := h.repo.DB().Query(`
-		SELECT id, name, remote_url, remote_config
+		SELECT id, name, remote_url, remote_token, remote_config
 		FROM node
 		WHERE is_remote = 1
 		ORDER BY id DESC
@@ -339,20 +343,51 @@ func (h *Handler) federationRemoteUsageList(w http.ResponseWriter, r *http.Reque
 	}
 	defer rows.Close()
 
+	fc := client.NewFederationClient()
+	localDomain := h.federationLocalDomain()
+
 	items := make([]remoteUsageNodeItem, 0)
 	for rows.Next() {
 		var (
 			nodeID       int64
 			nodeName     string
 			remoteURL    sql.NullString
+			remoteToken  sql.NullString
 			remoteConfig sql.NullString
 		)
-		if err := rows.Scan(&nodeID, &nodeName, &remoteURL, &remoteConfig); err != nil {
+		if err := rows.Scan(&nodeID, &nodeName, &remoteURL, &remoteToken, &remoteConfig); err != nil {
 			response.WriteJSON(w, response.Err(-2, err.Error()))
 			return
 		}
 
-		shareID, maxBandwidth, currentFlow, portRangeStart, portRangeEnd := parseRemoteShareUsageConfig(remoteConfig.String)
+		shareID, maxBandwidth, currentFlow, expiryTime, portRangeStart, portRangeEnd := parseRemoteShareUsageConfig(remoteConfig.String)
+
+		var syncError string
+		url := strings.TrimSpace(remoteURL.String)
+		token := strings.TrimSpace(remoteToken.String)
+		if url != "" && token != "" {
+			info, connectErr := fc.Connect(url, token, localDomain)
+			if connectErr != nil {
+				syncError = connectErr.Error()
+			} else if info != nil {
+				shareID = info.ShareID
+				maxBandwidth = info.MaxBandwidth
+				currentFlow = info.CurrentFlow
+				expiryTime = info.ExpiryTime
+				portRangeStart = info.PortRangeStart
+				portRangeEnd = info.PortRangeEnd
+
+				configData, _ := json.Marshal(map[string]interface{}{
+					"shareId":        info.ShareID,
+					"maxBandwidth":   info.MaxBandwidth,
+					"currentFlow":    info.CurrentFlow,
+					"expiryTime":     info.ExpiryTime,
+					"portRangeStart": info.PortRangeStart,
+					"portRangeEnd":   info.PortRangeEnd,
+				})
+				_, _ = h.repo.DB().Exec(`UPDATE node SET remote_config = ? WHERE id = ?`, string(configData), nodeID)
+			}
+		}
 
 		bindingRows, err := h.repo.DB().Query(`
 			SELECT fb.id, fb.tunnel_id, COALESCE(t.name, ''), fb.chain_type, fb.hop_inx, fb.allocated_port, fb.resource_key, fb.remote_binding_id, fb.updated_time
@@ -396,15 +431,17 @@ func (h *Handler) federationRemoteUsageList(w http.ResponseWriter, r *http.Reque
 		items = append(items, remoteUsageNodeItem{
 			NodeID:           nodeID,
 			NodeName:         nodeName,
-			RemoteURL:        strings.TrimSpace(remoteURL.String),
+			RemoteURL:        url,
 			ShareID:          shareID,
 			PortRangeStart:   portRangeStart,
 			PortRangeEnd:     portRangeEnd,
 			MaxBandwidth:     maxBandwidth,
 			CurrentFlow:      currentFlow,
+			ExpiryTime:       expiryTime,
 			UsedPorts:        usedPorts,
 			Bindings:         bindings,
 			ActiveBindingNum: len(bindings),
+			SyncError:        syncError,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -415,23 +452,24 @@ func (h *Handler) federationRemoteUsageList(w http.ResponseWriter, r *http.Reque
 	response.WriteJSON(w, response.OK(items))
 }
 
-func parseRemoteShareUsageConfig(raw string) (int64, int64, int64, int, int) {
+func parseRemoteShareUsageConfig(raw string) (int64, int64, int64, int64, int, int) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return 0, 0, 0, 0, 0
+		return 0, 0, 0, 0, 0, 0
 	}
 
 	var cfg map[string]interface{}
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
-		return 0, 0, 0, 0, 0
+		return 0, 0, 0, 0, 0, 0
 	}
 
 	shareID := asInt64(cfg["shareId"], 0)
 	maxBandwidth := asInt64(cfg["maxBandwidth"], 0)
 	currentFlow := asInt64(cfg["currentFlow"], 0)
+	expiryTime := asInt64(cfg["expiryTime"], 0)
 	portRangeStart := int(asInt64(cfg["portRangeStart"], 0))
 	portRangeEnd := int(asInt64(cfg["portRangeEnd"], 0))
-	return shareID, maxBandwidth, currentFlow, portRangeStart, portRangeEnd
+	return shareID, maxBandwidth, currentFlow, expiryTime, portRangeStart, portRangeEnd
 }
 
 func (h *Handler) nodeImport(w http.ResponseWriter, r *http.Request) {
@@ -1277,4 +1315,27 @@ func isPeerIPAllowed(clientIP net.IP, whitelist string) bool {
 	}
 
 	return false
+}
+
+func (h *Handler) cleanupPeerShareRuntimes(shareID int64) {
+	if h == nil || h.repo == nil || shareID <= 0 {
+		return
+	}
+	runtimes, err := h.repo.ListActivePeerShareRuntimesByShareID(shareID)
+	if err != nil || len(runtimes) == 0 {
+		return
+	}
+
+	now := time.Now().UnixMilli()
+	for _, runtime := range runtimes {
+		if h.wsServer != nil && runtime.Applied == 1 {
+			if strings.TrimSpace(runtime.ServiceName) != "" {
+				_, _ = h.sendNodeCommand(runtime.NodeID, "DeleteService", map[string]interface{}{"services": []string{runtime.ServiceName}}, false, true)
+			}
+			if strings.TrimSpace(runtime.Role) == "middle" && strings.TrimSpace(runtime.ChainName) != "" {
+				_, _ = h.sendNodeCommand(runtime.NodeID, "DeleteChains", map[string]interface{}{"chain": runtime.ChainName}, false, true)
+			}
+		}
+		_ = h.repo.MarkPeerShareRuntimeReleased(runtime.ID, now)
+	}
 }
