@@ -40,6 +40,17 @@ type resetPeerShareFlowRequest struct {
 	ID int64 `json:"id"`
 }
 
+type updatePeerShareRequest struct {
+	ID             int64  `json:"id"`
+	Name           string `json:"name"`
+	MaxBandwidth   int64  `json:"maxBandwidth"`
+	ExpiryTime     int64  `json:"expiryTime"`
+	PortRangeStart int    `json:"portRangeStart"`
+	PortRangeEnd   int    `json:"portRangeEnd"`
+	AllowedDomains string `json:"allowedDomains"`
+	AllowedIPs     string `json:"allowedIps"`
+}
+
 type nodeImportRequest struct {
 	RemoteURL string `json:"remoteUrl"`
 	Token     string `json:"token"`
@@ -318,6 +329,80 @@ func (h *Handler) federationShareResetFlow(w http.ResponseWriter, r *http.Reques
 	}
 
 	if err := h.repo.ResetPeerShareCurrentFlow(req.ID, time.Now().UnixMilli()); err != nil {
+		response.WriteJSON(w, response.Err(-2, err.Error()))
+		return
+	}
+
+	response.WriteJSON(w, response.OKEmpty())
+}
+
+func (h *Handler) federationShareUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response.WriteJSON(w, response.ErrDefault("Invalid method"))
+		return
+	}
+
+	var req updatePeerShareRequest
+	if err := decodeJSON(r.Body, &req); err != nil {
+		response.WriteJSON(w, response.ErrDefault("Invalid JSON"))
+		return
+	}
+	if req.ID <= 0 {
+		response.WriteJSON(w, response.ErrDefault("Share ID is required"))
+		return
+	}
+
+	share, err := h.repo.GetPeerShare(req.ID)
+	if err != nil {
+		response.WriteJSON(w, response.Err(-2, err.Error()))
+		return
+	}
+	if share == nil {
+		response.WriteJSON(w, response.ErrDefault("Share not found"))
+		return
+	}
+
+	if req.Name == "" {
+		response.WriteJSON(w, response.ErrDefault("Name is required"))
+		return
+	}
+
+	if req.MaxBandwidth < 0 {
+		response.WriteJSON(w, response.ErrDefault("Max bandwidth cannot be negative"))
+		return
+	}
+
+	if req.ExpiryTime < 0 {
+		response.WriteJSON(w, response.ErrDefault("Expiry time cannot be negative"))
+		return
+	}
+
+	if req.PortRangeStart < 0 || req.PortRangeStart > 65535 || req.PortRangeEnd < 0 || req.PortRangeEnd > 65535 {
+		response.WriteJSON(w, response.ErrDefault("Invalid port range"))
+		return
+	}
+
+	if req.PortRangeStart > req.PortRangeEnd {
+		response.WriteJSON(w, response.ErrDefault("Port range start cannot be greater than end"))
+		return
+	}
+
+	allowedIPs, err := normalizePeerShareAllowedIPs(req.AllowedIPs)
+	if err != nil {
+		response.WriteJSON(w, response.ErrDefault(err.Error()))
+		return
+	}
+
+	share.Name = req.Name
+	share.MaxBandwidth = req.MaxBandwidth
+	share.ExpiryTime = req.ExpiryTime
+	share.PortRangeStart = req.PortRangeStart
+	share.PortRangeEnd = req.PortRangeEnd
+	share.AllowedDomains = req.AllowedDomains
+	share.AllowedIPs = allowedIPs
+	share.UpdatedTime = time.Now().UnixMilli()
+
+	if err := h.repo.UpdatePeerShare(share); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
