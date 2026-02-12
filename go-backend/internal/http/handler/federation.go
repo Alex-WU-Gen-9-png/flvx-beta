@@ -700,7 +700,7 @@ func (h *Handler) federationTunnelCreate(w http.ResponseWriter, r *http.Request)
 	defer tx.Rollback()
 
 	now := time.Now().UnixMilli()
-	res, err := tx.Exec(`INSERT INTO tunnel (name, type, protocol, flow, created_time, updated_time, status, in_ip) VALUES (?, ?, ?, 0, ?, ?, 1, ?)`,
+	tunnelID, err := tx.ExecReturningID(`INSERT INTO tunnel (name, type, protocol, flow, created_time, updated_time, status, in_ip) VALUES (?, ?, ?, 0, ?, ?, 1, ?)`,
 		fmt.Sprintf("Share-%d-Port-%d", share.ID, req.RemotePort),
 		tunnelType,
 		req.Protocol,
@@ -712,8 +712,6 @@ func (h *Handler) federationTunnelCreate(w http.ResponseWriter, r *http.Request)
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-
-	tunnelID, _ := res.LastInsertId()
 
 	_, err = tx.Exec(`INSERT INTO chain_tunnel (tunnel_id, chain_type, node_id, port, strategy, inx, protocol) VALUES (?, 1, ?, ?, 'fifo', 0, ?)`,
 		tunnelID,

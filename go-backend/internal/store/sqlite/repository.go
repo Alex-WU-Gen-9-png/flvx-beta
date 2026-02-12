@@ -12,6 +12,9 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"go-backend/internal/store"
+	pgstore "go-backend/internal/store/postgres"
 	_ "modernc.org/sqlite"
 )
 
@@ -22,10 +25,10 @@ var embeddedSchema string
 var embeddedSeedData string
 
 type Repository struct {
-	db *sql.DB
+	db *store.DB
 }
 
-func (r *Repository) DB() *sql.DB {
+func (r *Repository) DB() *store.DB {
 	if r == nil {
 		return nil
 	}
@@ -165,17 +168,47 @@ func Open(path string) (*Repository, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite", path)
+	raw, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
 	}
+	db := store.Wrap(raw, store.DialectSQLite)
 
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 
-	if err := bootstrapSchema(db); err != nil {
+	if err := bootstrapSchema(db, embeddedSchema, embeddedSeedData); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	if err := migrateSchema(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	return &Repository{db: db}, nil
+}
+
+func OpenPostgres(dsn string) (*Repository, error) {
+	if strings.TrimSpace(dsn) == "" {
+		return nil, fmt.Errorf("empty postgres dsn")
+	}
+
+	raw, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db := store.Wrap(raw, store.DialectPostgres)
+
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	if err := bootstrapSchema(db, pgstore.EmbeddedSchema, pgstore.EmbeddedSeedData); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -1141,7 +1174,7 @@ func nullableForwardIngress(v string) interface{} {
 	return v
 }
 
-func resolveForwardIngress(db *sql.DB, forwardID int64, tunnelID int64) (string, sql.NullInt64, error) {
+func resolveForwardIngress(db *store.DB, forwardID int64, tunnelID int64) (string, sql.NullInt64, error) {
 	var tunnelInIP sql.NullString
 	if err := db.QueryRow(`SELECT in_ip FROM tunnel WHERE id = ? LIMIT 1`, tunnelID).Scan(&tunnelInIP); err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
@@ -1243,22 +1276,22 @@ func ensureParentDir(dbPath string) error {
 	return osMkdirAll(dir)
 }
 
-func bootstrapSchema(db *sql.DB) error {
+func bootstrapSchema(db *store.DB, schemaSQL, seedSQL string) error {
 	if db == nil {
 		return errors.New("nil db")
 	}
 
-	if _, err := db.Exec(embeddedSchema); err != nil {
+	if _, err := db.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("apply schema.sql: %w", err)
 	}
 
-	if _, err := db.Exec(embeddedSeedData); err != nil {
+	if _, err := db.Exec(seedSQL); err != nil {
 		return fmt.Errorf("apply data.sql: %w", err)
 	}
 	return nil
 }
 
-func migrateSchema(db *sql.DB) error {
+func migrateSchema(db *store.DB) error {
 	if db == nil {
 		return errors.New("nil db")
 	}
@@ -1269,7 +1302,7 @@ func migrateSchema(db *sql.DB) error {
 		if err == nil || errors.Is(err, sql.ErrNoRows) {
 			return
 		}
-		if strings.Contains(err.Error(), "no such column") {
+		if isMissingColumnError(db.Dialect(), err) {
 			if _, alterErr := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, col, typ)); alterErr != nil {
 				log.Printf("failed to add column %s to %s: %v", col, table, alterErr)
 			}
@@ -1307,6 +1340,17 @@ func migrateSchema(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func isMissingColumnError(dialect store.Dialect, err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if dialect == store.DialectPostgres {
+		return strings.Contains(msg, "column") && strings.Contains(msg, "does not exist")
+	}
+	return strings.Contains(msg, "no such column")
 }
 
 func (r *Repository) CreatePeerShare(share *PeerShare) error {
