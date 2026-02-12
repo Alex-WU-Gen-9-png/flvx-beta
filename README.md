@@ -42,6 +42,70 @@ curl -L https://github.com/Sagit-chu/flux-panel/releases/download/2.1.0/panel_in
 curl -L https://github.com/Sagit-chu/flux-panel/releases/download/2.1.0/install.sh -o install.sh && chmod +x install.sh && ./install.sh
 ```
 
+#### PostgreSQL 部署（Docker Compose）
+
+`docker-compose-v4.yml` / `docker-compose-v6.yml` 已包含 PostgreSQL 服务。默认仍使用 SQLite，切换到 PostgreSQL 只需要配置环境变量。
+
+1) 在 `docker-compose` 同目录创建或修改 `.env`：
+
+```bash
+JWT_SECRET=replace_with_your_secret
+BACKEND_PORT=6365
+FRONTEND_PORT=6366
+
+DB_TYPE=postgres
+DATABASE_URL=postgres://flux_panel:replace_with_strong_password@postgres:5432/flux_panel?sslmode=disable
+
+POSTGRES_DB=flux_panel
+POSTGRES_USER=flux_panel
+POSTGRES_PASSWORD=replace_with_strong_password
+```
+
+2) 启动（IPv4/IPv6 二选一）：
+
+```bash
+docker compose -f docker-compose-v4.yml up -d
+```
+
+```bash
+docker compose -f docker-compose-v6.yml up -d
+```
+
+3) 如果你想继续使用 SQLite，保留 `DB_TYPE=sqlite`（或不设置 `DB_TYPE`）即可。
+
+#### 从 SQLite 迁移到 PostgreSQL
+
+以下示例基于 Docker Volume `sqlite_data`（项目默认配置）与 `pgloader`：
+
+1) 停止服务并备份 SQLite 数据：
+
+```bash
+docker compose -f docker-compose-v4.yml down
+docker run --rm -v sqlite_data:/data -v "$(pwd)":/backup alpine sh -c "cp /data/gost.db /backup/gost.db.bak"
+```
+
+2) 仅启动 PostgreSQL：
+
+```bash
+docker compose -f docker-compose-v4.yml up -d postgres
+```
+
+3) 使用 `pgloader` 迁移：
+
+```bash
+docker run --rm --network gost-network -v sqlite_data:/sqlite dimitri/pgloader:latest pgloader /sqlite/gost.db postgresql://flux_panel:replace_with_strong_password@postgres:5432/flux_panel
+```
+
+4) 切换后端到 PostgreSQL 并启动：
+
+```bash
+export DB_TYPE=postgres
+export DATABASE_URL="postgres://flux_panel:replace_with_strong_password@postgres:5432/flux_panel?sslmode=disable"
+docker compose -f docker-compose-v4.yml up -d
+```
+
+5) 迁移完成后，登录面板检查用户、隧道、转发、节点数据是否正确。
+
 #### 默认管理员账号
 
 - **账号**: admin_user

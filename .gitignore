@@ -263,3 +263,6 @@ sql/
 !go-backend/internal/store/sqlite/sql/
 !go-backend/internal/store/sqlite/sql/schema.sql
 !go-backend/internal/store/sqlite/sql/data.sql
+!go-backend/internal/store/postgres/sql/
+!go-backend/internal/store/postgres/sql/schema.sql
+!go-backend/internal/store/postgres/sql/data.sql
