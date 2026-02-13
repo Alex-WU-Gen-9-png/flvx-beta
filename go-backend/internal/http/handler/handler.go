@@ -93,6 +93,12 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/config/list", h.getConfigs)
 	mux.HandleFunc("/api/v1/config/update", h.updateConfigs)
 	mux.HandleFunc("/api/v1/config/update-single", h.updateSingleConfig)
+	mux.HandleFunc("/api/v1/backup/export", h.backupExport)
+	mux.HandleFunc("/api/v1/backup/import", h.backupImport)
+	mux.HandleFunc("/api/v1/backup/restore", h.backupImport)
+	mux.HandleFunc("/api/v1/api/v1/backup/export", h.backupExport)
+	mux.HandleFunc("/api/v1/api/v1/backup/import", h.backupImport)
+	mux.HandleFunc("/api/v1/api/v1/backup/restore", h.backupImport)
 	mux.HandleFunc("/api/v1/captcha/check", h.checkCaptcha)
 	mux.HandleFunc("/api/v1/captcha/verify", h.captchaVerify)
 	mux.HandleFunc("/api/v1/user/package", h.userPackage)
@@ -171,9 +177,6 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/federation/runtime/diagnose", h.authPeer(h.federationRuntimeDiagnose))
 	mux.HandleFunc("/api/v1/federation/runtime/command", h.authPeer(h.federationRuntimeCommand))
 	mux.HandleFunc("/api/v1/federation/node/import", h.nodeImport)
-
-	mux.HandleFunc("/api/v1/backup/export", h.backupExport)
-	mux.HandleFunc("/api/v1/backup/import", h.backupImport)
 
 	mux.HandleFunc("/flow/test", h.flowTest)
 	mux.HandleFunc("/flow/config", h.flowConfig)
