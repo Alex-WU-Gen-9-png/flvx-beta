@@ -203,6 +203,160 @@ func TestSpeedLimitTunnelsRouteAlias(t *testing.T) {
 	})
 }
 
+func TestBackupExportImportRestoreContracts(t *testing.T) {
+	secret := "contract-jwt-secret"
+	router, repo := setupContractRouter(t, secret)
+
+	adminToken, err := auth.GenerateToken(1, "admin_user", 0, secret)
+	if err != nil {
+		t.Fatalf("generate admin token: %v", err)
+	}
+	userToken, err := auth.GenerateToken(2, "normal_user", 1, secret)
+	if err != nil {
+		t.Fatalf("generate user token: %v", err)
+	}
+
+	key := "backup_contract_key"
+	if _, err := repo.DB().Exec(`
+		INSERT INTO vite_config(name, value, time)
+		VALUES(?, ?, ?)
+		ON CONFLICT(name) DO UPDATE SET value = excluded.value, time = excluded.time
+	`, key, "v1", time.Now().UnixMilli()); err != nil {
+		t.Fatalf("seed config for backup contract: %v", err)
+	}
+
+	t.Run("non-admin is blocked on backup export", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/backup/export", nil)
+		req.Header.Set("Authorization", userToken)
+		resp := httptest.NewRecorder()
+
+		router.ServeHTTP(resp, req)
+		assertCodeMsg(t, resp, 403, "权限不足，仅管理员可操作")
+	})
+
+	t.Run("standard and duplicate export routes both work", func(t *testing.T) {
+		payloadA := exportBackupPayload(t, router, "/api/v1/backup/export", adminToken)
+		if len(payloadA.Configs) == 0 {
+			t.Fatalf("expected exported configs, got none")
+		}
+		if _, ok := payloadA.Configs[key]; !ok {
+			t.Fatalf("expected %q in exported configs", key)
+		}
+
+		payloadB := exportBackupPayload(t, router, "/api/v1/api/v1/backup/export", adminToken)
+		if len(payloadB.Configs) == 0 {
+			t.Fatalf("expected exported configs from duplicate-prefix route, got none")
+		}
+	})
+
+	t.Run("backup import applies exported data", func(t *testing.T) {
+		payload := exportBackupPayload(t, router, "/api/v1/backup/export", adminToken)
+		payload.Configs[key] = "v2"
+		raw, err := json.Marshal(backupImportPayload{Types: []string{"configs"}, backupExportPayload: payload})
+		if err != nil {
+			t.Fatalf("marshal import payload: %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/backup/import", bytes.NewReader(raw))
+		req.Header.Set("Authorization", adminToken)
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+
+		router.ServeHTTP(resp, req)
+		var out response.R
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("decode import response: %v", err)
+		}
+		if out.Code != 0 {
+			t.Fatalf("expected import code 0, got %d (%s)", out.Code, out.Msg)
+		}
+
+		cfg, err := repo.GetConfigByName(key)
+		if err != nil {
+			t.Fatalf("query imported config: %v", err)
+		}
+		if cfg == nil || cfg.Value != "v2" {
+			t.Fatalf("expected imported config value v2, got %+v", cfg)
+		}
+	})
+
+	t.Run("backup restore alias applies exported data", func(t *testing.T) {
+		payload := exportBackupPayload(t, router, "/api/v1/backup/export", adminToken)
+		payload.Configs[key] = "v3"
+		raw, err := json.Marshal(backupImportPayload{Types: []string{"configs"}, backupExportPayload: payload})
+		if err != nil {
+			t.Fatalf("marshal restore payload: %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/backup/restore", bytes.NewReader(raw))
+		req.Header.Set("Authorization", adminToken)
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+
+		router.ServeHTTP(resp, req)
+		var out response.R
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("decode restore response: %v", err)
+		}
+		if out.Code != 0 {
+			t.Fatalf("expected restore code 0, got %d (%s)", out.Code, out.Msg)
+		}
+
+		cfg, err := repo.GetConfigByName(key)
+		if err != nil {
+			t.Fatalf("query restored config: %v", err)
+		}
+		if cfg == nil || cfg.Value != "v3" {
+			t.Fatalf("expected restored config value v3, got %+v", cfg)
+		}
+	})
+}
+
+type backupExportPayload struct {
+	Version    string            `json:"version"`
+	ExportedAt int64             `json:"exportedAt"`
+	Configs    map[string]string `json:"configs"`
+}
+
+type backupImportPayload struct {
+	Types []string `json:"types"`
+	backupExportPayload
+}
+
+func exportBackupPayload(t *testing.T, router http.Handler, path, token string) backupExportPayload {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(`{"types":["configs"]}`))
+	req.Header.Set("Authorization", token)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected status 200 on %s, got %d", path, resp.Code)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read backup payload from %s: %v", path, err)
+	}
+
+	var payload backupExportPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("decode backup payload from %s: %v", path, err)
+	}
+	if strings.TrimSpace(payload.Version) == "" {
+		var out response.R
+		if err := json.Unmarshal(body, &out); err == nil {
+			t.Fatalf("expected backup payload on %s, got envelope code=%d msg=%q", path, out.Code, out.Msg)
+		}
+		t.Fatalf("expected non-empty backup payload version on %s, body=%s", path, string(body))
+	}
+	if payload.Configs == nil {
+		t.Fatalf("expected configs map in backup payload on %s", path)
+	}
+	return payload
+}
+
 func setupContractRouter(t *testing.T, jwtSecret string) (http.Handler, *sqlite.Repository) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "contract.db")

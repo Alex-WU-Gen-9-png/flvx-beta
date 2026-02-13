@@ -93,6 +93,8 @@ func shouldSkip(path string) bool {
 		return true
 	case path == "/api/v1/federation/runtime/diagnose":
 		return true
+	case path == "/api/v1/federation/runtime/command":
+		return true
 	default:
 		return false
 	}
@@ -112,6 +114,14 @@ func requiresAdmin(path string) bool {
 	}
 
 	if strings.HasPrefix(path, "/api/v1/speed-limit/") {
+		return true
+	}
+
+	if strings.HasPrefix(path, "/api/v1/backup/") {
+		return true
+	}
+
+	if strings.HasPrefix(path, "/api/v1/api/v1/backup/") {
 		return true
 	}
 
