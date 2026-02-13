@@ -1185,6 +1185,7 @@ func (h *Handler) backupExport(w http.ResponseWriter, r *http.Request) {
 
 type backupImportRequest struct {
 	Types []string `json:"types"`
+	sqlite.BackupData
 }
 
 func (h *Handler) backupImport(w http.ResponseWriter, r *http.Request) {
@@ -1210,13 +1211,12 @@ func (h *Handler) backupImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var backup sqlite.BackupData
-	if err := decodeJSON(r.Body, &backup); err != nil {
+	if req.BackupData.Version == "" {
 		response.WriteJSON(w, response.Err(500, "备份数据格式错误"))
 		return
 	}
 
-	result, err := h.repo.Import(&backup, req.Types)
+	result, err := h.repo.Import(&req.BackupData, req.Types)
 	if err != nil {
 		response.WriteJSON(w, response.Err(-2, fmt.Sprintf("导入失败: %v", err)))
 		return
