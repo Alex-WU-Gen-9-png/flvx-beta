@@ -51,8 +51,8 @@ html, body {
 }
 
 [data-slot="input-wrapper"]:focus-within:not([data-invalid="true"]) {
-  border-color: rgb(59 130 246);
   outline: 2px solid rgb(59 130 246 / 35%);
+  outline-offset: 1px;
 }
 
 .safe-top {
