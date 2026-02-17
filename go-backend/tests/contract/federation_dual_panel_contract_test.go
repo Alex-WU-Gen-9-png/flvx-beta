@@ -17,7 +17,7 @@ import (
 	"go-backend/internal/auth"
 	"go-backend/internal/http/response"
 	"go-backend/internal/security"
-	"go-backend/internal/store/sqlite"
+	"go-backend/internal/store/repo"
 )
 
 func TestFederationDualPanelMiddleExitAutoPortContract(t *testing.T) {
@@ -39,7 +39,7 @@ func TestFederationDualPanelMiddleExitAutoPortContract(t *testing.T) {
 	providerMiddleNodeID := insertContractNode(t, providerRepo, "provider-middle", "198.51.100.12", "44000-44010", "provider-middle-secret", 1)
 	providerExitNodeID := insertContractNode(t, providerRepo, "provider-exit", "198.51.100.13", "45000-45010", "provider-exit-secret", 1)
 
-	entryShareID := insertPeerShare(t, providerRepo, &sqlite.PeerShare{
+	entryShareID := insertPeerShare(t, providerRepo, &repo.PeerShare{
 		Name:           "entry-share",
 		NodeID:         providerEntryNodeID,
 		Token:          "share-entry-token",
@@ -49,7 +49,7 @@ func TestFederationDualPanelMiddleExitAutoPortContract(t *testing.T) {
 		CreatedTime:    now,
 		UpdatedTime:    now,
 	})
-	middleShareID := insertPeerShare(t, providerRepo, &sqlite.PeerShare{
+	middleShareID := insertPeerShare(t, providerRepo, &repo.PeerShare{
 		Name:           "middle-share",
 		NodeID:         providerMiddleNodeID,
 		Token:          "share-middle-token",
@@ -59,7 +59,7 @@ func TestFederationDualPanelMiddleExitAutoPortContract(t *testing.T) {
 		CreatedTime:    now,
 		UpdatedTime:    now,
 	})
-	exitShareID := insertPeerShare(t, providerRepo, &sqlite.PeerShare{
+	exitShareID := insertPeerShare(t, providerRepo, &repo.PeerShare{
 		Name:           "exit-share",
 		NodeID:         providerExitNodeID,
 		Token:          "share-exit-token",
@@ -113,7 +113,7 @@ func TestFederationDualPanelMiddleExitAutoPortContract(t *testing.T) {
 		assertCode(t, res, 0)
 
 		var tunnelID int64
-		if err := consumerRepo.DB().QueryRow(`SELECT id FROM tunnel WHERE name = ? ORDER BY id DESC LIMIT 1`, name).Scan(&tunnelID); err != nil {
+		if err := consumerRepo.DB().Raw(`SELECT id FROM tunnel WHERE name = ? ORDER BY id DESC LIMIT 1`, name).Row().Scan(&tunnelID); err != nil {
 			t.Fatalf("query tunnel id (%s): %v", name, err)
 		}
 		if tunnelID <= 0 {
@@ -191,7 +191,7 @@ func TestFederationDualPanelRemoteDiagnosisContract(t *testing.T) {
 	providerMiddleNodeID := insertContractNode(t, providerRepo, "provider-middle-dx", "203.0.113.12", "54000-54010", "provider-middle-dx-secret", 1)
 	providerExitNodeID := insertContractNode(t, providerRepo, "provider-exit-dx", "203.0.113.13", "55000-55010", "provider-exit-dx-secret", 1)
 
-	entryShareID := insertPeerShare(t, providerRepo, &sqlite.PeerShare{
+	entryShareID := insertPeerShare(t, providerRepo, &repo.PeerShare{
 		Name:           "entry-share-dx",
 		NodeID:         providerEntryNodeID,
 		Token:          "share-entry-dx-token",
@@ -201,7 +201,7 @@ func TestFederationDualPanelRemoteDiagnosisContract(t *testing.T) {
 		CreatedTime:    now,
 		UpdatedTime:    now,
 	})
-	middleShareID := insertPeerShare(t, providerRepo, &sqlite.PeerShare{
+	middleShareID := insertPeerShare(t, providerRepo, &repo.PeerShare{
 		Name:           "middle-share-dx",
 		NodeID:         providerMiddleNodeID,
 		Token:          "share-middle-dx-token",
@@ -211,7 +211,7 @@ func TestFederationDualPanelRemoteDiagnosisContract(t *testing.T) {
 		CreatedTime:    now,
 		UpdatedTime:    now,
 	})
-	exitShareID := insertPeerShare(t, providerRepo, &sqlite.PeerShare{
+	exitShareID := insertPeerShare(t, providerRepo, &repo.PeerShare{
 		Name:           "exit-share-dx",
 		NodeID:         providerExitNodeID,
 		Token:          "share-exit-dx-token",
@@ -262,7 +262,7 @@ func TestFederationDualPanelRemoteDiagnosisContract(t *testing.T) {
 	assertCode(t, createRes, 0)
 
 	var tunnelID int64
-	if err := consumerRepo.DB().QueryRow(`SELECT id FROM tunnel WHERE name = ? ORDER BY id DESC LIMIT 1`, "dual-panel-diagnose-remote").Scan(&tunnelID); err != nil {
+	if err := consumerRepo.DB().Raw(`SELECT id FROM tunnel WHERE name = ? ORDER BY id DESC LIMIT 1`, "dual-panel-diagnose-remote").Row().Scan(&tunnelID); err != nil {
 		t.Fatalf("query tunnel id: %v", err)
 	}
 	if tunnelID <= 0 {
@@ -335,7 +335,7 @@ func TestFederationDualPanelRemoteEntryRuntimeContract(t *testing.T) {
 	providerMiddleNodeID := insertContractNode(t, providerRepo, "provider-middle-rt", "198.51.100.22", "44020-44030", "provider-middle-rt-secret", 1)
 	providerExitNodeID := insertContractNode(t, providerRepo, "provider-exit-rt", "198.51.100.23", "45020-45030", "provider-exit-rt-secret", 1)
 
-	insertPeerShare(t, providerRepo, &sqlite.PeerShare{
+	insertPeerShare(t, providerRepo, &repo.PeerShare{
 		Name:           "entry-share-rt",
 		NodeID:         providerEntryNodeID,
 		Token:          "share-entry-rt-token",
@@ -345,7 +345,7 @@ func TestFederationDualPanelRemoteEntryRuntimeContract(t *testing.T) {
 		CreatedTime:    now,
 		UpdatedTime:    now,
 	})
-	insertPeerShare(t, providerRepo, &sqlite.PeerShare{
+	insertPeerShare(t, providerRepo, &repo.PeerShare{
 		Name:           "middle-share-rt",
 		NodeID:         providerMiddleNodeID,
 		Token:          "share-middle-rt-token",
@@ -355,7 +355,7 @@ func TestFederationDualPanelRemoteEntryRuntimeContract(t *testing.T) {
 		CreatedTime:    now,
 		UpdatedTime:    now,
 	})
-	insertPeerShare(t, providerRepo, &sqlite.PeerShare{
+	insertPeerShare(t, providerRepo, &repo.PeerShare{
 		Name:           "exit-share-rt",
 		NodeID:         providerExitNodeID,
 		Token:          "share-exit-rt-token",
@@ -415,7 +415,7 @@ func TestFederationDualPanelRemoteEntryRuntimeContract(t *testing.T) {
 		assertCode(t, res, 0)
 
 		var tunnelID int64
-		if err := consumerRepo.DB().QueryRow(`SELECT id FROM tunnel WHERE name = ? ORDER BY id DESC LIMIT 1`, name).Scan(&tunnelID); err != nil {
+		if err := consumerRepo.DB().Raw(`SELECT id FROM tunnel WHERE name = ? ORDER BY id DESC LIMIT 1`, name).Row().Scan(&tunnelID); err != nil {
 			t.Fatalf("query tunnel id (%s): %v", name, err)
 		}
 		if tunnelID <= 0 {
@@ -446,32 +446,31 @@ func TestFederationDualPanelRemoteEntryRuntimeContract(t *testing.T) {
 	createTunnel("dual-panel-remote-entry-offline")
 }
 
-func insertContractNode(t *testing.T, repo *sqlite.Repository, name, ip, portRange, secret string, status int) int64 {
+func insertContractNode(t *testing.T, r *repo.Repository, name, ip, portRange, secret string, status int) int64 {
 	t.Helper()
 	now := time.Now().UnixMilli()
-	res, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, name, secret, ip, ip, "", portRange, "", "v1", 1, 1, 1, now, now, status, "[::]", "[::]", 0)
-	if err != nil {
+	`, name, secret, ip, ip, "", portRange, "", "v1", 1, 1, 1, now, now, status, "[::]", "[::]", 0).Error; err != nil {
 		t.Fatalf("insert node %s: %v", name, err)
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
+	var id int64
+	if err := r.DB().Raw("SELECT last_insert_rowid()").Row().Scan(&id); err != nil {
 		t.Fatalf("node id %s: %v", name, err)
 	}
 	return id
 }
 
-func insertPeerShare(t *testing.T, repo *sqlite.Repository, share *sqlite.PeerShare) int64 {
+func insertPeerShare(t *testing.T, r *repo.Repository, share *repo.PeerShare) int64 {
 	t.Helper()
 	if share == nil {
 		t.Fatalf("share is nil")
 	}
-	if err := repo.CreatePeerShare(share); err != nil {
+	if err := r.CreatePeerShare(share); err != nil {
 		t.Fatalf("create peer share %s: %v", share.Name, err)
 	}
-	saved, err := repo.GetPeerShareByToken(share.Token)
+	saved, err := r.GetPeerShareByToken(share.Token)
 	if err != nil {
 		t.Fatalf("query peer share %s: %v", share.Name, err)
 	}
@@ -498,10 +497,10 @@ func importRemoteNodeForContract(t *testing.T, router http.Handler, adminToken, 
 	assertCode(t, res, 0)
 }
 
-func queryRemoteNodeIDByToken(t *testing.T, repo *sqlite.Repository, token string) int64 {
+func queryRemoteNodeIDByToken(t *testing.T, r *repo.Repository, token string) int64 {
 	t.Helper()
 	var id int64
-	if err := repo.DB().QueryRow(`SELECT id FROM node WHERE is_remote = 1 AND remote_token = ? ORDER BY id DESC LIMIT 1`, token).Scan(&id); err != nil {
+	if err := r.DB().Raw(`SELECT id FROM node WHERE is_remote = 1 AND remote_token = ? ORDER BY id DESC LIMIT 1`, token).Row().Scan(&id); err != nil {
 		t.Fatalf("query remote node by token %s: %v", token, err)
 	}
 	if id <= 0 {
@@ -510,15 +509,15 @@ func queryRemoteNodeIDByToken(t *testing.T, repo *sqlite.Repository, token strin
 	return id
 }
 
-func assertTunnelPortInRange(t *testing.T, repo *sqlite.Repository, tunnelID int64, chainType int, nodeID int64, minPort int, maxPort int) {
+func assertTunnelPortInRange(t *testing.T, r *repo.Repository, tunnelID int64, chainType int, nodeID int64, minPort int, maxPort int) {
 	t.Helper()
 	var port int
-	err := repo.DB().QueryRow(`
+	err := r.DB().Raw(`
 		SELECT port
 		FROM chain_tunnel
 		WHERE tunnel_id = ? AND chain_type = ? AND node_id = ?
 		LIMIT 1
-	`, tunnelID, chainType, nodeID).Scan(&port)
+	`, tunnelID, chainType, nodeID).Row().Scan(&port)
 	if err != nil {
 		t.Fatalf("query tunnel=%d chainType=%d node=%d port: %v", tunnelID, chainType, nodeID, err)
 	}
@@ -527,10 +526,10 @@ func assertTunnelPortInRange(t *testing.T, repo *sqlite.Repository, tunnelID int
 	}
 }
 
-func assertCount(t *testing.T, repo *sqlite.Repository, query string, arg interface{}, expected int) {
+func assertCount(t *testing.T, r *repo.Repository, query string, arg interface{}, expected int) {
 	t.Helper()
 	var got int
-	if err := repo.DB().QueryRow(query, arg).Scan(&got); err != nil {
+	if err := r.DB().Raw(query, arg).Row().Scan(&got); err != nil {
 		t.Fatalf("count query failed: %v", err)
 	}
 	if got != expected {
@@ -638,12 +637,12 @@ func startMockNodeSessionWithHook(t *testing.T, baseURL string, nodeSecret strin
 	}
 }
 
-func waitNodeStatus(t *testing.T, repo *sqlite.Repository, nodeID int64, expectedStatus int) {
+func waitNodeStatus(t *testing.T, r *repo.Repository, nodeID int64, expectedStatus int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		var status int
-		if err := repo.DB().QueryRow(`SELECT status FROM node WHERE id = ?`, nodeID).Scan(&status); err == nil && status == expectedStatus {
+		if err := r.DB().Raw(`SELECT status FROM node WHERE id = ?`, nodeID).Row().Scan(&status); err == nil && status == expectedStatus {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -698,7 +697,7 @@ func TestFederationRuntimeCommandPortRangeEnforcement(t *testing.T) {
 	now := time.Now().UnixMilli()
 	providerNodeID := insertContractNode(t, providerRepo, "provider-portrange-node", "198.51.100.50", "44000-44010", "provider-portrange-secret", 1)
 
-	insertPeerShare(t, providerRepo, &sqlite.PeerShare{
+	insertPeerShare(t, providerRepo, &repo.PeerShare{
 		Name:           "portrange-share",
 		NodeID:         providerNodeID,
 		Token:          "share-portrange-token",

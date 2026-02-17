@@ -12,7 +12,7 @@ FLVX (formerly Flux Panel) is a traffic forwarding management system built on a 
 ./
 ├── go-gost/               # Go forwarding agent (forked gost + local x/)
 │   └── x/                 # Local fork of github.com/go-gost/x (replace => ./x)
-├── go-backend/            # Go Admin API (SQLite, net/http)
+├── go-backend/            # Go Admin API (GORM + SQLite/PostgreSQL, net/http)
 ├── vite-frontend/         # React/Vite dashboard (HeroUI + Tailwind)
 ├── docker-compose-v4.yml  # Panel deploy (IPv4-only bridge)
 ├── docker-compose-v6.yml  # Panel deploy (IPv6-enabled bridge)
@@ -52,7 +52,7 @@ FLVX (formerly Flux Panel) is a traffic forwarding management system built on a 
 - **DO NOT EDIT** generated protobuf output: `go-gost/x/internal/util/grpc/proto/*.pb.go`, `go-gost/x/internal/util/grpc/proto/*_grpc.pb.go`.
 - **DO NOT ADD** `Bearer` prefix to Authorization header - expects raw JWT token.
 - **DO NOT MODIFY** `install.sh` or `panel_install.sh` locally - CI overwrites these on release.
-- **DO NOT USE** ORM in backend - uses raw SQL with `database/sql`.
+- **DO NOT** let backend handlers call `repo.DB()` directly — add a Repository method instead.
 - **DO NOT ADD** frontend tests - project has no test infrastructure (Vitest/Jest not configured).
 
 ## COMMANDS

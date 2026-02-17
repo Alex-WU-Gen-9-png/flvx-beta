@@ -16,23 +16,22 @@ func TestUserTunnelVisibleListContracts(t *testing.T) {
 	router, repo := setupDiagnosisContractRouter(t, secret)
 	now := time.Now().UnixMilli()
 
-	if _, err := repo.DB().Exec(`
+	if err := repo.DB().Exec(`
 		INSERT INTO user(id, user, pwd, role_id, exp_time, flow, in_flow, out_flow, flow_reset_time, num, created_time, updated_time, status)
 		VALUES(2, 'normal_user', '3c85cdebade1c51cf64ca9f3c09d182d', 1, 2727251700000, 99999, 0, 0, 1, 99999, ?, ?, 1)
-	`, now, now); err != nil {
+	`, now, now).Error; err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
 
 	insertTunnel := func(name string, status int, inx int64) int64 {
-		res, err := repo.DB().Exec(`
+		if err := repo.DB().Exec(`
 			INSERT INTO tunnel(name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
 			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, name, 1.0, 1, "tls", 99999, now, now, status, nil, inx)
-		if err != nil {
+		`, name, 1.0, 1, "tls", 99999, now, now, status, nil, inx).Error; err != nil {
 			t.Fatalf("insert tunnel %s: %v", name, err)
 		}
-		id, err := res.LastInsertId()
-		if err != nil {
+		var id int64
+		if err := repo.DB().Raw("SELECT last_insert_rowid()").Row().Scan(&id); err != nil {
 			t.Fatalf("get tunnel id %s: %v", name, err)
 		}
 		return id
@@ -42,22 +41,22 @@ func TestUserTunnelVisibleListContracts(t *testing.T) {
 	enabledB := insertTunnel("enabled-B", 1, 2)
 	disabledC := insertTunnel("disabled-C", 0, 3)
 
-	if _, err := repo.DB().Exec(`
+	if err := repo.DB().Exec(`
 		INSERT INTO user_tunnel(user_id, tunnel_id, speed_id, num, flow, in_flow, out_flow, flow_reset_time, exp_time, status)
 		VALUES(?, ?, NULL, ?, ?, 0, 0, ?, ?, ?)
-	`, 2, enabledA, 100, 1000, 1, 2727251700000, 0); err != nil {
+	`, 2, enabledA, 100, 1000, 1, 2727251700000, 0).Error; err != nil {
 		t.Fatalf("insert user_tunnel enabledA: %v", err)
 	}
-	if _, err := repo.DB().Exec(`
+	if err := repo.DB().Exec(`
 		INSERT INTO user_tunnel(user_id, tunnel_id, speed_id, num, flow, in_flow, out_flow, flow_reset_time, exp_time, status)
 		VALUES(?, ?, NULL, ?, ?, 0, 0, ?, ?, ?)
-	`, 2, enabledB, 100, 1000, 1, 2727251700000, 1); err != nil {
+	`, 2, enabledB, 100, 1000, 1, 2727251700000, 1).Error; err != nil {
 		t.Fatalf("insert user_tunnel enabledB: %v", err)
 	}
-	if _, err := repo.DB().Exec(`
+	if err := repo.DB().Exec(`
 		INSERT INTO user_tunnel(user_id, tunnel_id, speed_id, num, flow, in_flow, out_flow, flow_reset_time, exp_time, status)
 		VALUES(?, ?, NULL, ?, ?, 0, 0, ?, ?, ?)
-	`, 2, disabledC, 100, 1000, 1, 2727251700000, 1); err != nil {
+	`, 2, disabledC, 100, 1000, 1, 2727251700000, 1).Error; err != nil {
 		t.Fatalf("insert user_tunnel disabledC: %v", err)
 	}
 

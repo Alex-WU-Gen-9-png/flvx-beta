@@ -16,7 +16,7 @@ import (
 	"go-backend/internal/auth"
 	httpserver "go-backend/internal/http"
 	"go-backend/internal/http/handler"
-	"go-backend/internal/store/sqlite"
+	"go-backend/internal/store/repo"
 )
 
 func TestPostgresNodeCreateRepairsMissingIDDefaultContract(t *testing.T) {
@@ -44,35 +44,35 @@ func TestPostgresNodeCreateRepairsMissingIDDefaultContract(t *testing.T) {
 		t.Fatalf("build schema dsn: %v", err)
 	}
 
-	repo, err := sqlite.OpenPostgres(testDSN)
+	r, err := repo.OpenPostgres(testDSN)
 	if err != nil {
 		t.Fatalf("open postgres repository: %v", err)
 	}
-	if _, err := repo.DB().Exec(`ALTER TABLE node ALTER COLUMN id DROP DEFAULT`); err != nil {
-		_ = repo.Close()
+	if err := r.DB().Exec(`ALTER TABLE node ALTER COLUMN id DROP DEFAULT`).Error; err != nil {
+		_ = r.Close()
 		t.Fatalf("drop node.id default to simulate drift: %v", err)
 	}
-	if err := repo.Close(); err != nil {
+	if err := r.Close(); err != nil {
 		t.Fatalf("close repository before reopen: %v", err)
 	}
 
-	repo, err = sqlite.OpenPostgres(testDSN)
+	r, err = repo.OpenPostgres(testDSN)
 	if err != nil {
 		t.Fatalf("reopen postgres repository: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = repo.Close()
+		_ = r.Close()
 	})
 
 	var columnDefault sql.NullString
-	if err := repo.DB().QueryRow(`
+	if err := r.DB().Raw(`
 		SELECT column_default
 		FROM information_schema.columns
 		WHERE table_schema = current_schema()
 		  AND table_name = 'node'
 		  AND column_name = 'id'
 		LIMIT 1
-	`).Scan(&columnDefault); err != nil {
+	`).Row().Scan(&columnDefault); err != nil {
 		t.Fatalf("query node.id default: %v", err)
 	}
 	if !columnDefault.Valid || !strings.Contains(strings.ToLower(columnDefault.String), "nextval(") {
@@ -80,7 +80,7 @@ func TestPostgresNodeCreateRepairsMissingIDDefaultContract(t *testing.T) {
 	}
 
 	jwtSecret := "postgres-contract-secret"
-	router := httpserver.NewRouter(handler.New(repo, jwtSecret), jwtSecret)
+	router := httpserver.NewRouter(handler.New(r, jwtSecret), jwtSecret)
 	token, err := auth.GenerateToken(1, "admin_user", 0, jwtSecret)
 	if err != nil {
 		t.Fatalf("generate admin token: %v", err)
@@ -95,7 +95,7 @@ func TestPostgresNodeCreateRepairsMissingIDDefaultContract(t *testing.T) {
 	assertCode(t, resp, 0)
 
 	var nodeID int64
-	if err := repo.DB().QueryRow(`SELECT id FROM node WHERE name = ? ORDER BY id DESC LIMIT 1`, "pg-repair-node").Scan(&nodeID); err != nil {
+	if err := r.DB().Raw(`SELECT id FROM node WHERE name = ? ORDER BY id DESC LIMIT 1`, "pg-repair-node").Row().Scan(&nodeID); err != nil {
 		t.Fatalf("query created node: %v", err)
 	}
 	if nodeID <= 0 {

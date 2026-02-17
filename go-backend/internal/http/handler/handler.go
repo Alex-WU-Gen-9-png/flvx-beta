@@ -18,12 +18,12 @@ import (
 	"go-backend/internal/http/middleware"
 	"go-backend/internal/http/response"
 	"go-backend/internal/security"
-	"go-backend/internal/store/sqlite"
+	"go-backend/internal/store/repo"
 	"go-backend/internal/ws"
 )
 
 type Handler struct {
-	repo      *sqlite.Repository
+	repo      *repo.Repository
 	jwtSecret string
 	wsServer  *ws.Server
 
@@ -69,7 +69,7 @@ type flowItem struct {
 	D int64  `json:"d"`
 }
 
-func New(repo *sqlite.Repository, jwtSecret string) *Handler {
+func New(repo *repo.Repository, jwtSecret string) *Handler {
 	return &Handler{
 		repo:          repo,
 		jwtSecret:     jwtSecret,
@@ -426,7 +426,7 @@ func (h *Handler) openAPISubStore(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSON(w, response.ErrDefault("请求失败"))
 		return
 	}
-	if h == nil || h.repo == nil || h.repo.DB() == nil {
+	if h == nil || h.repo == nil {
 		response.WriteJSON(w, response.Err(-2, "database unavailable"))
 		return
 	}
@@ -469,27 +469,21 @@ func (h *Handler) openAPISubStore(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		var userID int64
-		var inFlow int64
-		var outFlow int64
-		var flow int64
-		var expTime int64
-		err = h.repo.DB().QueryRow(`SELECT user_id, in_flow, out_flow, flow, exp_time FROM user_tunnel WHERE id = ? LIMIT 1`, tunnelID).
-			Scan(&userID, &inFlow, &outFlow, &flow, &expTime)
+		ut, err := h.repo.GetUserTunnelByID(tunnelID)
 		if err != nil {
-			if err == sql.ErrNoRows {
-				response.WriteJSON(w, response.ErrDefault("隧道不存在"))
-				return
-			}
 			response.WriteJSON(w, response.Err(-2, err.Error()))
 			return
 		}
-		if userID != user.ID {
+		if ut == nil {
+			response.WriteJSON(w, response.ErrDefault("隧道不存在"))
+			return
+		}
+		if ut.UserID != user.ID {
 			response.WriteJSON(w, response.ErrDefault("隧道不存在"))
 			return
 		}
 
-		headerValue = buildSubscriptionHeader(outFlow, inFlow, flow*giga, expTime/1000)
+		headerValue = buildSubscriptionHeader(ut.OutFlow, ut.InFlow, ut.Flow*giga, ut.ExpTime/1000)
 	}
 
 	w.Header().Set("subscription-userinfo", headerValue)
@@ -1190,7 +1184,7 @@ func (h *Handler) backupExport(w http.ResponseWriter, r *http.Request) {
 
 type backupImportRequest struct {
 	Types []string `json:"types"`
-	sqlite.BackupData
+	repo.BackupData
 }
 
 func (h *Handler) backupImport(w http.ResponseWriter, r *http.Request) {

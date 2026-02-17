@@ -17,22 +17,20 @@ import (
 	httpserver "go-backend/internal/http"
 	"go-backend/internal/http/handler"
 	"go-backend/internal/http/response"
-	"go-backend/internal/store"
-	"go-backend/internal/store/sqlite"
+	"go-backend/internal/store/repo"
 
-	_ "modernc.org/sqlite"
+	"gorm.io/gorm"
 )
 
 func TestCaptchaVerifyLoginContract(t *testing.T) {
 	secret := "contract-jwt-secret"
-	router, repo := setupContractRouter(t, secret)
+	router, r := setupContractRouter(t, secret)
 
-	_, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO vite_config(name, value, time)
 		VALUES(?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET value = excluded.value, time = excluded.time
-	`, "captcha_enabled", "true", time.Now().UnixMilli())
-	if err != nil {
+	`, "captcha_enabled", "true", time.Now().UnixMilli()).Error; err != nil {
 		t.Fatalf("enable captcha: %v", err)
 	}
 
@@ -84,7 +82,7 @@ func TestCaptchaVerifyLoginContract(t *testing.T) {
 }
 
 func TestOpenAPISubStoreContracts(t *testing.T) {
-	router, repo := setupContractRouter(t, "contract-jwt-secret")
+	router, r := setupContractRouter(t, "contract-jwt-secret")
 
 	const tunnelFlowGB = int64(500)
 	const tunnelInFlow = int64(123)
@@ -92,17 +90,16 @@ func TestOpenAPISubStoreContracts(t *testing.T) {
 	const tunnelExpTimeMs = int64(2727251700000)
 
 	now := time.Now().UnixMilli()
-	res, err := repo.DB().Exec(`INSERT INTO tunnel(name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		"contract-tunnel", 1.0, 1, "tls", 1, now, now, 1, nil, 0)
-	if err != nil {
+	if err := r.DB().Exec(`INSERT INTO tunnel(name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"contract-tunnel", 1.0, 1, "tls", 1, now, now, 1, nil, 0).Error; err != nil {
 		t.Fatalf("insert tunnel: %v", err)
 	}
-	tunnelID, err := res.LastInsertId()
-	if err != nil {
+	var tunnelID int64
+	if err := r.DB().Raw("SELECT last_insert_rowid()").Row().Scan(&tunnelID); err != nil {
 		t.Fatalf("last insert id: %v", err)
 	}
-	if _, err := repo.DB().Exec(`INSERT INTO user_tunnel(user_id, tunnel_id, speed_id, num, flow, in_flow, out_flow, flow_reset_time, exp_time, status) VALUES(?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
-		1, tunnelID, 99999, tunnelFlowGB, tunnelInFlow, tunnelOutFlow, 1, tunnelExpTimeMs, 1); err != nil {
+	if err := r.DB().Exec(`INSERT INTO user_tunnel(user_id, tunnel_id, speed_id, num, flow, in_flow, out_flow, flow_reset_time, exp_time, status) VALUES(?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+		1, tunnelID, 99999, tunnelFlowGB, tunnelInFlow, tunnelOutFlow, 1, tunnelExpTimeMs, 1).Error; err != nil {
 		t.Fatalf("insert user_tunnel: %v", err)
 	}
 
@@ -205,7 +202,7 @@ func TestSpeedLimitTunnelsRouteAlias(t *testing.T) {
 
 func TestBackupExportImportRestoreContracts(t *testing.T) {
 	secret := "contract-jwt-secret"
-	router, repo := setupContractRouter(t, secret)
+	router, r := setupContractRouter(t, secret)
 
 	adminToken, err := auth.GenerateToken(1, "admin_user", 0, secret)
 	if err != nil {
@@ -217,11 +214,11 @@ func TestBackupExportImportRestoreContracts(t *testing.T) {
 	}
 
 	key := "backup_contract_key"
-	if _, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO vite_config(name, value, time)
 		VALUES(?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET value = excluded.value, time = excluded.time
-	`, key, "v1", time.Now().UnixMilli()); err != nil {
+	`, key, "v1", time.Now().UnixMilli()).Error; err != nil {
 		t.Fatalf("seed config for backup contract: %v", err)
 	}
 
@@ -271,7 +268,7 @@ func TestBackupExportImportRestoreContracts(t *testing.T) {
 			t.Fatalf("expected import code 0, got %d (%s)", out.Code, out.Msg)
 		}
 
-		cfg, err := repo.GetConfigByName(key)
+		cfg, err := r.GetConfigByName(key)
 		if err != nil {
 			t.Fatalf("query imported config: %v", err)
 		}
@@ -302,7 +299,7 @@ func TestBackupExportImportRestoreContracts(t *testing.T) {
 			t.Fatalf("expected restore code 0, got %d (%s)", out.Code, out.Msg)
 		}
 
-		cfg, err := repo.GetConfigByName(key)
+		cfg, err := r.GetConfigByName(key)
 		if err != nil {
 			t.Fatalf("query restored config: %v", err)
 		}
@@ -314,27 +311,25 @@ func TestBackupExportImportRestoreContracts(t *testing.T) {
 	t.Run("backup export and import preserve forward ports", func(t *testing.T) {
 		now := time.Now().UnixMilli()
 
-		tunnelRes, err := repo.DB().Exec(`
+		if err := r.DB().Exec(`
 			INSERT INTO tunnel(name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
 			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, "backup-forward-tunnel", 1.0, 1, "tls", 0, now, now, 1, "", 88)
-		if err != nil {
+		`, "backup-forward-tunnel", 1.0, 1, "tls", 0, now, now, 1, "", 88).Error; err != nil {
 			t.Fatalf("seed tunnel for forward backup: %v", err)
 		}
-		tunnelID, err := tunnelRes.LastInsertId()
-		if err != nil {
+		var tunnelID int64
+		if err := r.DB().Raw("SELECT last_insert_rowid()").Row().Scan(&tunnelID); err != nil {
 			t.Fatalf("read tunnel id for forward backup: %v", err)
 		}
 
-		forwardRes, err := repo.DB().Exec(`
+		if err := r.DB().Exec(`
 			INSERT INTO forward(user_id, user_name, name, tunnel_id, remote_addr, strategy, in_flow, out_flow, created_time, updated_time, status, inx)
 			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, 1, "admin_user", "backup-forward", tunnelID, "127.0.0.1:9000", "fifo", 0, 0, now, now, 1, 88)
-		if err != nil {
+		`, 1, "admin_user", "backup-forward", tunnelID, "127.0.0.1:9000", "fifo", 0, 0, now, now, 1, 88).Error; err != nil {
 			t.Fatalf("seed forward for backup: %v", err)
 		}
-		forwardID, err := forwardRes.LastInsertId()
-		if err != nil {
+		var forwardID int64
+		if err := r.DB().Raw("SELECT last_insert_rowid()").Row().Scan(&forwardID); err != nil {
 			t.Fatalf("read forward id for backup: %v", err)
 		}
 
@@ -343,7 +338,7 @@ func TestBackupExportImportRestoreContracts(t *testing.T) {
 			2002: 21002,
 		}
 		for nodeID, port := range expected {
-			if _, err := repo.DB().Exec(`INSERT INTO forward_port(forward_id, node_id, port) VALUES(?, ?, ?)`, forwardID, nodeID, port); err != nil {
+			if err := r.DB().Exec(`INSERT INTO forward_port(forward_id, node_id, port) VALUES(?, ?, ?)`, forwardID, nodeID, port).Error; err != nil {
 				t.Fatalf("seed forward_port %d:%d: %v", nodeID, port, err)
 			}
 		}
@@ -420,10 +415,10 @@ func TestBackupExportImportRestoreContracts(t *testing.T) {
 			}
 		}
 
-		if _, err := repo.DB().Exec(`DELETE FROM forward_port WHERE forward_id = ?`, forwardID); err != nil {
+		if err := r.DB().Exec(`DELETE FROM forward_port WHERE forward_id = ?`, forwardID).Error; err != nil {
 			t.Fatalf("clear forward_port before import: %v", err)
 		}
-		if _, err := repo.DB().Exec(`INSERT INTO forward_port(forward_id, node_id, port) VALUES(?, ?, ?)`, forwardID, 9999, 39999); err != nil {
+		if err := r.DB().Exec(`INSERT INTO forward_port(forward_id, node_id, port) VALUES(?, ?, ?)`, forwardID, 9999, 39999).Error; err != nil {
 			t.Fatalf("seed wrong forward_port before import: %v", err)
 		}
 
@@ -447,7 +442,7 @@ func TestBackupExportImportRestoreContracts(t *testing.T) {
 			t.Fatalf("expected forwards import code 0, got %d (%s)", out.Code, out.Msg)
 		}
 
-		rows, err := repo.DB().Query(`SELECT node_id, port FROM forward_port WHERE forward_id = ? ORDER BY id ASC`, forwardID)
+		rows, err := r.DB().Raw(`SELECT node_id, port FROM forward_port WHERE forward_id = ? ORDER BY id ASC`, forwardID).Rows()
 		if err != nil {
 			t.Fatalf("query forward ports after import: %v", err)
 		}
@@ -478,22 +473,21 @@ func TestBackupExportImportRestoreContracts(t *testing.T) {
 
 	t.Run("backup export tolerates nullable legacy tunnel chain fields", func(t *testing.T) {
 		now := time.Now().UnixMilli()
-		res, err := repo.DB().Exec(`
+		if err := r.DB().Exec(`
 			INSERT INTO tunnel(name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
 			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, "legacy-null-chain", 1.0, 1, "tls", 1000, now, now, 1, nil, 1)
-		if err != nil {
+		`, "legacy-null-chain", 1.0, 1, "tls", 1000, now, now, 1, nil, 1).Error; err != nil {
 			t.Fatalf("seed tunnel for nullable chain export: %v", err)
 		}
-		tunnelID, err := res.LastInsertId()
-		if err != nil {
+		var tunnelID int64
+		if err := r.DB().Raw("SELECT last_insert_rowid()").Row().Scan(&tunnelID); err != nil {
 			t.Fatalf("read tunnel id for nullable chain export: %v", err)
 		}
 
-		if _, err := repo.DB().Exec(`
+		if err := r.DB().Exec(`
 			INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol)
 			VALUES(?, ?, ?, ?, ?, ?, ?)
-		`, tunnelID, "1", 1, nil, nil, nil, nil); err != nil {
+		`, tunnelID, "1", 1, nil, nil, nil, nil).Error; err != nil {
 			t.Fatalf("seed nullable chain_tunnel row: %v", err)
 		}
 
@@ -596,19 +590,19 @@ func exportBackupPayload(t *testing.T, router http.Handler, path, token string) 
 	return payload
 }
 
-func setupContractRouter(t *testing.T, jwtSecret string) (http.Handler, *sqlite.Repository) {
+func setupContractRouter(t *testing.T, jwtSecret string) (http.Handler, *repo.Repository) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "contract.db")
-	repo, err := sqlite.Open(dbPath)
+	r, err := repo.Open(dbPath)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = repo.Close()
+		_ = r.Close()
 	})
 
-	h := handler.New(repo, jwtSecret)
-	return httpserver.NewRouter(h, jwtSecret), repo
+	h := handler.New(r, jwtSecret)
+	return httpserver.NewRouter(h, jwtSecret), r
 }
 
 func TestOpenMigratesLegacyNodeDualStackColumns(t *testing.T) {
@@ -669,15 +663,15 @@ func TestOpenMigratesLegacyNodeDualStackColumns(t *testing.T) {
 		t.Fatalf("seed legacy node row: %v", err)
 	}
 
-	repo, err := sqlite.Open(dbPath)
+	r, err := repo.Open(dbPath)
 	if err != nil {
 		t.Fatalf("open migrated sqlite: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = repo.Close()
+		_ = r.Close()
 	})
 
-	nodes, err := repo.ListNodes()
+	nodes, err := r.ListNodes()
 	if err != nil {
 		t.Fatalf("list nodes after migration: %v", err)
 	}
@@ -685,7 +679,7 @@ func TestOpenMigratesLegacyNodeDualStackColumns(t *testing.T) {
 		t.Fatalf("expected 1 node after migration, got %d", len(nodes))
 	}
 
-	columns := readTableColumns(t, repo.DB(), "node")
+	columns := readTableColumns(t, r.DB(), "node")
 
 	for _, required := range []string{"server_ip_v4", "server_ip_v6", "inx"} {
 		if !columns[required] {
@@ -693,16 +687,16 @@ func TestOpenMigratesLegacyNodeDualStackColumns(t *testing.T) {
 		}
 	}
 
-	tunnelColumns := readTableColumns(t, repo.DB(), "tunnel")
+	tunnelColumns := readTableColumns(t, r.DB(), "tunnel")
 	if !tunnelColumns["inx"] {
 		t.Fatalf("expected tunnel column %q to exist after migration", "inx")
 	}
 }
 
-func readTableColumns(t *testing.T, db *store.DB, table string) map[string]bool {
+func readTableColumns(t *testing.T, db *gorm.DB, table string) map[string]bool {
 	t.Helper()
 
-	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	rows, err := db.Raw("PRAGMA table_info(" + table + ")").Rows()
 	if err != nil {
 		t.Fatalf("inspect %s columns: %v", table, err)
 	}

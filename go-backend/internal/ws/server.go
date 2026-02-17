@@ -15,7 +15,7 @@ import (
 
 	"go-backend/internal/auth"
 	"go-backend/internal/security"
-	"go-backend/internal/store/sqlite"
+	"go-backend/internal/store/repo"
 )
 
 type encryptedMessage struct {
@@ -68,7 +68,7 @@ type CommandResult struct {
 }
 
 type Server struct {
-	repo      *sqlite.Repository
+	repo      *repo.Repository
 	jwtSecret string
 	upgrader  websocket.Upgrader
 
@@ -79,7 +79,7 @@ type Server struct {
 	pending map[string]pendingRequest
 }
 
-func NewServer(repo *sqlite.Repository, jwtSecret string) *Server {
+func NewServer(repo *repo.Repository, jwtSecret string) *Server {
 	return &Server{
 		repo:      repo,
 		jwtSecret: jwtSecret,

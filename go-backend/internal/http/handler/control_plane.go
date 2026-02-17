@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"net"
@@ -12,61 +11,18 @@ import (
 	"time"
 
 	"go-backend/internal/http/client"
+	"go-backend/internal/store/model"
 	"go-backend/internal/ws"
 )
 
 var errForwardNotFound = errors.New("forward not found")
 
-type forwardRecord struct {
-	ID         int64
-	UserID     int64
-	UserName   string
-	Name       string
-	TunnelID   int64
-	RemoteAddr string
-	Strategy   string
-	Status     int
-}
+type forwardRecord = model.ForwardRecord
+type tunnelRecord = model.TunnelRecord
+type forwardPortRecord = model.ForwardPortRecord
+type nodeRecord = model.NodeRecord
 
-type tunnelRecord struct {
-	ID           int64
-	Type         int
-	Status       int
-	Flow         int64
-	TrafficRatio float64
-}
-
-type forwardPortRecord struct {
-	NodeID int64
-	Port   int
-}
-
-type nodeRecord struct {
-	ID            int64
-	Name          string
-	ServerIP      string
-	ServerIPv4    string
-	ServerIPv6    string
-	Status        int
-	PortRange     string
-	TCPListenAddr string
-	UDPListenAddr string
-	InterfaceName string
-	IsRemote      int
-	RemoteURL     string
-	RemoteToken   string
-	RemoteConfig  string
-}
-
-type chainNodeRecord struct {
-	ChainType int
-	Inx       int64
-	NodeID    int64
-	Port      int
-	NodeName  string
-	Protocol  string
-	Strategy  string
-}
+type chainNodeRecord = model.ChainNodeRecord
 
 type diagnosisTarget struct {
 	Address string
@@ -101,247 +57,82 @@ func (h *Handler) ensureTunnelPermission(userID int64, roleID int, tunnelID int6
 	if roleID == 0 {
 		return nil
 	}
-	var count int
-	err := h.repo.DB().QueryRow(`SELECT COUNT(1) FROM user_tunnel WHERE user_id = ? AND tunnel_id = ? AND status = 1`, userID, tunnelID).Scan(&count)
+	ok, err := h.repo.UserTunnelExistsByUserAndTunnel(userID, tunnelID)
 	if err != nil {
 		return err
 	}
-	if count <= 0 {
+	if !ok {
 		return errors.New("你没有该隧道的权限")
 	}
 	return nil
 }
 
 func (h *Handler) getForwardRecord(forwardID int64) (*forwardRecord, error) {
-	row := h.repo.DB().QueryRow(`
-		SELECT id, user_id, user_name, name, tunnel_id, remote_addr, COALESCE(strategy, 'fifo'), status
-		FROM forward WHERE id = ? LIMIT 1
-	`, forwardID)
-	var fr forwardRecord
-	err := row.Scan(&fr.ID, &fr.UserID, &fr.UserName, &fr.Name, &fr.TunnelID, &fr.RemoteAddr, &fr.Strategy, &fr.Status)
+	fr, err := h.repo.GetForwardRecord(forwardID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, errForwardNotFound
-		}
 		return nil, err
 	}
-	if strings.TrimSpace(fr.Strategy) == "" {
-		fr.Strategy = "fifo"
+	if fr == nil {
+		return nil, errForwardNotFound
 	}
-	return &fr, nil
+	return fr, nil
 }
 
 func (h *Handler) getTunnelRecord(tunnelID int64) (*tunnelRecord, error) {
-	row := h.repo.DB().QueryRow(`SELECT id, type, status, flow, traffic_ratio FROM tunnel WHERE id = ? LIMIT 1`, tunnelID)
-	var tr tunnelRecord
-	err := row.Scan(&tr.ID, &tr.Type, &tr.Status, &tr.Flow, &tr.TrafficRatio)
+	tr, err := h.repo.GetTunnelRecord(tunnelID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, errors.New("隧道不存在")
-		}
 		return nil, err
 	}
-	if tr.Flow <= 0 {
-		tr.Flow = 1
+	if tr == nil {
+		return nil, errors.New("隧道不存在")
 	}
-	if tr.TrafficRatio <= 0 {
-		tr.TrafficRatio = 1
-	}
-	return &tr, nil
+	return tr, nil
 }
 
 func (h *Handler) listForwardsByTunnel(tunnelID int64) ([]forwardRecord, error) {
-	rows, err := h.repo.DB().Query(`
-		SELECT id, user_id, user_name, name, tunnel_id, remote_addr, COALESCE(strategy, 'fifo'), status
-		FROM forward
-		WHERE tunnel_id = ?
-		ORDER BY id ASC
-	`, tunnelID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	result := make([]forwardRecord, 0)
-	for rows.Next() {
-		var fr forwardRecord
-		if err := rows.Scan(&fr.ID, &fr.UserID, &fr.UserName, &fr.Name, &fr.TunnelID, &fr.RemoteAddr, &fr.Strategy, &fr.Status); err != nil {
-			return nil, err
-		}
-		if strings.TrimSpace(fr.Strategy) == "" {
-			fr.Strategy = "fifo"
-		}
-		result = append(result, fr)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return result, nil
+	return h.repo.ListForwardsByTunnel(tunnelID)
 }
 
 func (h *Handler) listForwardPorts(forwardID int64) ([]forwardPortRecord, error) {
-	rows, err := h.repo.DB().Query(`SELECT node_id, port FROM forward_port WHERE forward_id = ? ORDER BY id ASC`, forwardID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	result := make([]forwardPortRecord, 0)
-	for rows.Next() {
-		var item forwardPortRecord
-		if err := rows.Scan(&item.NodeID, &item.Port); err != nil {
-			return nil, err
-		}
-		result = append(result, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return result, nil
+	return h.repo.ListForwardPorts(forwardID)
 }
 
 func (h *Handler) isTunnelSelectedTLSProtocol(tunnelID int64) (bool, error) {
-	row := h.repo.DB().QueryRow(`
-		SELECT protocol
-		FROM chain_tunnel
-		WHERE tunnel_id = ? AND chain_type = '3'
-		ORDER BY id ASC
-		LIMIT 1
-	`, tunnelID)
-
-	var protocol sql.NullString
-	if err := row.Scan(&protocol); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
-		}
+	protocol, err := h.repo.GetTunnelOutProtocol(tunnelID)
+	if err != nil {
 		return false, err
 	}
-
-	return isTLSTunnelProtocol(protocol.String), nil
+	return isTLSTunnelProtocol(protocol), nil
 }
 
 func (h *Handler) getNodeRecord(nodeID int64) (*nodeRecord, error) {
-	row := h.repo.DB().QueryRow(`
-		SELECT id, name, server_ip, server_ip_v4, server_ip_v6, status, port, tcp_listen_addr, udp_listen_addr, interface_name, is_remote, remote_url, remote_token, remote_config
-		FROM node
-		WHERE id = ?
-		LIMIT 1
-	`, nodeID)
-	var n nodeRecord
-	var serverIPv4 sql.NullString
-	var serverIPv6 sql.NullString
-	var portRange sql.NullString
-	var tcpListen sql.NullString
-	var udpListen sql.NullString
-	var iface sql.NullString
-	var remoteURL sql.NullString
-	var remoteToken sql.NullString
-	var remoteConfig sql.NullString
-	err := row.Scan(&n.ID, &n.Name, &n.ServerIP, &serverIPv4, &serverIPv6, &n.Status, &portRange, &tcpListen, &udpListen, &iface, &n.IsRemote, &remoteURL, &remoteToken, &remoteConfig)
+	n, err := h.repo.GetNodeRecord(nodeID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, errors.New("节点不存在")
-		}
 		return nil, err
 	}
-	n.ServerIPv4 = strings.TrimSpace(serverIPv4.String)
-	n.ServerIPv6 = strings.TrimSpace(serverIPv6.String)
-	n.PortRange = strings.TrimSpace(portRange.String)
-	n.TCPListenAddr = strings.TrimSpace(tcpListen.String)
-	n.UDPListenAddr = strings.TrimSpace(udpListen.String)
-	n.InterfaceName = strings.TrimSpace(iface.String)
-	n.RemoteURL = strings.TrimSpace(remoteURL.String)
-	n.RemoteToken = strings.TrimSpace(remoteToken.String)
-	n.RemoteConfig = strings.TrimSpace(remoteConfig.String)
-	if n.TCPListenAddr == "" {
-		n.TCPListenAddr = "[::]"
+	if n == nil {
+		return nil, errors.New("节点不存在")
 	}
-	if n.UDPListenAddr == "" {
-		n.UDPListenAddr = "[::]"
-	}
-	if strings.TrimSpace(n.Name) == "" {
-		n.Name = fmt.Sprintf("node_%d", n.ID)
-	}
-	return &n, nil
+	return n, nil
 }
 
 func (h *Handler) resolveUserTunnelAndLimiter(userID, tunnelID int64) (int64, *int64, *int, error) {
-	row := h.repo.DB().QueryRow(`
-		SELECT ut.id, sl.id, sl.speed
-		FROM user_tunnel ut
-		LEFT JOIN speed_limit sl ON sl.id = ut.speed_id
-		WHERE ut.user_id = ? AND ut.tunnel_id = ?
-		ORDER BY ut.id ASC
-		LIMIT 1
-	`, userID, tunnelID)
-	var userTunnelID int64
-	var limiterID sql.NullInt64
-	var speed sql.NullInt64
-	err := row.Scan(&userTunnelID, &limiterID, &speed)
+	info, err := h.repo.ResolveUserTunnelAndLimiter(userID, tunnelID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, nil, nil, nil
-		}
 		return 0, nil, nil, err
 	}
-	if !limiterID.Valid || limiterID.Int64 <= 0 {
-		return userTunnelID, nil, nil, nil
+	if info == nil {
+		return 0, nil, nil, nil
 	}
-	v := limiterID.Int64
-	s := int(speed.Int64)
-	return userTunnelID, &v, &s, nil
+	return info.UserTunnelID, info.LimiterID, info.Speed, nil
 }
 
 func (h *Handler) listUserTunnelIDs(userID, tunnelID int64) ([]int64, error) {
-	rows, err := h.repo.DB().Query(`
-		SELECT id
-		FROM user_tunnel
-		WHERE user_id = ? AND tunnel_id = ?
-		ORDER BY id ASC
-	`, userID, tunnelID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := make([]int64, 0)
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return h.repo.ListUserTunnelIDs(userID, tunnelID)
 }
 
 func (h *Handler) listUserTunnelIDsByUser(userID int64) ([]int64, error) {
-	rows, err := h.repo.DB().Query(`
-		SELECT id
-		FROM user_tunnel
-		WHERE user_id = ?
-		ORDER BY id ASC
-	`, userID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := make([]int64, 0)
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return h.repo.ListUserTunnelIDsByUser(userID)
 }
 
 func (h *Handler) syncForwardServices(forward *forwardRecord, method string, allowFallbackAdd bool) error {
@@ -663,12 +454,12 @@ func (h *Handler) diagnoseTunnelRuntime(tunnelID int64) (map[string]interface{},
 		return nil, err
 	}
 
-	var tunnelName string
-	if err := h.repo.DB().QueryRow(`SELECT name FROM tunnel WHERE id = ?`, tunnelID).Scan(&tunnelName); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, errors.New("隧道不存在")
-		}
+	tunnelName, err := h.repo.GetTunnelName(tunnelID)
+	if err != nil {
 		return nil, err
+	}
+	if tunnelName == "" {
+		return nil, errors.New("隧道不存在")
 	}
 
 	chainRows, err := h.listChainNodesForTunnel(tunnelID)
@@ -960,40 +751,7 @@ func firstPortFromRange(portRange string) int {
 }
 
 func (h *Handler) listChainNodesForTunnel(tunnelID int64) ([]chainNodeRecord, error) {
-	rows, err := h.repo.DB().Query(`
-		SELECT CAST(ct.chain_type AS INTEGER), COALESCE(ct.inx, 0), ct.node_id, COALESCE(ct.port, 0), n.name, ct.protocol, ct.strategy
-		FROM chain_tunnel ct
-		LEFT JOIN node n ON n.id = ct.node_id
-		WHERE ct.tunnel_id = ?
-		ORDER BY CAST(ct.chain_type AS INTEGER) ASC, COALESCE(ct.inx, 0) ASC, ct.id ASC
-	`, tunnelID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	result := make([]chainNodeRecord, 0)
-	for rows.Next() {
-		var item chainNodeRecord
-		var name sql.NullString
-		var protocol sql.NullString
-		var strategy sql.NullString
-		if err := rows.Scan(&item.ChainType, &item.Inx, &item.NodeID, &item.Port, &name, &protocol, &strategy); err != nil {
-			return nil, err
-		}
-		if strings.TrimSpace(name.String) == "" {
-			item.NodeName = fmt.Sprintf("node_%d", item.NodeID)
-		} else {
-			item.NodeName = name.String
-		}
-		item.Protocol = defaultString(protocol.String, "tls")
-		item.Strategy = defaultString(strategy.String, "round")
-		result = append(result, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return result, nil
+	return h.repo.ListChainNodesForTunnel(tunnelID)
 }
 
 func (h *Handler) tcpPingViaNode(nodeID int64, ip string, port int) (map[string]interface{}, error) {

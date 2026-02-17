@@ -26,15 +26,14 @@ func TestTunnelCreateRuntimeRollbackContract(t *testing.T) {
 	}
 
 	insertNode := func(name, ip, portRange string) int64 {
-		res, err := repo.DB().Exec(`
+		if err := repo.DB().Exec(`
 			INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx)
 			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, name, name+"-secret", ip, ip, "", portRange, "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0)
-		if err != nil {
+		`, name, name+"-secret", ip, ip, "", portRange, "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0).Error; err != nil {
 			t.Fatalf("insert node %s: %v", name, err)
 		}
-		id, err := res.LastInsertId()
-		if err != nil {
+		var id int64
+		if err := repo.DB().Raw("SELECT last_insert_rowid()").Row().Scan(&id); err != nil {
 			t.Fatalf("get node id %s: %v", name, err)
 		}
 		return id
@@ -64,7 +63,7 @@ func TestTunnelCreateRuntimeRollbackContract(t *testing.T) {
 	}
 
 	var tunnelCount int
-	if err := repo.DB().QueryRow(`SELECT COUNT(1) FROM tunnel WHERE name = ?`, "runtime-rollback-tunnel").Scan(&tunnelCount); err != nil {
+	if err := repo.DB().Raw(`SELECT COUNT(1) FROM tunnel WHERE name = ?`, "runtime-rollback-tunnel").Row().Scan(&tunnelCount); err != nil {
 		t.Fatalf("count tunnel: %v", err)
 	}
 	if tunnelCount != 0 {
@@ -72,7 +71,7 @@ func TestTunnelCreateRuntimeRollbackContract(t *testing.T) {
 	}
 
 	var chainCount int
-	if err := repo.DB().QueryRow(`SELECT COUNT(1) FROM chain_tunnel`).Scan(&chainCount); err != nil {
+	if err := repo.DB().Raw(`SELECT COUNT(1) FROM chain_tunnel`).Row().Scan(&chainCount); err != nil {
 		t.Fatalf("count chain_tunnel: %v", err)
 	}
 	if chainCount != 0 {
@@ -91,15 +90,14 @@ func TestTunnelUpdateAssignsChainPortsContract(t *testing.T) {
 	}
 
 	insertNode := func(name, ip, portRange string) int64 {
-		res, err := repo.DB().Exec(`
+		if err := repo.DB().Exec(`
 			INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx)
 			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, name, name+"-secret", ip, ip, "", portRange, "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0)
-		if err != nil {
+		`, name, name+"-secret", ip, ip, "", portRange, "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0).Error; err != nil {
 			t.Fatalf("insert node %s: %v", name, err)
 		}
-		id, err := res.LastInsertId()
-		if err != nil {
+		var id int64
+		if err := repo.DB().Raw("SELECT last_insert_rowid()").Row().Scan(&id); err != nil {
 			t.Fatalf("get node id %s: %v", name, err)
 		}
 		return id
@@ -109,15 +107,14 @@ func TestTunnelUpdateAssignsChainPortsContract(t *testing.T) {
 	chainID := insertNode("update-chain", "10.30.0.2", "41000-41010")
 	exitID := insertNode("update-exit", "10.30.0.3", "42000-42010")
 
-	tunnelRes, err := repo.DB().Exec(`
+	if err := repo.DB().Exec(`
 		INSERT INTO tunnel(name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, "update-port-tunnel", 1.0, 1, "tls", 99999, now, now, 1, nil, 0)
-	if err != nil {
+	`, "update-port-tunnel", 1.0, 1, "tls", 99999, now, now, 1, nil, 0).Error; err != nil {
 		t.Fatalf("insert tunnel: %v", err)
 	}
-	tunnelID, err := tunnelRes.LastInsertId()
-	if err != nil {
+	var tunnelID int64
+	if err := repo.DB().Raw("SELECT last_insert_rowid()").Row().Scan(&tunnelID); err != nil {
 		t.Fatalf("get tunnel id: %v", err)
 	}
 
@@ -131,7 +128,7 @@ func TestTunnelUpdateAssignsChainPortsContract(t *testing.T) {
 	assertCode(t, res, 0)
 
 	var chainPort int
-	if err := repo.DB().QueryRow(`SELECT port FROM chain_tunnel WHERE tunnel_id = ? AND chain_type = 2 LIMIT 1`, tunnelID).Scan(&chainPort); err != nil {
+	if err := repo.DB().Raw(`SELECT port FROM chain_tunnel WHERE tunnel_id = ? AND chain_type = 2 LIMIT 1`, tunnelID).Row().Scan(&chainPort); err != nil {
 		t.Fatalf("query chain port: %v", err)
 	}
 	if chainPort <= 0 {
@@ -139,7 +136,7 @@ func TestTunnelUpdateAssignsChainPortsContract(t *testing.T) {
 	}
 
 	var outPort int
-	if err := repo.DB().QueryRow(`SELECT port FROM chain_tunnel WHERE tunnel_id = ? AND chain_type = 3 LIMIT 1`, tunnelID).Scan(&outPort); err != nil {
+	if err := repo.DB().Raw(`SELECT port FROM chain_tunnel WHERE tunnel_id = ? AND chain_type = 3 LIMIT 1`, tunnelID).Row().Scan(&outPort); err != nil {
 		t.Fatalf("query out port: %v", err)
 	}
 	if outPort <= 0 {
@@ -147,7 +144,7 @@ func TestTunnelUpdateAssignsChainPortsContract(t *testing.T) {
 	}
 
 	var entryStrategy sql.NullString
-	if err := repo.DB().QueryRow(`SELECT strategy FROM chain_tunnel WHERE tunnel_id = ? AND chain_type = 1 LIMIT 1`, tunnelID).Scan(&entryStrategy); err != nil {
+	if err := repo.DB().Raw(`SELECT strategy FROM chain_tunnel WHERE tunnel_id = ? AND chain_type = 1 LIMIT 1`, tunnelID).Row().Scan(&entryStrategy); err != nil {
 		t.Fatalf("query entry strategy: %v", err)
 	}
 	if !entryStrategy.Valid || strings.TrimSpace(entryStrategy.String) == "" {

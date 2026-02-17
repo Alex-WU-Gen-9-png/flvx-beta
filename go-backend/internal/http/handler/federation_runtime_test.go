@@ -10,33 +10,33 @@ import (
 	"time"
 
 	"go-backend/internal/http/response"
-	"go-backend/internal/store/sqlite"
+	"go-backend/internal/store/repo"
 )
 
 func TestPickPeerSharePortUsesRuntimeReservations(t *testing.T) {
-	repo, err := sqlite.Open(filepath.Join(t.TempDir(), "panel.db"))
+	r, err := repo.Open(filepath.Join(t.TempDir(), "panel.db"))
 	if err != nil {
 		t.Fatalf("open repo: %v", err)
 	}
-	defer repo.Close()
+	defer r.Close()
 
-	h := &Handler{repo: repo}
+	h := &Handler{repo: r}
 	now := time.Now().UnixMilli()
 
-	if _, err := repo.DB().Exec(`INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol) VALUES(?, ?, ?, ?, ?, ?, ?)`, 1, 2, 1, 3000, "round", 1, "tls"); err != nil {
+	if err := r.DB().Exec(`INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol) VALUES(?, ?, ?, ?, ?, ?, ?)`, 1, 2, 1, 3000, "round", 1, "tls").Error; err != nil {
 		t.Fatalf("insert chain_tunnel: %v", err)
 	}
-	if _, err := repo.DB().Exec(`INSERT INTO forward_port(forward_id, node_id, port) VALUES(?, ?, ?)`, 1, 1, 3001); err != nil {
+	if err := r.DB().Exec(`INSERT INTO forward_port(forward_id, node_id, port) VALUES(?, ?, ?)`, 1, 1, 3001).Error; err != nil {
 		t.Fatalf("insert forward_port: %v", err)
 	}
-	if _, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO peer_share_runtime(share_id, node_id, reservation_id, resource_key, binding_id, role, chain_name, service_name, protocol, strategy, port, target, applied, status, created_time, updated_time)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, 77, 1, "res-1", "rk-1", "b-1", "exit", "", "fed_svc_1", "tls", "round", 3002, "", 1, 1, now, now); err != nil {
+	`, 77, 1, "res-1", "rk-1", "b-1", "exit", "", "fed_svc_1", "tls", "round", 3002, "", 1, 1, now, now).Error; err != nil {
 		t.Fatalf("insert peer_share_runtime: %v", err)
 	}
 
-	share := &sqlite.PeerShare{
+	share := &repo.PeerShare{
 		ID:             77,
 		NodeID:         1,
 		PortRangeStart: 3000,
@@ -57,13 +57,13 @@ func TestPickPeerSharePortUsesRuntimeReservations(t *testing.T) {
 }
 
 func TestApplyTunnelRuntimeSkipsRemoteChainAndOutNodes(t *testing.T) {
-	repo, err := sqlite.Open(filepath.Join(t.TempDir(), "rt-skip.db"))
+	r, err := repo.Open(filepath.Join(t.TempDir(), "rt-skip.db"))
 	if err != nil {
 		t.Fatalf("open repo: %v", err)
 	}
-	defer repo.Close()
+	defer r.Close()
 
-	h := &Handler{repo: repo}
+	h := &Handler{repo: r}
 	now := time.Now().UnixMilli()
 	for _, n := range []struct {
 		id   int64
@@ -73,10 +73,10 @@ func TestApplyTunnelRuntimeSkipsRemoteChainAndOutNodes(t *testing.T) {
 		{12, "remote-chain", "10.99.0.2"},
 		{13, "remote-out", "10.99.0.3"},
 	} {
-		if _, err := repo.DB().Exec(`
+		if err := r.DB().Exec(`
 			INSERT INTO node(id, name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx, is_remote, remote_url, remote_token)
 			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, n.id, n.name, n.name+"-secret", n.ip, n.ip, "", "40000-40010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0, 1, "http://remote-peer", "remote-token"); err != nil {
+		`, n.id, n.name, n.name+"-secret", n.ip, n.ip, "", "40000-40010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0, 1, "http://remote-peer", "remote-token").Error; err != nil {
 			t.Fatalf("insert node %s: %v", n.name, err)
 		}
 	}
@@ -112,25 +112,24 @@ func TestApplyTunnelRuntimeSkipsRemoteChainAndOutNodes(t *testing.T) {
 }
 
 func TestPrepareTunnelCreateStateRemoteAutoPortDefersToFederation(t *testing.T) {
-	repo, err := sqlite.Open(filepath.Join(t.TempDir(), "panel.db"))
+	r, err := repo.Open(filepath.Join(t.TempDir(), "panel.db"))
 	if err != nil {
 		t.Fatalf("open repo: %v", err)
 	}
-	defer repo.Close()
+	defer r.Close()
 
-	h := &Handler{repo: repo}
+	h := &Handler{repo: r}
 	now := time.Now().UnixMilli()
 
 	insertNode := func(name string, status int, portRange string, isRemote int) int64 {
-		res, execErr := repo.DB().Exec(`
+		if execErr := r.DB().Exec(`
 			INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx, is_remote, remote_url, remote_token, remote_config)
 			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, name, name+"-secret", "10.0.0.1", "10.0.0.1", "", portRange, "", "v1", 1, 1, 1, now, now, status, "[::]", "[::]", 0, isRemote, "http://peer", "peer-token", `{"shareId":1}`)
-		if execErr != nil {
+		`, name, name+"-secret", "10.0.0.1", "10.0.0.1", "", portRange, "", "v1", 1, 1, 1, now, now, status, "[::]", "[::]", 0, isRemote, "http://peer", "peer-token", `{"shareId":1}`).Error; execErr != nil {
 			t.Fatalf("insert node %s: %v", name, execErr)
 		}
-		id, idErr := res.LastInsertId()
-		if idErr != nil {
+		var id int64
+		if idErr := r.DB().Raw("SELECT last_insert_rowid()").Row().Scan(&id); idErr != nil {
 			t.Fatalf("node id %s: %v", name, idErr)
 		}
 		return id
@@ -139,12 +138,12 @@ func TestPrepareTunnelCreateStateRemoteAutoPortDefersToFederation(t *testing.T) 
 	entryID := insertNode("entry", 1, "31000-31010", 0)
 	remoteOutID := insertNode("remote-out", 1, "30000", 1)
 
-	if _, err := repo.DB().Exec(`INSERT INTO forward_port(forward_id, node_id, port) VALUES(?, ?, ?)`, 1, remoteOutID, 30000); err != nil {
+	if err := r.DB().Exec(`INSERT INTO forward_port(forward_id, node_id, port) VALUES(?, ?, ?)`, 1, remoteOutID, 30000).Error; err != nil {
 		t.Fatalf("insert forward_port: %v", err)
 	}
 
-	tx, err := repo.DB().Begin()
-	if err != nil {
+	tx := r.DB().Begin()
+	if tx.Error != nil {
 		t.Fatalf("begin tx: %v", err)
 	}
 	defer tx.Rollback()
@@ -173,25 +172,24 @@ func TestPrepareTunnelCreateStateRemoteAutoPortDefersToFederation(t *testing.T) 
 }
 
 func TestPrepareTunnelCreateStateAllowsOfflineRemoteMiddleNode(t *testing.T) {
-	repo, err := sqlite.Open(filepath.Join(t.TempDir(), "panel.db"))
+	r, err := repo.Open(filepath.Join(t.TempDir(), "panel.db"))
 	if err != nil {
 		t.Fatalf("open repo: %v", err)
 	}
-	defer repo.Close()
+	defer r.Close()
 
-	h := &Handler{repo: repo}
+	h := &Handler{repo: r}
 	now := time.Now().UnixMilli()
 
 	insertNode := func(name string, status int, portRange string, isRemote int) int64 {
-		res, execErr := repo.DB().Exec(`
+		if execErr := r.DB().Exec(`
 			INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx, is_remote, remote_url, remote_token, remote_config)
 			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, name, name+"-secret", "10.0.0.1", "10.0.0.1", "", portRange, "", "v1", 1, 1, 1, now, now, status, "[::]", "[::]", 0, isRemote, "http://peer", "peer-token", `{"shareId":2}`)
-		if execErr != nil {
+		`, name, name+"-secret", "10.0.0.1", "10.0.0.1", "", portRange, "", "v1", 1, 1, 1, now, now, status, "[::]", "[::]", 0, isRemote, "http://peer", "peer-token", `{"shareId":2}`).Error; execErr != nil {
 			t.Fatalf("insert node %s: %v", name, execErr)
 		}
-		id, idErr := res.LastInsertId()
-		if idErr != nil {
+		var id int64
+		if idErr := r.DB().Raw("SELECT last_insert_rowid()").Row().Scan(&id); idErr != nil {
 			t.Fatalf("node id %s: %v", name, idErr)
 		}
 		return id
@@ -201,8 +199,8 @@ func TestPrepareTunnelCreateStateAllowsOfflineRemoteMiddleNode(t *testing.T) {
 	remoteMiddleID := insertNode("middle-remote", 0, "33000-33010", 1)
 	outID := insertNode("out-local", 1, "34000-34010", 0)
 
-	tx, err := repo.DB().Begin()
-	if err != nil {
+	tx := r.DB().Begin()
+	if tx.Error != nil {
 		t.Fatalf("begin tx: %v", err)
 	}
 	defer tx.Rollback()
@@ -238,16 +236,16 @@ func TestPrepareTunnelCreateStateAllowsOfflineRemoteMiddleNode(t *testing.T) {
 }
 
 func TestFederationRuntimeReservePortRejectsWhenShareFlowExceeded(t *testing.T) {
-	repo, err := sqlite.Open(filepath.Join(t.TempDir(), "panel.db"))
+	r, err := repo.Open(filepath.Join(t.TempDir(), "panel.db"))
 	if err != nil {
 		t.Fatalf("open repo: %v", err)
 	}
-	defer repo.Close()
+	defer r.Close()
 
-	h := &Handler{repo: repo}
+	h := &Handler{repo: r}
 	now := time.Now().UnixMilli()
 
-	if err := repo.CreatePeerShare(&sqlite.PeerShare{
+	if err := r.CreatePeerShare(&repo.PeerShare{
 		Name:           "limited-share",
 		NodeID:         1,
 		Token:          "limited-token",
