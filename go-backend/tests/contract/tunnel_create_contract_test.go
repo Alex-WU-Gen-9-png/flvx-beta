@@ -2,7 +2,6 @@ package contract_test
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -26,18 +25,13 @@ func TestTunnelCreateRuntimeRollbackContract(t *testing.T) {
 	}
 
 	insertNode := func(name, ip, portRange string) int64 {
-		res, err := repo.DB().Exec(`
+		if err := repo.DB().Exec(`
 			INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx)
 			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, name, name+"-secret", ip, ip, "", portRange, "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0)
-		if err != nil {
+		`, name, name+"-secret", ip, ip, "", portRange, "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0).Error; err != nil {
 			t.Fatalf("insert node %s: %v", name, err)
 		}
-		id, err := res.LastInsertId()
-		if err != nil {
-			t.Fatalf("get node id %s: %v", name, err)
-		}
-		return id
+		return mustLastInsertID(t, repo, name)
 	}
 
 	entryID := insertNode("create-entry", "10.20.0.1", "30000-30010")
@@ -63,18 +57,12 @@ func TestTunnelCreateRuntimeRollbackContract(t *testing.T) {
 		t.Fatalf("expected node-related error, got %q", out.Msg)
 	}
 
-	var tunnelCount int
-	if err := repo.DB().QueryRow(`SELECT COUNT(1) FROM tunnel WHERE name = ?`, "runtime-rollback-tunnel").Scan(&tunnelCount); err != nil {
-		t.Fatalf("count tunnel: %v", err)
-	}
+	tunnelCount := mustQueryInt(t, repo, `SELECT COUNT(1) FROM tunnel WHERE name = ?`, "runtime-rollback-tunnel")
 	if tunnelCount != 0 {
 		t.Fatalf("expected tunnel rollback, found %d records", tunnelCount)
 	}
 
-	var chainCount int
-	if err := repo.DB().QueryRow(`SELECT COUNT(1) FROM chain_tunnel`).Scan(&chainCount); err != nil {
-		t.Fatalf("count chain_tunnel: %v", err)
-	}
+	chainCount := mustQueryInt(t, repo, `SELECT COUNT(1) FROM chain_tunnel`)
 	if chainCount != 0 {
 		t.Fatalf("expected chain_tunnel rollback, found %d records", chainCount)
 	}
@@ -91,35 +79,26 @@ func TestTunnelUpdateAssignsChainPortsContract(t *testing.T) {
 	}
 
 	insertNode := func(name, ip, portRange string) int64 {
-		res, err := repo.DB().Exec(`
+		if err := repo.DB().Exec(`
 			INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx)
 			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, name, name+"-secret", ip, ip, "", portRange, "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0)
-		if err != nil {
+		`, name, name+"-secret", ip, ip, "", portRange, "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0).Error; err != nil {
 			t.Fatalf("insert node %s: %v", name, err)
 		}
-		id, err := res.LastInsertId()
-		if err != nil {
-			t.Fatalf("get node id %s: %v", name, err)
-		}
-		return id
+		return mustLastInsertID(t, repo, name)
 	}
 
 	entryID := insertNode("update-entry", "10.30.0.1", "40000-40010")
 	chainID := insertNode("update-chain", "10.30.0.2", "41000-41010")
 	exitID := insertNode("update-exit", "10.30.0.3", "42000-42010")
 
-	tunnelRes, err := repo.DB().Exec(`
+	if err := repo.DB().Exec(`
 		INSERT INTO tunnel(name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, "update-port-tunnel", 1.0, 1, "tls", 99999, now, now, 1, nil, 0)
-	if err != nil {
+	`, "update-port-tunnel", 1.0, 1, "tls", 99999, now, now, 1, nil, 0).Error; err != nil {
 		t.Fatalf("insert tunnel: %v", err)
 	}
-	tunnelID, err := tunnelRes.LastInsertId()
-	if err != nil {
-		t.Fatalf("get tunnel id: %v", err)
-	}
+	tunnelID := mustLastInsertID(t, repo, "update-port-tunnel")
 
 	payload := `{"id":` + jsonInt(tunnelID) + `,"name":"update-port-tunnel","type":2,"flow":99999,"trafficRatio":1.0,"status":1,"inNodeId":[{"nodeId":` + jsonInt(entryID) + `,"protocol":"tls"}],"chainNodes":[[{"nodeId":` + jsonInt(chainID) + `,"protocol":"tls","strategy":"round"}]],"outNodeId":[{"nodeId":` + jsonInt(exitID) + `,"protocol":"tls"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/tunnel/update", bytes.NewBufferString(payload))
@@ -130,26 +109,17 @@ func TestTunnelUpdateAssignsChainPortsContract(t *testing.T) {
 	router.ServeHTTP(res, req)
 	assertCode(t, res, 0)
 
-	var chainPort int
-	if err := repo.DB().QueryRow(`SELECT port FROM chain_tunnel WHERE tunnel_id = ? AND chain_type = 2 LIMIT 1`, tunnelID).Scan(&chainPort); err != nil {
-		t.Fatalf("query chain port: %v", err)
-	}
+	chainPort := mustQueryInt(t, repo, `SELECT port FROM chain_tunnel WHERE tunnel_id = ? AND chain_type = 2 LIMIT 1`, tunnelID)
 	if chainPort <= 0 {
 		t.Fatalf("expected chain node port to be assigned, got %d", chainPort)
 	}
 
-	var outPort int
-	if err := repo.DB().QueryRow(`SELECT port FROM chain_tunnel WHERE tunnel_id = ? AND chain_type = 3 LIMIT 1`, tunnelID).Scan(&outPort); err != nil {
-		t.Fatalf("query out port: %v", err)
-	}
+	outPort := mustQueryInt(t, repo, `SELECT port FROM chain_tunnel WHERE tunnel_id = ? AND chain_type = 3 LIMIT 1`, tunnelID)
 	if outPort <= 0 {
 		t.Fatalf("expected out node port to be assigned, got %d", outPort)
 	}
 
-	var entryStrategy sql.NullString
-	if err := repo.DB().QueryRow(`SELECT strategy FROM chain_tunnel WHERE tunnel_id = ? AND chain_type = 1 LIMIT 1`, tunnelID).Scan(&entryStrategy); err != nil {
-		t.Fatalf("query entry strategy: %v", err)
-	}
+	entryStrategy := mustQueryNullString(t, repo, `SELECT strategy FROM chain_tunnel WHERE tunnel_id = ? AND chain_type = 1 LIMIT 1`, tunnelID)
 	if !entryStrategy.Valid || strings.TrimSpace(entryStrategy.String) == "" {
 		t.Fatalf("expected entry strategy to be non-null and non-empty")
 	}

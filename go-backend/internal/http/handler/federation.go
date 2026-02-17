@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -14,7 +13,7 @@ import (
 
 	"go-backend/internal/http/client"
 	"go-backend/internal/http/response"
-	"go-backend/internal/store/sqlite"
+	"go-backend/internal/store/repo"
 )
 
 type federationTunnelRequest struct {
@@ -108,7 +107,7 @@ type peerShareUsedPort struct {
 }
 
 type peerShareListItem struct {
-	sqlite.PeerShare
+	repo.PeerShare
 	UsedPorts        []int               `json:"usedPorts"`
 	UsedPortDetails  []peerShareUsedPort `json:"usedPortDetails"`
 	ActiveRuntimeNum int                 `json:"activeRuntimeNum"`
@@ -264,7 +263,7 @@ func (h *Handler) federationShareCreate(w http.ResponseWriter, r *http.Request) 
 	now := time.Now().UnixMilli()
 	token := randomToken(32)
 
-	share := &sqlite.PeerShare{
+	share := &repo.PeerShare{
 		Name:           req.Name,
 		NodeID:         req.NodeID,
 		Token:          token,
@@ -430,40 +429,25 @@ func (h *Handler) federationRemoteUsageList(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	rows, err := h.repo.DB().Query(`
-		SELECT id, name, remote_url, remote_token, remote_config
-		FROM node
-		WHERE is_remote = 1
-		ORDER BY id DESC
-	`)
+	remoteNodes, err := h.repo.ListRemoteNodes()
 	if err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	defer rows.Close()
 
 	fc := client.NewFederationClient()
 	localDomain := h.federationLocalDomain()
 
 	items := make([]remoteUsageNodeItem, 0)
-	for rows.Next() {
-		var (
-			nodeID       int64
-			nodeName     string
-			remoteURL    sql.NullString
-			remoteToken  sql.NullString
-			remoteConfig sql.NullString
-		)
-		if err := rows.Scan(&nodeID, &nodeName, &remoteURL, &remoteToken, &remoteConfig); err != nil {
-			response.WriteJSON(w, response.Err(-2, err.Error()))
-			return
-		}
+	for _, node := range remoteNodes {
+		nodeID := node.ID
+		nodeName := node.Name
 
-		shareID, maxBandwidth, currentFlow, expiryTime, portRangeStart, portRangeEnd := parseRemoteShareUsageConfig(remoteConfig.String)
+		shareID, maxBandwidth, currentFlow, expiryTime, portRangeStart, portRangeEnd := parseRemoteShareUsageConfig(node.RemoteConfig.String)
 
 		var syncError string
-		url := strings.TrimSpace(remoteURL.String)
-		token := strings.TrimSpace(remoteToken.String)
+		url := strings.TrimSpace(node.RemoteURL.String)
+		token := strings.TrimSpace(node.RemoteToken.String)
 		if url != "" && token != "" {
 			info, connectErr := fc.Connect(url, token, localDomain)
 			if connectErr != nil {
@@ -484,42 +468,34 @@ func (h *Handler) federationRemoteUsageList(w http.ResponseWriter, r *http.Reque
 					"portRangeStart": info.PortRangeStart,
 					"portRangeEnd":   info.PortRangeEnd,
 				})
-				_, _ = h.repo.DB().Exec(`UPDATE node SET remote_config = ? WHERE id = ?`, string(configData), nodeID)
+				_ = h.repo.UpdateNodeRemoteConfig(nodeID, string(configData))
 			}
 		}
 
-		bindingRows, err := h.repo.DB().Query(`
-			SELECT fb.id, fb.tunnel_id, COALESCE(t.name, ''), fb.chain_type, fb.hop_inx, fb.allocated_port, fb.resource_key, fb.remote_binding_id, fb.updated_time
-			FROM federation_tunnel_binding fb
-			LEFT JOIN tunnel t ON t.id = fb.tunnel_id
-			WHERE fb.node_id = ? AND fb.status = 1
-			ORDER BY fb.allocated_port ASC, fb.id ASC
-		`, nodeID)
+		bindingRows, err := h.repo.ListActiveBindingsForNode(nodeID)
 		if err != nil {
 			response.WriteJSON(w, response.Err(-2, err.Error()))
 			return
 		}
 
 		usedSet := make(map[int]struct{})
-		bindings := make([]remoteUsageBindingItem, 0)
-		for bindingRows.Next() {
-			var item remoteUsageBindingItem
-			if err := bindingRows.Scan(&item.BindingID, &item.TunnelID, &item.TunnelName, &item.ChainType, &item.HopInx, &item.AllocatedPort, &item.ResourceKey, &item.RemoteBindingID, &item.UpdatedTime); err != nil {
-				_ = bindingRows.Close()
-				response.WriteJSON(w, response.Err(-2, err.Error()))
-				return
-			}
-			bindings = append(bindings, item)
-			if item.AllocatedPort > 0 {
-				usedSet[item.AllocatedPort] = struct{}{}
+		bindings := make([]remoteUsageBindingItem, 0, len(bindingRows))
+		for _, b := range bindingRows {
+			bindings = append(bindings, remoteUsageBindingItem{
+				BindingID:       b.ID,
+				TunnelID:        b.TunnelID,
+				TunnelName:      b.TunnelName,
+				ChainType:       b.ChainType,
+				HopInx:          b.HopInx,
+				AllocatedPort:   b.AllocatedPort,
+				ResourceKey:     b.ResourceKey,
+				RemoteBindingID: b.RemoteBindingID,
+				UpdatedTime:     b.UpdatedTime,
+			})
+			if b.AllocatedPort > 0 {
+				usedSet[b.AllocatedPort] = struct{}{}
 			}
 		}
-		if err := bindingRows.Err(); err != nil {
-			_ = bindingRows.Close()
-			response.WriteJSON(w, response.Err(-2, err.Error()))
-			return
-		}
-		_ = bindingRows.Close()
 
 		usedPorts := make([]int, 0, len(usedSet))
 		for port := range usedSet {
@@ -542,10 +518,6 @@ func (h *Handler) federationRemoteUsageList(w http.ResponseWriter, r *http.Reque
 			ActiveBindingNum: len(bindings),
 			SyncError:        syncError,
 		})
-	}
-	if err := rows.Err(); err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
-		return
 	}
 
 	response.WriteJSON(w, response.OK(items))
@@ -639,31 +611,21 @@ func (h *Handler) nodeImport(w http.ResponseWriter, r *http.Request) {
 		portRange = fmt.Sprintf("%d-%d", info.PortRangeStart, info.PortRangeEnd)
 	}
 
-	db := h.repo.DB()
-	inx := nextIndex(db, "node")
+	inx := h.repo.NextIndex("node")
 	now := time.Now().UnixMilli()
 
-	_, err = db.Exec(`
-		INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx, is_remote, remote_url, remote_token, remote_config)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
-	`,
+	if err = h.repo.CreateRemoteNode(
 		fmt.Sprintf("%s (Remote)", info.NodeName),
-		randomToken(16), // Dummy secret
+		randomToken(16),
 		info.ServerIP,
-		"", "", // v4/v6 unknown, use server_ip
 		portRange,
-		"",
-		"",
-		now, now,
+		now,
 		info.Status,
-		"[::]", "[::]",
 		inx,
 		req.RemoteURL,
 		req.Token,
 		string(configBytes),
-	)
-
-	if err != nil {
+	); err != nil {
 		response.WriteJSON(w, response.Err(-2, "Database error: "+err.Error()))
 		return
 	}
@@ -755,11 +717,7 @@ func (h *Handler) federationConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var nodeName string
-	var serverIP string
-	var status int
-
-	err = h.repo.DB().QueryRow("SELECT name, server_ip, status FROM node WHERE id = ?", share.NodeID).Scan(&nodeName, &serverIP, &status)
+	nodeInfo, err := h.repo.GetNodeBasicInfo(share.NodeID)
 	if err != nil {
 		response.WriteJSON(w, response.Err(-2, "Node not found"))
 		return
@@ -769,9 +727,9 @@ func (h *Handler) federationConnect(w http.ResponseWriter, r *http.Request) {
 		"shareId":        share.ID,
 		"shareName":      share.Name,
 		"nodeId":         share.NodeID,
-		"nodeName":       nodeName,
-		"serverIp":       serverIP,
-		"status":         status,
+		"nodeName":       nodeInfo.Name,
+		"serverIp":       nodeInfo.ServerIP,
+		"status":         nodeInfo.Status,
 		"maxBandwidth":   share.MaxBandwidth,
 		"currentFlow":    share.CurrentFlow,
 		"expiryTime":     share.ExpiryTime,
@@ -808,41 +766,16 @@ func (h *Handler) federationTunnelCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	tunnelType := 1
-
-	tx, err := h.repo.DB().Begin()
-	if err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
-		return
-	}
-	defer tx.Rollback()
-
 	now := time.Now().UnixMilli()
-	tunnelID, err := tx.ExecReturningID(`INSERT INTO tunnel (name, type, protocol, flow, created_time, updated_time, status, in_ip) VALUES (?, ?, ?, 0, ?, ?, 1, ?)`,
+	tunnelID, err := h.repo.CreateFederationTunnel(
 		fmt.Sprintf("Share-%d-Port-%d", share.ID, req.RemotePort),
-		tunnelType,
+		1,
 		req.Protocol,
 		now,
-		now,
-		"",
-	)
-	if err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
-		return
-	}
-
-	_, err = tx.Exec(`INSERT INTO chain_tunnel (tunnel_id, chain_type, node_id, port, strategy, inx, protocol) VALUES (?, '1', ?, ?, 'fifo', 0, ?)`,
-		tunnelID,
 		share.NodeID,
 		req.RemotePort,
-		req.Protocol,
 	)
 	if err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
-		return
-	}
-
-	if err := tx.Commit(); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
@@ -927,7 +860,7 @@ func (h *Handler) federationRuntimeReservePort(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	runtime := &sqlite.PeerShareRuntime{
+	runtime := &repo.PeerShareRuntime{
 		ShareID:       share.ID,
 		NodeID:        share.NodeID,
 		ReservationID: randomToken(24),
@@ -981,7 +914,7 @@ func (h *Handler) federationRuntimeApplyRole(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	var runtime *sqlite.PeerShareRuntime
+	var runtime *repo.PeerShareRuntime
 	if strings.TrimSpace(req.ReservationID) != "" {
 		runtime, err = h.repo.GetPeerShareRuntimeByReservationID(share.ID, strings.TrimSpace(req.ReservationID))
 	} else {
@@ -1152,7 +1085,7 @@ func (h *Handler) federationRuntimeReleaseRole(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	var runtime *sqlite.PeerShareRuntime
+	var runtime *repo.PeerShareRuntime
 	if strings.TrimSpace(req.BindingID) != "" {
 		runtime, err = h.repo.GetPeerShareRuntimeByBindingID(share.ID, strings.TrimSpace(req.BindingID))
 	} else if strings.TrimSpace(req.ReservationID) != "" {
@@ -1299,7 +1232,7 @@ func isFederationServiceCommand(commandType string) bool {
 	}
 }
 
-func validateFederationCommandPorts(share *sqlite.PeerShare, data interface{}) error {
+func validateFederationCommandPorts(share *repo.PeerShare, data interface{}) error {
 	if share == nil || (share.PortRangeStart <= 0 && share.PortRangeEnd <= 0) {
 		return nil
 	}
@@ -1339,7 +1272,7 @@ func validateFederationCommandPorts(share *sqlite.PeerShare, data interface{}) e
 	return nil
 }
 
-func (h *Handler) pickPeerSharePort(share *sqlite.PeerShare, requestedPort int) (int, error) {
+func (h *Handler) pickPeerSharePort(share *repo.PeerShare, requestedPort int) (int, error) {
 	if share == nil {
 		return 0, fmt.Errorf("share not found")
 	}
@@ -1349,29 +1282,13 @@ func (h *Handler) pickPeerSharePort(share *sqlite.PeerShare, requestedPort int) 
 
 	used := make(map[int]struct{})
 
-	rows, err := h.repo.DB().Query(`SELECT port FROM chain_tunnel WHERE node_id = ? AND port IS NOT NULL AND port > 0`, share.NodeID)
+	nodePorts, err := h.repo.ListUsedPortsOnNode(share.NodeID)
 	if err != nil {
 		return 0, err
 	}
-	for rows.Next() {
-		var p sql.NullInt64
-		if scanErr := rows.Scan(&p); scanErr == nil && p.Valid && p.Int64 > 0 {
-			used[int(p.Int64)] = struct{}{}
-		}
+	for _, p := range nodePorts {
+		used[p] = struct{}{}
 	}
-	_ = rows.Close()
-
-	rows, err = h.repo.DB().Query(`SELECT port FROM forward_port WHERE node_id = ? AND port > 0`, share.NodeID)
-	if err != nil {
-		return 0, err
-	}
-	for rows.Next() {
-		var p sql.NullInt64
-		if scanErr := rows.Scan(&p); scanErr == nil && p.Valid && p.Int64 > 0 {
-			used[int(p.Int64)] = struct{}{}
-		}
-	}
-	_ = rows.Close()
 
 	ports, err := h.repo.ListActivePeerShareRuntimePorts(share.ID, share.NodeID)
 	if err != nil {
@@ -1412,7 +1329,7 @@ func extractBearerToken(r *http.Request) string {
 	return ""
 }
 
-func isPeerShareFlowExceeded(share *sqlite.PeerShare) bool {
+func isPeerShareFlowExceeded(share *repo.PeerShare) bool {
 	if share == nil {
 		return false
 	}
@@ -1655,18 +1572,9 @@ func (h *Handler) cleanupFederationTunnels(shareID int64) {
 		return
 	}
 	namePrefix := fmt.Sprintf("Share-%d-Port-", shareID)
-	rows, err := h.repo.DB().Query(`SELECT id FROM tunnel WHERE name LIKE ?`, namePrefix+"%")
-	if err != nil {
+	tunnelIDs, err := h.repo.ListTunnelIDsByNamePrefix(namePrefix)
+	if err != nil || len(tunnelIDs) == 0 {
 		return
-	}
-	defer rows.Close()
-
-	var tunnelIDs []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err == nil {
-			tunnelIDs = append(tunnelIDs, id)
-		}
 	}
 
 	for _, tid := range tunnelIDs {

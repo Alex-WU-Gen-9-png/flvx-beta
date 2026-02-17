@@ -16,82 +16,69 @@ import (
 	httpserver "go-backend/internal/http"
 	"go-backend/internal/http/handler"
 	"go-backend/internal/http/response"
-	"go-backend/internal/store/sqlite"
+	"go-backend/internal/store/repo"
 )
 
 func TestDiagnosisChainCoverageContracts(t *testing.T) {
 	secret := "contract-jwt-secret"
-	router, repo := setupDiagnosisContractRouter(t, secret)
+	router, r := setupDiagnosisContractRouter(t, secret)
 	now := time.Now().UnixMilli()
 
-	if _, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO user(id, user, pwd, role_id, exp_time, flow, in_flow, out_flow, flow_reset_time, num, created_time, updated_time, status)
 		VALUES(2, 'normal_user', '3c85cdebade1c51cf64ca9f3c09d182d', 1, 2727251700000, 99999, 0, 0, 1, 99999, ?, ?, 1)
-	`, now, now); err != nil {
+	`, now, now).Error; err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
 
-	tunnelRes, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO tunnel(name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, "diagnose-chain-tunnel", 1.0, 2, "tls", 99999, now, now, 1, nil, 0)
-	if err != nil {
+	`, "diagnose-chain-tunnel", 1.0, 2, "tls", 99999, now, now, 1, nil, 0).Error; err != nil {
 		t.Fatalf("insert tunnel: %v", err)
 	}
-	tunnelID, err := tunnelRes.LastInsertId()
-	if err != nil {
-		t.Fatalf("get tunnel id: %v", err)
-	}
+	tunnelID := mustLastInsertID(t, r, "diagnose-chain-tunnel")
 
 	insertNode := func(name, ip string) int64 {
-		res, err := repo.DB().Exec(`
+		if err := r.DB().Exec(`
 			INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx)
 			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, name, name+"-secret", ip, ip, "", "30000-30010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0)
-		if err != nil {
+		`, name, name+"-secret", ip, ip, "", "30000-30010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0).Error; err != nil {
 			t.Fatalf("insert node %s: %v", name, err)
 		}
-		id, err := res.LastInsertId()
-		if err != nil {
-			t.Fatalf("get node id %s: %v", name, err)
-		}
-		return id
+		return mustLastInsertID(t, r, name)
 	}
 
 	entryNodeID := insertNode("entry-node", "10.0.1.10")
 	chainNodeID := insertNode("chain-node", "10.0.1.20")
 	exitNodeID := insertNode("exit-node", "10.0.1.30")
 
-	if _, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol)
 		VALUES(?, 1, ?, 30001, 'round', 1, 'tls')
-	`, tunnelID, entryNodeID); err != nil {
+	`, tunnelID, entryNodeID).Error; err != nil {
 		t.Fatalf("insert entry chain: %v", err)
 	}
-	if _, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol)
 		VALUES(?, 2, ?, 30002, 'round', 1, 'tls')
-	`, tunnelID, chainNodeID); err != nil {
+	`, tunnelID, chainNodeID).Error; err != nil {
 		t.Fatalf("insert middle chain: %v", err)
 	}
-	if _, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol)
 		VALUES(?, 3, ?, 30003, 'round', 1, 'tls')
-	`, tunnelID, exitNodeID); err != nil {
+	`, tunnelID, exitNodeID).Error; err != nil {
 		t.Fatalf("insert exit chain: %v", err)
 	}
 
-	forwardRes, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO forward(user_id, user_name, name, tunnel_id, remote_addr, strategy, in_flow, out_flow, created_time, updated_time, status, inx)
 		VALUES(?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 1, ?)
-	`, 2, "normal_user", "chain-forward", tunnelID, "8.8.8.8:53", "fifo", now, now, 0)
-	if err != nil {
+	`, 2, "normal_user", "chain-forward", tunnelID, "8.8.8.8:53", "fifo", now, now, 0).Error; err != nil {
 		t.Fatalf("insert forward: %v", err)
 	}
-	forwardID, err := forwardRes.LastInsertId()
-	if err != nil {
-		t.Fatalf("get forward id: %v", err)
-	}
+	forwardID := mustLastInsertID(t, r, "chain-forward")
 
 	userToken, err := auth.GenerateToken(2, "normal_user", 1, secret)
 	if err != nil {
@@ -208,7 +195,7 @@ func TestDiagnosisChainCoverageContracts(t *testing.T) {
 
 func TestDiagnosisUsesFederationRuntimeForRemoteNodes(t *testing.T) {
 	secret := "contract-jwt-secret"
-	router, repo := setupDiagnosisContractRouter(t, secret)
+	router, r := setupDiagnosisContractRouter(t, secret)
 	now := time.Now().UnixMilli()
 
 	remoteToken := "remote-diagnose-token"
@@ -256,67 +243,53 @@ func TestDiagnosisUsesFederationRuntimeForRemoteNodes(t *testing.T) {
 	defer remoteServer.Close()
 
 	insertLocalNode := func(name, ip string) int64 {
-		res, err := repo.DB().Exec(`
+		if err := r.DB().Exec(`
 			INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx)
 			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, name, name+"-secret", ip, ip, "", "30000-30010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0)
-		if err != nil {
+		`, name, name+"-secret", ip, ip, "", "30000-30010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0).Error; err != nil {
 			t.Fatalf("insert local node %s: %v", name, err)
 		}
-		id, err := res.LastInsertId()
-		if err != nil {
-			t.Fatalf("get local node id %s: %v", name, err)
-		}
-		return id
+		return mustLastInsertID(t, r, name)
 	}
 
 	insertRemoteNode := func(name, ip string) int64 {
-		res, err := repo.DB().Exec(`
+		if err := r.DB().Exec(`
 			INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx, is_remote, remote_url, remote_token, remote_config)
 			VALUES(?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, 1, ?, ?, ?, 1, ?, ?, ?)
-		`, name, name+"-secret", ip, "", "", "31000-31010", "", "", now, now, "[::]", "[::]", 1, remoteServer.URL, remoteToken, `{"shareId": 123}`)
-		if err != nil {
+		`, name, name+"-secret", ip, "", "", "31000-31010", "", "", now, now, "[::]", "[::]", 1, remoteServer.URL, remoteToken, `{"shareId": 123}`).Error; err != nil {
 			t.Fatalf("insert remote node %s: %v", name, err)
 		}
-		id, err := res.LastInsertId()
-		if err != nil {
-			t.Fatalf("get remote node id %s: %v", name, err)
-		}
-		return id
+		return mustLastInsertID(t, r, name)
 	}
 
 	entryNodeID := insertLocalNode("entry-local", "10.50.0.10")
 	remoteChainNodeID := insertRemoteNode("middle-remote", "10.50.0.20")
 	exitNodeID := insertLocalNode("exit-local", "10.50.0.30")
 
-	tunnelRes, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO tunnel(name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, "diagnose-remote-tunnel", 1.0, 2, "tls", 99999, now, now, 1, nil, 0)
-	if err != nil {
+	`, "diagnose-remote-tunnel", 1.0, 2, "tls", 99999, now, now, 1, nil, 0).Error; err != nil {
 		t.Fatalf("insert tunnel: %v", err)
 	}
-	tunnelID, err := tunnelRes.LastInsertId()
-	if err != nil {
-		t.Fatalf("get tunnel id: %v", err)
-	}
+	tunnelID := mustLastInsertID(t, r, "diagnose-remote-tunnel")
 
-	if _, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol)
 		VALUES(?, 1, ?, 30001, 'round', 1, 'tls')
-	`, tunnelID, entryNodeID); err != nil {
+	`, tunnelID, entryNodeID).Error; err != nil {
 		t.Fatalf("insert entry chain: %v", err)
 	}
-	if _, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol)
 		VALUES(?, 2, ?, 30002, 'round', 1, 'tls')
-	`, tunnelID, remoteChainNodeID); err != nil {
+	`, tunnelID, remoteChainNodeID).Error; err != nil {
 		t.Fatalf("insert middle chain: %v", err)
 	}
-	if _, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol)
 		VALUES(?, 3, ?, 30003, 'round', 1, 'tls')
-	`, tunnelID, exitNodeID); err != nil {
+	`, tunnelID, exitNodeID).Error; err != nil {
 		t.Fatalf("insert exit chain: %v", err)
 	}
 
@@ -409,17 +382,17 @@ func valueAsBool(v interface{}) bool {
 	}
 }
 
-func setupDiagnosisContractRouter(t *testing.T, jwtSecret string) (http.Handler, *sqlite.Repository) {
+func setupDiagnosisContractRouter(t *testing.T, jwtSecret string) (http.Handler, *repo.Repository) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "diagnosis-contract.db")
-	repo, err := sqlite.Open(dbPath)
+	r, err := repo.Open(dbPath)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = repo.Close()
+		_ = r.Close()
 	})
 
-	h := handler.New(repo, jwtSecret)
-	return httpserver.NewRouter(h, jwtSecret), repo
+	h := handler.New(r, jwtSecret)
+	return httpserver.NewRouter(h, jwtSecret), r
 }

@@ -18,8 +18,10 @@ import (
 	"go-backend/internal/http/client"
 	"go-backend/internal/http/response"
 	"go-backend/internal/security"
-	"go-backend/internal/store"
-	"go-backend/internal/store/sqlite"
+	"go-backend/internal/store/model"
+	"go-backend/internal/store/repo"
+
+	"gorm.io/gorm"
 )
 
 func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
@@ -40,18 +42,12 @@ func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db := h.repo.DB()
-	if db == nil {
-		response.WriteJSON(w, response.Err(-2, "database unavailable"))
-		return
-	}
-
-	var cnt int
-	if err := db.QueryRow(`SELECT COUNT(1) FROM user WHERE user = ?`, username).Scan(&cnt); err != nil {
+	exists, err := h.repo.UserExists(username)
+	if err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	if cnt > 0 {
+	if exists {
 		response.WriteJSON(w, response.ErrDefault("用户名已存在"))
 		return
 	}
@@ -64,11 +60,7 @@ func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 	roleID := 1
 	now := time.Now().UnixMilli()
 
-	_, err := db.Exec(`
-		INSERT INTO user(user, pwd, role_id, exp_time, flow, in_flow, out_flow, flow_reset_time, num, created_time, updated_time, status)
-		VALUES(?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)
-	`, username, security.MD5(pwd), roleID, expTime, flow, flowResetTime, num, now, now, status)
-	if err != nil {
+	if err := h.repo.CreateUser(username, security.MD5(pwd), roleID, expTime, flow, flowResetTime, num, status, now); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
@@ -96,14 +88,8 @@ func (h *Handler) userUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db := h.repo.DB()
-	if db == nil {
-		response.WriteJSON(w, response.Err(-2, "database unavailable"))
-		return
-	}
-
-	var roleID int
-	if err := db.QueryRow(`SELECT role_id FROM user WHERE id = ?`, id).Scan(&roleID); err != nil {
+	roleID, err := h.repo.GetUserRoleID(id)
+	if err != nil {
 		if err == sql.ErrNoRows {
 			response.WriteJSON(w, response.ErrDefault("用户不存在"))
 			return
@@ -116,12 +102,12 @@ func (h *Handler) userUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var cnt int
-	if err := db.QueryRow(`SELECT COUNT(1) FROM user WHERE user = ? AND id != ?`, username, id).Scan(&cnt); err != nil {
+	dup, err := h.repo.UserExistsExcluding(username, id)
+	if err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	if cnt > 0 {
+	if dup {
 		response.WriteJSON(w, response.ErrDefault("用户名已存在"))
 		return
 	}
@@ -135,28 +121,18 @@ func (h *Handler) userUpdate(w http.ResponseWriter, r *http.Request) {
 
 	pwd := asString(req["pwd"])
 	if strings.TrimSpace(pwd) == "" {
-		_, err := db.Exec(`
-			UPDATE user
-			SET user = ?, flow = ?, num = ?, exp_time = ?, flow_reset_time = ?, status = ?, updated_time = ?
-			WHERE id = ?
-		`, username, flow, num, expTime, flowResetTime, status, now, id)
-		if err != nil {
+		if err := h.repo.UpdateUserWithoutPassword(id, username, flow, num, expTime, flowResetTime, status, now); err != nil {
 			response.WriteJSON(w, response.Err(-2, err.Error()))
 			return
 		}
 	} else {
-		_, err := db.Exec(`
-			UPDATE user
-			SET user = ?, pwd = ?, flow = ?, num = ?, exp_time = ?, flow_reset_time = ?, status = ?, updated_time = ?
-			WHERE id = ?
-		`, username, security.MD5(pwd), flow, num, expTime, flowResetTime, status, now, id)
-		if err != nil {
+		if err := h.repo.UpdateUserWithPassword(id, username, security.MD5(pwd), flow, num, expTime, flowResetTime, status, now); err != nil {
 			response.WriteJSON(w, response.Err(-2, err.Error()))
 			return
 		}
 	}
 
-	_, _ = db.Exec(`UPDATE user_tunnel SET flow = ?, num = ?, exp_time = ?, flow_reset_time = ? WHERE user_id = ?`, flow, num, expTime, flowResetTime, id)
+	h.repo.PropagateUserFlowToTunnels(id, flow, num, expTime, flowResetTime)
 	response.WriteJSON(w, response.OKEmpty())
 }
 
@@ -170,8 +146,8 @@ func (h *Handler) userDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var roleID int
-	if err := h.repo.DB().QueryRow(`SELECT role_id FROM user WHERE id = ?`, id).Scan(&roleID); err != nil {
+	roleID, err := h.repo.GetUserRoleID(id)
+	if err != nil {
 		if err == sql.ErrNoRows {
 			response.WriteJSON(w, response.ErrDefault("用户不存在"))
 			return
@@ -184,44 +160,7 @@ func (h *Handler) userDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db := h.repo.DB()
-	tx, err := db.Begin()
-	if err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
-		return
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err = tx.Exec(`DELETE FROM forward_port WHERE forward_id IN (SELECT id FROM forward WHERE user_id = ?)`, id); err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
-		return
-	}
-	if _, err = tx.Exec(`DELETE FROM forward WHERE user_id = ?`, id); err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
-		return
-	}
-	if _, err = tx.Exec(`DELETE FROM group_permission_grant WHERE user_tunnel_id IN (SELECT id FROM user_tunnel WHERE user_id = ?)`, id); err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
-		return
-	}
-	if _, err = tx.Exec(`DELETE FROM user_tunnel WHERE user_id = ?`, id); err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
-		return
-	}
-	if _, err = tx.Exec(`DELETE FROM user_group_user WHERE user_id = ?`, id); err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
-		return
-	}
-	if _, err = tx.Exec(`DELETE FROM statistics_flow WHERE user_id = ?`, id); err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
-		return
-	}
-	if _, err = tx.Exec(`DELETE FROM user WHERE id = ?`, id); err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
-		return
-	}
-
-	if err = tx.Commit(); err != nil {
+	if err := h.repo.DeleteUserCascade(id); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
@@ -245,12 +184,10 @@ func (h *Handler) userResetFlow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db := h.repo.DB()
 	if typeVal == 1 {
-		_, _ = db.Exec(`UPDATE user SET in_flow = 0, out_flow = 0, updated_time = ? WHERE id = ?`, time.Now().UnixMilli(), id)
-		_, _ = db.Exec(`UPDATE user_tunnel SET in_flow = 0, out_flow = 0 WHERE user_id = ?`, id)
+		h.repo.ResetUserFlowByUser(id, time.Now().UnixMilli())
 	} else {
-		_, _ = db.Exec(`UPDATE user_tunnel SET in_flow = 0, out_flow = 0 WHERE id = ?`, id)
+		h.repo.ResetUserFlowByUserTunnel(id)
 	}
 	response.WriteJSON(w, response.OKEmpty())
 }
@@ -272,13 +209,9 @@ func (h *Handler) nodeCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db := h.repo.DB()
 	now := time.Now().UnixMilli()
-	inx := nextIndex(db, "node")
-	_, err := db.Exec(`
-		INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx, is_remote, remote_url, remote_token, remote_config)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
+	inx := h.repo.NextIndex("node")
+	if err := h.repo.CreateNode(
 		name,
 		randomToken(16),
 		serverIP,
@@ -291,7 +224,6 @@ func (h *Handler) nodeCreate(w http.ResponseWriter, r *http.Request) {
 		asInt(req["tls"], 0),
 		asInt(req["socks"], 0),
 		now,
-		now,
 		0,
 		defaultString(asString(req["tcpListenAddr"]), "[::]"),
 		defaultString(asString(req["udpListenAddr"]), "[::]"),
@@ -300,8 +232,7 @@ func (h *Handler) nodeCreate(w http.ResponseWriter, r *http.Request) {
 		nullableText(asString(req["remoteUrl"])),
 		nullableText(asString(req["remoteToken"])),
 		nullableText(asString(req["remoteConfig"])),
-	)
-	if err != nil {
+	); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
@@ -324,11 +255,8 @@ func (h *Handler) nodeUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var currentStatus int
-	var currentHTTP int
-	var currentTLS int
-	var currentSocks int
-	if err := h.repo.DB().QueryRow(`SELECT status, http, tls, socks FROM node WHERE id = ?`, id).Scan(&currentStatus, &currentHTTP, &currentTLS, &currentSocks); err != nil {
+	currentStatus, currentHTTP, currentTLS, currentSocks, err := h.repo.GetNodeStatusFields(id)
+	if err != nil {
 		if err == sql.ErrNoRows {
 			response.WriteJSON(w, response.ErrDefault("节点不存在"))
 			return
@@ -348,11 +276,7 @@ func (h *Handler) nodeUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UnixMilli()
-	_, err := h.repo.DB().Exec(`
-		UPDATE node
-		SET name = ?, server_ip = ?, server_ip_v4 = ?, server_ip_v6 = ?, port = ?, interface_name = ?, http = ?, tls = ?, socks = ?, tcp_listen_addr = ?, udp_listen_addr = ?, updated_time = ?
-		WHERE id = ?
-	`,
+	if err := h.repo.UpdateNode(id,
 		asString(req["name"]),
 		asString(req["serverIp"]),
 		nullableText(asString(req["serverIpV4"])),
@@ -365,9 +289,7 @@ func (h *Handler) nodeUpdate(w http.ResponseWriter, r *http.Request) {
 		defaultString(asString(req["tcpListenAddr"]), "[::]"),
 		defaultString(asString(req["udpListenAddr"]), "[::]"),
 		now,
-		id,
-	)
-	if err != nil {
+	); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
@@ -399,14 +321,13 @@ func (h *Handler) nodeInstall(w http.ResponseWriter, r *http.Request) {
 	if id <= 0 {
 		return
 	}
-	db := h.repo.DB()
-	var secret string
-	if err := db.QueryRow(`SELECT secret FROM node WHERE id = ?`, id).Scan(&secret); err != nil {
+	secret, err := h.repo.GetNodeSecret(id)
+	if err != nil {
 		response.WriteJSON(w, response.ErrDefault("节点不存在"))
 		return
 	}
-	var panelAddr string
-	if err := db.QueryRow(`SELECT value FROM vite_config WHERE name = 'ip' LIMIT 1`).Scan(&panelAddr); err != nil {
+	panelAddr, err := h.repo.GetViteConfigValue("ip")
+	if err != nil {
 		if err == sql.ErrNoRows {
 			response.WriteJSON(w, response.ErrDefault("请先前往网站配置中设置ip"))
 			return
@@ -434,7 +355,7 @@ func (h *Handler) nodeUpdateOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, n := range req.Nodes {
-		_, _ = h.repo.DB().Exec(`UPDATE node SET inx = ?, updated_time = ? WHERE id = ?`, n.Inx, time.Now().UnixMilli(), n.ID)
+		h.repo.UpdateNodeOrder(n.ID, n.Inx, time.Now().UnixMilli())
 	}
 	response.WriteJSON(w, response.OKEmpty())
 }
@@ -482,12 +403,12 @@ func (h *Handler) tunnelCreate(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSON(w, response.ErrDefault("隧道名称不能为空"))
 		return
 	}
-	var tunnelNameDup int
-	if err := h.repo.DB().QueryRow(`SELECT COUNT(1) FROM tunnel WHERE name = ?`, name).Scan(&tunnelNameDup); err != nil {
+	nameDup, err := h.repo.TunnelNameExists(name)
+	if err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	if tunnelNameDup > 0 {
+	if nameDup {
 		response.WriteJSON(w, response.ErrDefault("隧道名称重复"))
 		return
 	}
@@ -499,14 +420,15 @@ func (h *Handler) tunnelCreate(w http.ResponseWriter, r *http.Request) {
 	inIP := asString(req["inIp"])
 	ipPreference := asString(req["ipPreference"])
 	now := time.Now().UnixMilli()
-	inx := nextIndex(h.repo.DB(), "tunnel")
+	inx := h.repo.NextIndex("tunnel")
+	localDomain := h.federationLocalDomain()
 
-	tx, err := h.repo.DB().Begin()
-	if err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
+	tx := h.repo.BeginTx()
+	if tx.Error != nil {
+		response.WriteJSON(w, response.Err(-2, tx.Error.Error()))
 		return
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer func() { tx.Rollback() }()
 
 	runtimeState, err := h.prepareTunnelCreateState(tx, req, typeVal, 0)
 	if err != nil {
@@ -520,9 +442,8 @@ func (h *Handler) tunnelCreate(w http.ResponseWriter, r *http.Request) {
 
 	if len(runtimeState.InNodes) > 0 {
 		firstNodeID := runtimeState.InNodes[0].NodeID
-		var isRemote int
-		var rUrl, rToken sql.NullString
-		if err := h.repo.DB().QueryRow("SELECT is_remote, remote_url, remote_token FROM node WHERE id = ?", firstNodeID).Scan(&isRemote, &rUrl, &rToken); err == nil && isRemote == 1 {
+		isRemote, rUrl, rToken, _ := h.repo.GetNodeRemoteFieldsTx(tx, firstNodeID)
+		if isRemote == 1 {
 			fc := client.NewFederationClient()
 
 			targetProto := "tcp"
@@ -567,32 +488,48 @@ func (h *Handler) tunnelCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	tunnelID, err := tx.ExecReturningID(`INSERT INTO tunnel(name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx, ip_preference) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		name, trafficRatio, typeVal, "tls", flow, now, now, status, nullableText(inIP), inx, ipPreference)
-	if err != nil {
+	var tunnelInIP sql.NullString
+	if trimmed := strings.TrimSpace(inIP); trimmed != "" {
+		tunnelInIP = sql.NullString{String: trimmed, Valid: true}
+	}
+	tunnel := model.Tunnel{
+		Name:         name,
+		TrafficRatio: trafficRatio,
+		Type:         typeVal,
+		Protocol:     "tls",
+		Flow:         flow,
+		CreatedTime:  now,
+		UpdatedTime:  now,
+		Status:       status,
+		InIP:         tunnelInIP,
+		Inx:          inx,
+		IPPreference: ipPreference,
+	}
+	if err := tx.Create(&tunnel).Error; err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
+	tunnelID := tunnel.ID
 	runtimeState.TunnelID = tunnelID
-	var federationBindings []sqlite.FederationTunnelBinding
+	var federationBindings []repo.FederationTunnelBinding
 	var federationReleaseRefs []federationRuntimeReleaseRef
-	federationBindings, federationReleaseRefs, err = h.applyFederationRuntime(runtimeState)
+	federationBindings, federationReleaseRefs, err = h.applyFederationRuntime(runtimeState, localDomain)
 	if err != nil {
 		response.WriteJSON(w, response.ErrDefault(err.Error()))
 		return
 	}
 	applyTunnelPortsToRequest(req, runtimeState)
-	if err := replaceTunnelChainsTx(tx, tunnelID, req); err != nil {
+	if err := h.replaceTunnelChainsTx(tx, tunnelID, req); err != nil {
 		h.releaseFederationRuntimeRefs(federationReleaseRefs)
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	if err := replaceFederationTunnelBindingsTx(tx, tunnelID, federationBindings); err != nil {
+	if err := h.repo.ReplaceFederationTunnelBindingsTx(tx, tunnelID, federationBindings); err != nil {
 		h.releaseFederationRuntimeRefs(federationReleaseRefs)
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit().Error; err != nil {
 		h.releaseFederationRuntimeRefs(federationReleaseRefs)
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
@@ -680,13 +617,14 @@ func (h *Handler) tunnelUpdate(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UnixMilli()
 	typeVal := asInt(req["type"], 1)
 	ipPreference := asString(req["ipPreference"])
+	localDomain := h.federationLocalDomain()
 
-	tx, err := h.repo.DB().Begin()
-	if err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
+	tx := h.repo.BeginTx()
+	if tx.Error != nil {
+		response.WriteJSON(w, response.Err(-2, tx.Error.Error()))
 		return
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer func() { tx.Rollback() }()
 
 	runtimeState, err := h.prepareTunnelCreateState(tx, req, typeVal, id)
 	if err != nil {
@@ -698,37 +636,46 @@ func (h *Handler) tunnelUpdate(w http.ResponseWriter, r *http.Request) {
 
 	inIp := buildTunnelInIP(runtimeState.InNodes, runtimeState.Nodes)
 
-	var federationBindings []sqlite.FederationTunnelBinding
+	var federationBindings []repo.FederationTunnelBinding
 	var federationReleaseRefs []federationRuntimeReleaseRef
-	federationBindings, federationReleaseRefs, err = h.applyFederationRuntime(runtimeState)
+	federationBindings, federationReleaseRefs, err = h.applyFederationRuntime(runtimeState, localDomain)
 	if err != nil {
 		response.WriteJSON(w, response.ErrDefault(err.Error()))
 		return
 	}
 	applyTunnelPortsToRequest(req, runtimeState)
 
-	_, err = tx.Exec(`UPDATE tunnel SET name=?, type=?, flow=?, traffic_ratio=?, status=?, in_ip=?, ip_preference=?, updated_time=? WHERE id=?`,
-		asString(req["name"]), typeVal, asInt64(req["flow"], 1), asFloat(req["trafficRatio"], 1.0), asInt(req["status"], 1), nullableText(inIp), ipPreference, now, id)
-	if err != nil {
+	if err := h.repo.UpdateTunnelTx(
+		tx,
+		id,
+		asString(req["name"]),
+		typeVal,
+		asInt64(req["flow"], 1),
+		asFloat(req["trafficRatio"], 1.0),
+		asInt(req["status"], 1),
+		inIp,
+		ipPreference,
+		now,
+	); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
 
-	if _, err := tx.Exec(`DELETE FROM chain_tunnel WHERE tunnel_id = ?`, id); err != nil {
+	if err := h.repo.DeleteChainTunnelsByTunnelTx(tx, id); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	if err := replaceTunnelChainsTx(tx, id, req); err != nil {
+	if err := h.replaceTunnelChainsTx(tx, id, req); err != nil {
 		h.releaseFederationRuntimeRefs(federationReleaseRefs)
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	if err := replaceFederationTunnelBindingsTx(tx, id, federationBindings); err != nil {
+	if err := h.repo.ReplaceFederationTunnelBindingsTx(tx, id, federationBindings); err != nil {
 		h.releaseFederationRuntimeRefs(federationReleaseRefs)
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit().Error; err != nil {
 		h.releaseFederationRuntimeRefs(federationReleaseRefs)
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
@@ -807,7 +754,7 @@ func (h *Handler) tunnelUpdateOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, t := range req.Tunnels {
-		_, _ = h.repo.DB().Exec(`UPDATE tunnel SET inx = ?, updated_time = ? WHERE id = ?`, t.Inx, time.Now().UnixMilli(), t.ID)
+		h.repo.UpdateTunnelOrder(t.ID, t.Inx, time.Now().UnixMilli())
 	}
 	response.WriteJSON(w, response.OKEmpty())
 }
@@ -842,8 +789,7 @@ func (h *Handler) reconstructTunnelState(tunnelID int64) (*tunnelCreateState, er
 		return nil, err
 	}
 
-	var ipPreference string
-	_ = h.repo.DB().QueryRow(`SELECT COALESCE(ip_preference, '') FROM tunnel WHERE id = ?`, tunnelID).Scan(&ipPreference)
+	ipPreference := h.repo.GetTunnelIPPreference(tunnelID)
 
 	state := &tunnelCreateState{
 		TunnelID:     tunnelID,
@@ -933,24 +879,24 @@ func (h *Handler) tunnelBatchRedeploy(w http.ResponseWriter, r *http.Request) {
 				fail++
 				continue
 			}
-			federationBindings, federationReleaseRefs, fedErr := h.applyFederationRuntime(state)
+			federationBindings, federationReleaseRefs, fedErr := h.applyFederationRuntime(state, h.federationLocalDomain())
 			if fedErr != nil {
 				fail++
 				continue
 			}
-			tx, txErr := h.repo.DB().Begin()
-			if txErr != nil {
+			tx := h.repo.BeginTx()
+			if tx.Error != nil {
 				h.releaseFederationRuntimeRefs(federationReleaseRefs)
 				fail++
 				continue
 			}
-			if replaceErr := replaceFederationTunnelBindingsTx(tx, tunnelID, federationBindings); replaceErr != nil {
-				_ = tx.Rollback()
+			if replaceErr := h.repo.ReplaceFederationTunnelBindingsTx(tx, tunnelID, federationBindings); replaceErr != nil {
+				tx.Rollback()
 				h.releaseFederationRuntimeRefs(federationReleaseRefs)
 				fail++
 				continue
 			}
-			if commitErr := tx.Commit(); commitErr != nil {
+			if commitErr := tx.Commit().Error; commitErr != nil {
 				h.releaseFederationRuntimeRefs(federationReleaseRefs)
 				fail++
 				continue
@@ -1032,8 +978,7 @@ func (h *Handler) userTunnelRemove(w http.ResponseWriter, r *http.Request) {
 	if id <= 0 {
 		return
 	}
-	_, err := h.repo.DB().Exec(`DELETE FROM user_tunnel WHERE id = ?`, id)
-	if err != nil {
+	if err := h.repo.DeleteUserTunnel(id); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
@@ -1051,25 +996,20 @@ func (h *Handler) userTunnelUpdate(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSON(w, response.ErrDefault("权限ID不能为空"))
 		return
 	}
-	_, err := h.repo.DB().Exec(`
-		UPDATE user_tunnel SET flow = ?, num = ?, exp_time = ?, flow_reset_time = ?, speed_id = ?, status = ? WHERE id = ?
-	`,
+	if err := h.repo.UpdateUserTunnel(id,
 		asInt64(req["flow"], 0),
 		asInt(req["num"], 0),
 		asInt64(req["expTime"], time.Now().Add(365*24*time.Hour).UnixMilli()),
 		asInt64(req["flowResetTime"], 1),
 		nullableInt(asAnyToInt64Ptr(req["speedId"])),
 		asInt(req["status"], 1),
-		id,
-	)
-	if err != nil {
+	); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
 
-	// Fetch details to sync forwards
-	var userID, tunnelID int64
-	if err := h.repo.DB().QueryRow("SELECT user_id, tunnel_id FROM user_tunnel WHERE id = ?", id).Scan(&userID, &tunnelID); err == nil {
+	userID, tunnelID, utErr := h.repo.GetUserTunnelUserAndTunnel(id)
+	if utErr == nil {
 		h.syncUserTunnelForwards(userID, tunnelID)
 	}
 
@@ -1130,30 +1070,13 @@ func (h *Handler) forwardCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	now := time.Now().UnixMilli()
-	inx := nextIndex(h.repo.DB(), "forward")
-	var userName string
-	_ = h.repo.DB().QueryRow(`SELECT user FROM user WHERE id = ?`, userID).Scan(&userName)
+	inx := h.repo.NextIndex("forward")
+	userName := h.repo.GetUsernameByID(userID)
 	if userName == "" {
 		userName = "user"
 	}
-	tx, err := h.repo.DB().Begin()
+	forwardID, err := h.repo.CreateForwardTx(userID, userName, name, tunnelID, remoteAddr, defaultString(asString(req["strategy"]), "fifo"), now, inx, entryNodes, port)
 	if err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
-		return
-	}
-	defer func() { _ = tx.Rollback() }()
-	forwardID, err := tx.ExecReturningID(`
-		INSERT INTO forward(user_id, user_name, name, tunnel_id, remote_addr, strategy, in_flow, out_flow, created_time, updated_time, status, inx)
-		VALUES(?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 1, ?)
-	`, userID, userName, name, tunnelID, remoteAddr, defaultString(asString(req["strategy"]), "fifo"), now, now, inx)
-	if err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
-		return
-	}
-	for _, nodeID := range entryNodes {
-		_, _ = tx.Exec(`INSERT INTO forward_port(forward_id, node_id, port) VALUES(?, ?, ?)`, forwardID, nodeID, port)
-	}
-	if err := tx.Commit(); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
@@ -1230,8 +1153,7 @@ func (h *Handler) forwardUpdate(w http.ResponseWriter, r *http.Request) {
 
 	port := asInt(req["inPort"], 0)
 	if port <= 0 {
-		var minPort sql.NullInt64
-		_ = h.repo.DB().QueryRow(`SELECT MIN(port) FROM forward_port WHERE forward_id = ?`, id).Scan(&minPort)
+		minPort := h.repo.GetMinForwardPort(id)
 		if minPort.Valid {
 			port = int(minPort.Int64)
 		}
@@ -1251,10 +1173,7 @@ func (h *Handler) forwardUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	now := time.Now().UnixMilli()
-	_, err = h.repo.DB().Exec(`
-		UPDATE forward SET name = ?, tunnel_id = ?, remote_addr = ?, strategy = ?, updated_time = ? WHERE id = ?
-	`, name, tunnelID, remoteAddr, strategy, now, id)
-	if err != nil {
+	if err := h.repo.UpdateForward(id, name, tunnelID, remoteAddr, strategy, now); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
@@ -1324,7 +1243,7 @@ func (h *Handler) forwardPause(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSON(w, response.ErrDefault(err.Error()))
 		return
 	}
-	_, _ = h.repo.DB().Exec(`UPDATE forward SET status = 0, updated_time = ? WHERE id = ?`, time.Now().UnixMilli(), id)
+	_ = h.repo.UpdateForwardStatus(id, 0, time.Now().UnixMilli())
 	response.WriteJSON(w, response.OKEmpty())
 }
 
@@ -1346,7 +1265,7 @@ func (h *Handler) forwardResume(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSON(w, response.ErrDefault(err.Error()))
 		return
 	}
-	_, _ = h.repo.DB().Exec(`UPDATE forward SET status = 1, updated_time = ? WHERE id = ?`, time.Now().UnixMilli(), id)
+	_ = h.repo.UpdateForwardStatus(id, 1, time.Now().UnixMilli())
 	response.WriteJSON(w, response.OKEmpty())
 }
 
@@ -1388,7 +1307,7 @@ func (h *Handler) forwardUpdateOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, f := range req.Forwards {
-		_, _ = h.repo.DB().Exec(`UPDATE forward SET inx = ?, updated_time = ? WHERE id = ?`, f.Inx, time.Now().UnixMilli(), f.ID)
+		h.repo.UpdateForwardOrder(f.ID, f.Inx, time.Now().UnixMilli())
 	}
 	response.WriteJSON(w, response.OKEmpty())
 }
@@ -1446,7 +1365,7 @@ func (h *Handler) forwardBatchPause(w http.ResponseWriter, r *http.Request) {
 			f++
 			continue
 		}
-		if _, err := h.repo.DB().Exec(`UPDATE forward SET status = 0, updated_time = ? WHERE id = ?`, time.Now().UnixMilli(), id); err != nil {
+		if err := h.repo.UpdateForwardStatus(id, 0, time.Now().UnixMilli()); err != nil {
 			f++
 		} else {
 			s++
@@ -1477,7 +1396,7 @@ func (h *Handler) forwardBatchResume(w http.ResponseWriter, r *http.Request) {
 			f++
 			continue
 		}
-		if _, err := h.repo.DB().Exec(`UPDATE forward SET status = 1, updated_time = ? WHERE id = ?`, time.Now().UnixMilli(), id); err != nil {
+		if err := h.repo.UpdateForwardStatus(id, 1, time.Now().UnixMilli()); err != nil {
 			f++
 		} else {
 			s++
@@ -1560,10 +1479,8 @@ func (h *Handler) forwardBatchChangeTunnel(w http.ResponseWriter, r *http.Reques
 			fail++
 			continue
 		}
-		var port sql.NullInt64
-		_ = h.repo.DB().QueryRow(`SELECT MIN(port) FROM forward_port WHERE forward_id = ?`, id).Scan(&port)
-		_, err := h.repo.DB().Exec(`UPDATE forward SET tunnel_id = ?, updated_time = ? WHERE id = ?`, req.TargetTunnelID, time.Now().UnixMilli(), id)
-		if err != nil {
+		port := h.repo.GetMinForwardPort(id)
+		if err := h.repo.UpdateForwardTunnel(id, req.TargetTunnelID, time.Now().UnixMilli()); err != nil {
 			fail++
 			continue
 		}
@@ -1627,16 +1544,14 @@ func (h *Handler) speedLimitCreate(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSON(w, response.ErrDefault("名称不能为空"))
 		return
 	}
-	var tunnelName string
-	_ = h.repo.DB().QueryRow(`SELECT name FROM tunnel WHERE id = ?`, tunnelID).Scan(&tunnelName)
+	tunnelName := h.repo.GetTunnelNameByID(tunnelID)
 	if tunnelName == "" {
 		response.WriteJSON(w, response.ErrDefault("隧道不存在"))
 		return
 	}
 	now := time.Now().UnixMilli()
 	speed := asInt(req["speed"], 100)
-	id, err := h.repo.DB().ExecReturningID(`INSERT INTO speed_limit(name, speed, tunnel_id, tunnel_name, created_time, updated_time, status) VALUES(?, ?, ?, ?, ?, ?, ?)`,
-		name, speed, tunnelID, tunnelName, now, now, asInt(req["status"], 1))
+	id, err := h.repo.CreateSpeedLimit(name, speed, tunnelID, tunnelName, now, asInt(req["status"], 1))
 	if err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
@@ -1657,16 +1572,13 @@ func (h *Handler) speedLimitUpdate(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSON(w, response.ErrDefault("请求参数错误"))
 		return
 	}
-	var tunnelName string
-	_ = h.repo.DB().QueryRow(`SELECT name FROM tunnel WHERE id = ?`, tunnelID).Scan(&tunnelName)
+	tunnelName := h.repo.GetTunnelNameByID(tunnelID)
 	if tunnelName == "" {
 		response.WriteJSON(w, response.ErrDefault("隧道不存在"))
 		return
 	}
 	speed := asInt(req["speed"], 100)
-	_, err := h.repo.DB().Exec(`UPDATE speed_limit SET name=?, speed=?, tunnel_id=?, tunnel_name=?, status=?, updated_time=? WHERE id=?`,
-		asString(req["name"]), speed, tunnelID, tunnelName, asInt(req["status"], 1), time.Now().UnixMilli(), id)
-	if err != nil {
+	if err := h.repo.UpdateSpeedLimit(id, asString(req["name"]), speed, tunnelID, tunnelName, asInt(req["status"], 1), time.Now().UnixMilli()); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
@@ -1679,11 +1591,9 @@ func (h *Handler) speedLimitDelete(w http.ResponseWriter, r *http.Request) {
 	if id <= 0 {
 		return
 	}
-	var tunnelID int64
-	_ = h.repo.DB().QueryRow(`SELECT tunnel_id FROM speed_limit WHERE id = ?`, id).Scan(&tunnelID)
+	tunnelID := h.repo.GetSpeedLimitTunnelID(id)
 
-	_, err := h.repo.DB().Exec(`DELETE FROM speed_limit WHERE id = ?`, id)
-	if err != nil {
+	if err := h.repo.DeleteSpeedLimit(id); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
@@ -1726,17 +1636,17 @@ func (h *Handler) groupTunnelAssign(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSON(w, response.ErrDefault("请求参数错误"))
 		return
 	}
-	tx, err := h.repo.DB().Begin()
-	if err != nil {
+	tx := h.repo.BeginTx()
+	if tx.Error != nil {
+		response.WriteJSON(w, response.Err(-2, tx.Error.Error()))
+		return
+	}
+	defer func() { tx.Rollback() }()
+	if err := h.repo.ReplaceTunnelGroupMembersTx(tx, req.GroupID, req.TunnelIDs, time.Now().UnixMilli()); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	defer func() { _ = tx.Rollback() }()
-	_, _ = tx.Exec(`DELETE FROM tunnel_group_tunnel WHERE tunnel_group_id = ?`, req.GroupID)
-	for _, tid := range req.TunnelIDs {
-		_, _ = tx.Exec(`INSERT INTO tunnel_group_tunnel(tunnel_group_id, tunnel_id, created_time) VALUES(?, ?, ?) ON CONFLICT DO NOTHING`, req.GroupID, tid, time.Now().UnixMilli())
-	}
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit().Error; err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
@@ -1753,26 +1663,26 @@ func (h *Handler) groupUserAssign(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSON(w, response.ErrDefault("请求参数错误"))
 		return
 	}
-	tx, err := h.repo.DB().Begin()
+	tx := h.repo.BeginTx()
+	if tx.Error != nil {
+		response.WriteJSON(w, response.Err(-2, tx.Error.Error()))
+		return
+	}
+	defer func() { tx.Rollback() }()
+	previousUserIDs, err := h.repo.ListUserIDsByUserGroupTx(tx, req.GroupID)
 	if err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	defer func() { _ = tx.Rollback() }()
-	previousUserIDs, err := queryInt64ListTx(tx, `SELECT user_id FROM user_group_user WHERE user_group_id = ?`, req.GroupID)
-	if err != nil {
+	if err := h.repo.ReplaceUserGroupMembersTx(tx, req.GroupID, req.UserIDs, time.Now().UnixMilli()); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	_, _ = tx.Exec(`DELETE FROM user_group_user WHERE user_group_id = ?`, req.GroupID)
-	for _, uid := range req.UserIDs {
-		_, _ = tx.Exec(`INSERT INTO user_group_user(user_group_id, user_id, created_time) VALUES(?, ?, ?) ON CONFLICT DO NOTHING`, req.GroupID, uid, time.Now().UnixMilli())
-	}
-	if err := revokeGroupGrantsForRemovedUsersTx(tx, req.GroupID, previousUserIDs, req.UserIDs); err != nil {
+	if err := h.repo.RevokeGroupGrantsForRemovedUsersTx(tx, req.GroupID, previousUserIDs, req.UserIDs); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit().Error; err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
@@ -1789,8 +1699,7 @@ func (h *Handler) groupPermissionAssign(w http.ResponseWriter, r *http.Request) 
 		response.WriteJSON(w, response.ErrDefault("请求参数错误"))
 		return
 	}
-	_, err := h.repo.DB().Exec(`INSERT INTO group_permission(user_group_id, tunnel_group_id, created_time) VALUES(?, ?, ?) ON CONFLICT DO NOTHING`, req.UserGroupID, req.TunnelGroupID, time.Now().UnixMilli())
-	if err != nil {
+	if err := h.repo.InsertGroupPermission(req.UserGroupID, req.TunnelGroupID, time.Now().UnixMilli()); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
@@ -1803,32 +1712,31 @@ func (h *Handler) groupPermissionRemove(w http.ResponseWriter, r *http.Request) 
 	if id <= 0 {
 		return
 	}
-	tx, err := h.repo.DB().Begin()
+	tx := h.repo.BeginTx()
+	if tx.Error != nil {
+		response.WriteJSON(w, response.Err(-2, tx.Error.Error()))
+		return
+	}
+	defer func() { tx.Rollback() }()
+
+	ug, tg, exists, err := h.repo.GetGroupPermissionPairByIDTx(tx, id)
 	if err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	defer func() { _ = tx.Rollback() }()
 
-	var ug, tg int64
-	err = tx.QueryRow(`SELECT user_group_id, tunnel_group_id FROM group_permission WHERE id = ?`, id).Scan(&ug, &tg)
-	if err != nil && err != sql.ErrNoRows {
+	if err := h.repo.DeleteGroupPermissionByIDTx(tx, id); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-
-	if _, err := tx.Exec(`DELETE FROM group_permission WHERE id = ?`, id); err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
-		return
-	}
-	if err == nil {
-		if err := revokeGroupPermissionPairTx(tx, ug, tg); err != nil {
+	if exists {
+		if err := h.repo.RevokeGroupPermissionPairTx(tx, ug, tg); err != nil {
 			response.WriteJSON(w, response.Err(-2, err.Error()))
 			return
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit().Error; err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
@@ -1847,8 +1755,7 @@ func (h *Handler) groupCreate(w http.ResponseWriter, r *http.Request, table stri
 		return
 	}
 	now := time.Now().UnixMilli()
-	_, err := h.repo.DB().Exec(`INSERT INTO `+table+`(name, created_time, updated_time, status) VALUES(?, ?, ?, ?)`, name, now, now, asInt(req["status"], 1))
-	if err != nil {
+	if err := h.repo.GroupCreate(table, name, asInt(req["status"], 1), now); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
@@ -1866,8 +1773,7 @@ func (h *Handler) groupUpdate(w http.ResponseWriter, r *http.Request, table stri
 		response.WriteJSON(w, response.ErrDefault("分组ID不能为空"))
 		return
 	}
-	_, err := h.repo.DB().Exec(`UPDATE `+table+` SET name = ?, status = ?, updated_time = ? WHERE id = ?`, asString(req["name"]), asInt(req["status"], 1), time.Now().UnixMilli(), id)
-	if err != nil {
+	if err := h.repo.GroupUpdate(table, id, asString(req["name"]), asInt(req["status"], 1), time.Now().UnixMilli()); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
@@ -1879,23 +1785,7 @@ func (h *Handler) groupDelete(w http.ResponseWriter, r *http.Request, table stri
 	if id <= 0 {
 		return
 	}
-	tx, err := h.repo.DB().Begin()
-	if err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
-		return
-	}
-	defer func() { _ = tx.Rollback() }()
-	if table == "tunnel_group" {
-		_, _ = tx.Exec(`DELETE FROM tunnel_group_tunnel WHERE tunnel_group_id = ?`, id)
-		_, _ = tx.Exec(`DELETE FROM group_permission WHERE tunnel_group_id = ?`, id)
-		_, _ = tx.Exec(`DELETE FROM group_permission_grant WHERE tunnel_group_id = ?`, id)
-	} else {
-		_, _ = tx.Exec(`DELETE FROM user_group_user WHERE user_group_id = ?`, id)
-		_, _ = tx.Exec(`DELETE FROM group_permission WHERE user_group_id = ?`, id)
-		_, _ = tx.Exec(`DELETE FROM group_permission_grant WHERE user_group_id = ?`, id)
-	}
-	_, _ = tx.Exec(`DELETE FROM `+table+` WHERE id = ?`, id)
-	if err := tx.Commit(); err != nil {
+	if err := h.repo.GroupDeleteCascade(table, id); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
@@ -1903,12 +1793,11 @@ func (h *Handler) groupDelete(w http.ResponseWriter, r *http.Request, table stri
 }
 
 func (h *Handler) applyGroupPermission(userGroupID, tunnelGroupID int64) error {
-	db := h.repo.DB()
-	userIDs, _ := queryInt64List(db, `SELECT user_id FROM user_group_user WHERE user_group_id = ?`, userGroupID)
-	tunnelIDs, _ := queryInt64List(db, `SELECT tunnel_id FROM tunnel_group_tunnel WHERE tunnel_group_id = ?`, tunnelGroupID)
+	userIDs, _ := h.repo.ListUserIDsByUserGroup(userGroupID)
+	tunnelIDs, _ := h.repo.ListTunnelIDsByTunnelGroup(tunnelGroupID)
 	for _, uid := range userIDs {
 		for _, tid := range tunnelIDs {
-			utID, created, err := ensureUserTunnelGrant(db, uid, tid)
+			utID, created, err := h.repo.EnsureUserTunnelGrant(uid, tid)
 			if err != nil {
 				continue
 			}
@@ -1916,16 +1805,14 @@ func (h *Handler) applyGroupPermission(userGroupID, tunnelGroupID int64) error {
 			if created {
 				createdByGroup = 1
 			}
-			_, _ = db.Exec(`INSERT INTO group_permission_grant(user_group_id, tunnel_group_id, user_tunnel_id, created_by_group, created_time) VALUES(?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
-				userGroupID, tunnelGroupID, utID, createdByGroup, time.Now().UnixMilli())
+			h.repo.InsertGroupPermissionGrant(userGroupID, tunnelGroupID, utID, createdByGroup, time.Now().UnixMilli())
 		}
 	}
 	return nil
 }
 
 func (h *Handler) syncPermissionsByUserGroup(userGroupID int64) error {
-	db := h.repo.DB()
-	pairs, err := queryPairs(db, `SELECT user_group_id, tunnel_group_id FROM group_permission WHERE user_group_id = ?`, userGroupID)
+	pairs, err := h.repo.ListGroupPermissionPairsByUserGroup(userGroupID)
 	if err != nil {
 		return err
 	}
@@ -1936,8 +1823,7 @@ func (h *Handler) syncPermissionsByUserGroup(userGroupID int64) error {
 }
 
 func (h *Handler) syncPermissionsByTunnelGroup(tunnelGroupID int64) error {
-	db := h.repo.DB()
-	pairs, err := queryPairs(db, `SELECT user_group_id, tunnel_group_id FROM group_permission WHERE tunnel_group_id = ?`, tunnelGroupID)
+	pairs, err := h.repo.ListGroupPermissionPairsByTunnelGroup(tunnelGroupID)
 	if err != nil {
 		return err
 	}
@@ -1945,202 +1831,6 @@ func (h *Handler) syncPermissionsByTunnelGroup(tunnelGroupID int64) error {
 		_ = h.applyGroupPermission(p[0], p[1])
 	}
 	return nil
-}
-
-func ensureUserTunnelGrant(db *store.DB, userID, tunnelID int64) (int64, bool, error) {
-	var id int64
-	err := db.QueryRow(`SELECT id FROM user_tunnel WHERE user_id = ? AND tunnel_id = ? LIMIT 1`, userID, tunnelID).Scan(&id)
-	if err == nil {
-		return id, false, nil
-	}
-	if err != sql.ErrNoRows {
-		return 0, false, err
-	}
-	var flow int64
-	var num int
-	var expTime int64
-	var flowReset int64
-	if err := db.QueryRow(`SELECT flow, num, exp_time, flow_reset_time FROM user WHERE id = ?`, userID).Scan(&flow, &num, &expTime, &flowReset); err != nil {
-		return 0, false, err
-	}
-	id, err = db.ExecReturningID(`INSERT INTO user_tunnel(user_id, tunnel_id, speed_id, num, flow, in_flow, out_flow, flow_reset_time, exp_time, status) VALUES(?, ?, NULL, ?, ?, 0, 0, ?, ?, 1)`,
-		userID, tunnelID, num, flow, flowReset, expTime)
-	if err != nil {
-		return 0, false, err
-	}
-	return id, true, nil
-}
-
-func queryInt64List(db *store.DB, q string, args ...interface{}) ([]int64, error) {
-	rows, err := db.Query(q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make([]int64, 0)
-	for rows.Next() {
-		var v int64
-		if err := rows.Scan(&v); err != nil {
-			return nil, err
-		}
-		out = append(out, v)
-	}
-	return out, rows.Err()
-}
-
-func queryInt64ListTx(tx *store.Tx, q string, args ...interface{}) ([]int64, error) {
-	rows, err := tx.Query(q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make([]int64, 0)
-	for rows.Next() {
-		var v int64
-		if err := rows.Scan(&v); err != nil {
-			return nil, err
-		}
-		out = append(out, v)
-	}
-	return out, rows.Err()
-}
-
-func revokeGroupGrantsForRemovedUsersTx(tx *store.Tx, userGroupID int64, previousUserIDs, currentUserIDs []int64) error {
-	currentSet := make(map[int64]struct{}, len(currentUserIDs))
-	for _, uid := range currentUserIDs {
-		if uid > 0 {
-			currentSet[uid] = struct{}{}
-		}
-	}
-
-	removedUserIDs := make([]int64, 0)
-	for _, uid := range previousUserIDs {
-		if uid <= 0 {
-			continue
-		}
-		if _, ok := currentSet[uid]; !ok {
-			removedUserIDs = append(removedUserIDs, uid)
-		}
-	}
-	if len(removedUserIDs) == 0 {
-		return nil
-	}
-
-	for _, userID := range removedUserIDs {
-		rows, err := tx.Query(`
-			SELECT g.user_tunnel_id, g.created_by_group
-			FROM group_permission_grant g
-			JOIN user_tunnel ut ON ut.id = g.user_tunnel_id
-			WHERE g.user_group_id = ? AND ut.user_id = ?
-		`, userGroupID, userID)
-		if err != nil {
-			return err
-		}
-
-		groupCreatedTunnelIDs := make(map[int64]struct{})
-		for rows.Next() {
-			var userTunnelID int64
-			var createdByGroup int
-			if err := rows.Scan(&userTunnelID, &createdByGroup); err != nil {
-				rows.Close()
-				return err
-			}
-			if createdByGroup == 1 && userTunnelID > 0 {
-				groupCreatedTunnelIDs[userTunnelID] = struct{}{}
-			}
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return err
-		}
-		rows.Close()
-
-		if _, err := tx.Exec(`
-			DELETE FROM group_permission_grant
-			WHERE user_group_id = ?
-			  AND user_tunnel_id IN (SELECT id FROM user_tunnel WHERE user_id = ?)
-		`, userGroupID, userID); err != nil {
-			return err
-		}
-
-		for userTunnelID := range groupCreatedTunnelIDs {
-			var remaining int
-			if err := tx.QueryRow(`SELECT COUNT(1) FROM group_permission_grant WHERE user_tunnel_id = ?`, userTunnelID).Scan(&remaining); err != nil {
-				return err
-			}
-			if remaining == 0 {
-				if _, err := tx.Exec(`DELETE FROM user_tunnel WHERE id = ?`, userTunnelID); err != nil {
-					return err
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
-func revokeGroupPermissionPairTx(tx *store.Tx, userGroupID, tunnelGroupID int64) error {
-	rows, err := tx.Query(`
-		SELECT user_tunnel_id, created_by_group
-		FROM group_permission_grant
-		WHERE user_group_id = ? AND tunnel_group_id = ?
-	`, userGroupID, tunnelGroupID)
-	if err != nil {
-		return err
-	}
-
-	groupCreatedTunnelIDs := make(map[int64]struct{})
-	for rows.Next() {
-		var userTunnelID int64
-		var createdByGroup int
-		if err := rows.Scan(&userTunnelID, &createdByGroup); err != nil {
-			rows.Close()
-			return err
-		}
-		if createdByGroup == 1 && userTunnelID > 0 {
-			groupCreatedTunnelIDs[userTunnelID] = struct{}{}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-
-	if _, err := tx.Exec(`DELETE FROM group_permission_grant WHERE user_group_id = ? AND tunnel_group_id = ?`, userGroupID, tunnelGroupID); err != nil {
-		return err
-	}
-
-	for userTunnelID := range groupCreatedTunnelIDs {
-		var remaining int
-		if err := tx.QueryRow(`SELECT COUNT(1) FROM group_permission_grant WHERE user_tunnel_id = ?`, userTunnelID).Scan(&remaining); err != nil {
-			return err
-		}
-		if remaining == 0 {
-			if _, err := tx.Exec(`DELETE FROM user_tunnel WHERE id = ?`, userTunnelID); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
-}
-
-func queryPairs(db *store.DB, q string, args ...interface{}) ([][2]int64, error) {
-	rows, err := db.Query(q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make([][2]int64, 0)
-	for rows.Next() {
-		var a, b int64
-		if err := rows.Scan(&a, &b); err != nil {
-			return nil, err
-		}
-		out = append(out, [2]int64{a, b})
-	}
-	return out, rows.Err()
 }
 
 type tunnelRuntimeNode struct {
@@ -2163,7 +1853,7 @@ type tunnelCreateState struct {
 	NodeIDList   []int64
 }
 
-func (h *Handler) prepareTunnelCreateState(tx *store.Tx, req map[string]interface{}, tunnelType int, excludeTunnelID int64) (*tunnelCreateState, error) {
+func (h *Handler) prepareTunnelCreateState(tx *gorm.DB, req map[string]interface{}, tunnelType int, excludeTunnelID int64) (*tunnelCreateState, error) {
 	state := &tunnelCreateState{
 		Type:      tunnelType,
 		InNodes:   make([]tunnelRuntimeNode, 0),
@@ -2205,13 +1895,13 @@ func (h *Handler) prepareTunnelCreateState(tx *store.Tx, req map[string]interfac
 			nodeIDs = append(nodeIDs, nodeID)
 			port := asInt(item["port"], 0)
 			if port <= 0 {
-				isRemote, remoteErr := isRemoteNodeTx(tx, nodeID)
+				isRemote, remoteErr := h.repo.IsRemoteNodeTx(tx, nodeID)
 				if remoteErr != nil {
 					return nil, remoteErr
 				}
 				if !isRemote {
 					var err error
-					port, err = pickNodePortTx(tx, nodeID, allocated, excludeTunnelID)
+					port, err = h.repo.PickNodePortTx(tx, nodeID, allocated, excludeTunnelID)
 					if err != nil {
 						return nil, err
 					}
@@ -2239,13 +1929,13 @@ func (h *Handler) prepareTunnelCreateState(tx *store.Tx, req map[string]interfac
 				nodeIDs = append(nodeIDs, nodeID)
 				port := asInt(item["port"], 0)
 				if port <= 0 {
-					isRemote, remoteErr := isRemoteNodeTx(tx, nodeID)
+					isRemote, remoteErr := h.repo.IsRemoteNodeTx(tx, nodeID)
 					if remoteErr != nil {
 						return nil, remoteErr
 					}
 					if !isRemote {
 						var err error
-						port, err = pickNodePortTx(tx, nodeID, allocated, excludeTunnelID)
+						port, err = h.repo.PickNodePortTx(tx, nodeID, allocated, excludeTunnelID)
 						if err != nil {
 							return nil, err
 						}
@@ -2273,12 +1963,15 @@ func (h *Handler) prepareTunnelCreateState(tx *store.Tx, req map[string]interfac
 		}
 		seen[nodeID] = struct{}{}
 		state.NodeIDList = append(state.NodeIDList, nodeID)
-		node, err := h.getNodeRecord(nodeID)
+		node, err := h.repo.GetNodeRecordTx(tx, nodeID)
 		if err != nil {
 			if strings.Contains(err.Error(), "不存在") {
 				return nil, errors.New("节点不存在")
 			}
 			return nil, err
+		}
+		if node == nil {
+			return nil, errors.New("节点不存在")
 		}
 		if node.IsRemote != 1 && node.Status != 1 {
 			return nil, errors.New("部分节点不在线")
@@ -2397,14 +2090,13 @@ func (h *Handler) federationLocalDomain() string {
 	return strings.TrimSpace(cfg.Value)
 }
 
-func (h *Handler) applyFederationRuntime(state *tunnelCreateState) ([]sqlite.FederationTunnelBinding, []federationRuntimeReleaseRef, error) {
-	bindings := make([]sqlite.FederationTunnelBinding, 0)
+func (h *Handler) applyFederationRuntime(state *tunnelCreateState, localDomain string) ([]repo.FederationTunnelBinding, []federationRuntimeReleaseRef, error) {
+	bindings := make([]repo.FederationTunnelBinding, 0)
 	releaseRefs := make([]federationRuntimeReleaseRef, 0)
 	if h == nil || state == nil {
 		return bindings, releaseRefs, nil
 	}
 	fc := client.NewFederationClient()
-	localDomain := h.federationLocalDomain()
 	now := time.Now().UnixMilli()
 
 	for outIdx := range state.OutNodes {
@@ -2456,7 +2148,7 @@ func (h *Handler) applyFederationRuntime(state *tunnelCreateState) ([]sqlite.Fed
 			outNode = state.OutNodes[outIdx]
 		}
 
-		bindings = append(bindings, sqlite.FederationTunnelBinding{
+		bindings = append(bindings, repo.FederationTunnelBinding{
 			TunnelID:        state.TunnelID,
 			NodeID:          outNode.NodeID,
 			ChainType:       3,
@@ -2556,7 +2248,7 @@ func (h *Handler) applyFederationRuntime(state *tunnelCreateState) ([]sqlite.Fed
 				chainNode = state.ChainHops[hopIdx][nodeIdx]
 			}
 
-			bindings = append(bindings, sqlite.FederationTunnelBinding{
+			bindings = append(bindings, repo.FederationTunnelBinding{
 				TunnelID:        state.TunnelID,
 				NodeID:          chainNode.NodeID,
 				ChainType:       2,
@@ -2633,33 +2325,6 @@ func (h *Handler) cleanupFederationRuntime(tunnelID int64) {
 		_ = fc.ReleaseRole(remoteURL, remoteToken, localDomain, req)
 	}
 	_ = h.repo.DeleteFederationTunnelBindingsByTunnel(tunnelID)
-}
-
-func replaceFederationTunnelBindingsTx(tx *store.Tx, tunnelID int64, bindings []sqlite.FederationTunnelBinding) error {
-	if tx == nil {
-		return errors.New("database unavailable")
-	}
-	if _, err := tx.Exec(`DELETE FROM federation_tunnel_binding WHERE tunnel_id = ?`, tunnelID); err != nil {
-		return err
-	}
-	for _, b := range bindings {
-		created := b.CreatedTime
-		if created <= 0 {
-			created = time.Now().UnixMilli()
-		}
-		updated := b.UpdatedTime
-		if updated <= 0 {
-			updated = created
-		}
-		_, err := tx.Exec(`
-			INSERT INTO federation_tunnel_binding(tunnel_id, node_id, chain_type, hop_inx, remote_url, resource_key, remote_binding_id, allocated_port, status, created_time, updated_time)
-			VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, tunnelID, b.NodeID, b.ChainType, b.HopInx, b.RemoteURL, b.ResourceKey, b.RemoteBindingID, b.AllocatedPort, b.Status, created, updated)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (h *Handler) applyTunnelRuntime(state *tunnelCreateState) ([]int64, []int64, error) {
@@ -2983,135 +2648,7 @@ func pickNodeAddressV6(node *nodeRecord) string {
 	return strings.TrimSpace(node.ServerIP)
 }
 
-func isRemoteNodeTx(tx *store.Tx, nodeID int64) (bool, error) {
-	if tx == nil {
-		return false, errors.New("database unavailable")
-	}
-	if nodeID <= 0 {
-		return false, errors.New("节点不存在")
-	}
-	var isRemote int
-	if err := tx.QueryRow(`SELECT is_remote FROM node WHERE id = ? LIMIT 1`, nodeID).Scan(&isRemote); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, errors.New("节点不存在")
-		}
-		return false, err
-	}
-	return isRemote == 1, nil
-}
-
-func pickNodePortTx(tx *store.Tx, nodeID int64, allocated map[int64]int, excludeTunnelID int64) (int, error) {
-	if tx == nil {
-		return 0, errors.New("database unavailable")
-	}
-	if nodeID <= 0 {
-		return 0, errors.New("节点不存在")
-	}
-	if port, ok := allocated[nodeID]; ok && port > 0 {
-		return port, nil
-	}
-
-	var portRange string
-	if err := tx.QueryRow(`SELECT port FROM node WHERE id = ? LIMIT 1`, nodeID).Scan(&portRange); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, errors.New("节点不存在")
-		}
-		return 0, err
-	}
-	candidates := parsePortRangeSpec(portRange)
-	if len(candidates) == 0 {
-		return 0, errors.New("节点端口已满，无可用端口")
-	}
-
-	used := map[int]struct{}{}
-	var chainRows *sql.Rows
-	var err error
-	if excludeTunnelID > 0 {
-		chainRows, err = tx.Query(`SELECT port FROM chain_tunnel WHERE node_id = ? AND port IS NOT NULL AND tunnel_id != ?`, nodeID, excludeTunnelID)
-	} else {
-		chainRows, err = tx.Query(`SELECT port FROM chain_tunnel WHERE node_id = ? AND port IS NOT NULL`, nodeID)
-	}
-	if err != nil {
-		return 0, err
-	}
-	for chainRows.Next() {
-		var p sql.NullInt64
-		if scanErr := chainRows.Scan(&p); scanErr == nil && p.Valid && p.Int64 > 0 {
-			used[int(p.Int64)] = struct{}{}
-		}
-	}
-	_ = chainRows.Close()
-
-	forwardRows, err := tx.Query(`SELECT port FROM forward_port WHERE node_id = ?`, nodeID)
-	if err != nil {
-		return 0, err
-	}
-	for forwardRows.Next() {
-		var p sql.NullInt64
-		if scanErr := forwardRows.Scan(&p); scanErr == nil && p.Valid && p.Int64 > 0 {
-			used[int(p.Int64)] = struct{}{}
-		}
-	}
-	_ = forwardRows.Close()
-
-	for _, candidate := range candidates {
-		if candidate <= 0 {
-			continue
-		}
-		if _, ok := used[candidate]; ok {
-			continue
-		}
-		allocated[nodeID] = candidate
-		return candidate, nil
-	}
-	return 0, errors.New("节点端口已满，无可用端口")
-}
-
-func parsePortRangeSpec(input string) []int {
-	input = strings.TrimSpace(input)
-	if input == "" {
-		return nil
-	}
-	set := make(map[int]struct{})
-	parts := strings.Split(input, ",")
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		if strings.Contains(part, "-") {
-			r := strings.SplitN(part, "-", 2)
-			if len(r) != 2 {
-				continue
-			}
-			start, err1 := strconv.Atoi(strings.TrimSpace(r[0]))
-			end, err2 := strconv.Atoi(strings.TrimSpace(r[1]))
-			if err1 != nil || err2 != nil || start <= 0 || end <= 0 {
-				continue
-			}
-			if end < start {
-				start, end = end, start
-			}
-			for p := start; p <= end; p++ {
-				set[p] = struct{}{}
-			}
-			continue
-		}
-		p, err := strconv.Atoi(part)
-		if err != nil || p <= 0 {
-			continue
-		}
-		set[p] = struct{}{}
-	}
-	out := make([]int, 0, len(set))
-	for p := range set {
-		out = append(out, p)
-	}
-	sort.Ints(out)
-	return out
-}
-
-func replaceTunnelChainsTx(tx *store.Tx, tunnelID int64, req map[string]interface{}) error {
+func (h *Handler) replaceTunnelChainsTx(tx *gorm.DB, tunnelID int64, req map[string]interface{}) error {
 	allocated := map[int64]int{}
 	inNodes := asMapSlice(req["inNodeId"])
 	for _, n := range inNodes {
@@ -3119,9 +2656,16 @@ func replaceTunnelChainsTx(tx *store.Tx, tunnelID int64, req map[string]interfac
 		if nodeID <= 0 {
 			continue
 		}
-		_, err := tx.Exec(`INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol) VALUES(?, '1', ?, NULL, ?, 0, ?)`,
-			tunnelID, nodeID, defaultString(asString(n["strategy"]), "round"), defaultString(asString(n["protocol"]), "tls"))
-		if err != nil {
+		if err := h.repo.CreateChainTunnelTx(
+			tx,
+			tunnelID,
+			"1",
+			nodeID,
+			sql.NullInt64{},
+			defaultString(asString(n["strategy"]), "round"),
+			0,
+			defaultString(asString(n["protocol"]), "tls"),
+		); err != nil {
 			return err
 		}
 	}
@@ -3133,14 +2677,21 @@ func replaceTunnelChainsTx(tx *store.Tx, tunnelID int64, req map[string]interfac
 		port := asInt(n["port"], 0)
 		if port <= 0 {
 			var pickErr error
-			port, pickErr = pickNodePortTx(tx, nodeID, allocated, 0)
+			port, pickErr = h.repo.PickNodePortTx(tx, nodeID, allocated, 0)
 			if pickErr != nil {
 				return pickErr
 			}
 		}
-		_, err := tx.Exec(`INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol) VALUES(?, '3', ?, ?, ?, 0, ?)`,
-			tunnelID, nodeID, port, defaultString(asString(n["strategy"]), "round"), defaultString(asString(n["protocol"]), "tls"))
-		if err != nil {
+		if err := h.repo.CreateChainTunnelTx(
+			tx,
+			tunnelID,
+			"3",
+			nodeID,
+			sql.NullInt64{Int64: int64(port), Valid: true},
+			defaultString(asString(n["strategy"]), "round"),
+			0,
+			defaultString(asString(n["protocol"]), "tls"),
+		); err != nil {
 			return err
 		}
 	}
@@ -3154,14 +2705,21 @@ func replaceTunnelChainsTx(tx *store.Tx, tunnelID int64, req map[string]interfac
 			port := asInt(n["port"], 0)
 			if port <= 0 {
 				var pickErr error
-				port, pickErr = pickNodePortTx(tx, nodeID, allocated, 0)
+				port, pickErr = h.repo.PickNodePortTx(tx, nodeID, allocated, 0)
 				if pickErr != nil {
 					return pickErr
 				}
 			}
-			_, err := tx.Exec(`INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol) VALUES(?, '2', ?, ?, ?, ?, ?)`,
-				tunnelID, nodeID, port, defaultString(asString(n["strategy"]), "round"), i+1, defaultString(asString(n["protocol"]), "tls"))
-			if err != nil {
+			if err := h.repo.CreateChainTunnelTx(
+				tx,
+				tunnelID,
+				"2",
+				nodeID,
+				sql.NullInt64{Int64: int64(port), Valid: true},
+				defaultString(asString(n["strategy"]), "round"),
+				i+1,
+				defaultString(asString(n["protocol"]), "tls"),
+			); err != nil {
 				return err
 			}
 		}
@@ -3170,52 +2728,15 @@ func replaceTunnelChainsTx(tx *store.Tx, tunnelID int64, req map[string]interfac
 }
 
 func (h *Handler) deleteNodeByID(id int64) error {
-	tx, err := h.repo.DB().Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	_, _ = tx.Exec(`DELETE FROM forward_port WHERE node_id = ?`, id)
-	_, _ = tx.Exec(`DELETE FROM chain_tunnel WHERE node_id = ?`, id)
-	_, _ = tx.Exec(`DELETE FROM federation_tunnel_binding WHERE node_id = ?`, id)
-	_, err = tx.Exec(`DELETE FROM node WHERE id = ?`, id)
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
+	return h.repo.DeleteNodeCascade(id)
 }
 
 func (h *Handler) deleteTunnelByID(id int64) error {
-	tx, err := h.repo.DB().Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	_, _ = tx.Exec(`DELETE FROM forward_port WHERE forward_id IN (SELECT id FROM forward WHERE tunnel_id = ?)`, id)
-	_, _ = tx.Exec(`DELETE FROM forward WHERE tunnel_id = ?`, id)
-	_, _ = tx.Exec(`DELETE FROM user_tunnel WHERE tunnel_id = ?`, id)
-	_, _ = tx.Exec(`DELETE FROM speed_limit WHERE tunnel_id = ?`, id)
-	_, _ = tx.Exec(`DELETE FROM chain_tunnel WHERE tunnel_id = ?`, id)
-	_, _ = tx.Exec(`DELETE FROM federation_tunnel_binding WHERE tunnel_id = ?`, id)
-	_, err = tx.Exec(`DELETE FROM tunnel WHERE id = ?`, id)
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
+	return h.repo.DeleteTunnelCascade(id)
 }
 
 func (h *Handler) deleteForwardByID(id int64) error {
-	tx, err := h.repo.DB().Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	_, _ = tx.Exec(`DELETE FROM forward_port WHERE forward_id = ?`, id)
-	_, err = tx.Exec(`DELETE FROM forward WHERE id = ?`, id)
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
+	return h.repo.DeleteForwardCascade(id)
 }
 
 func (h *Handler) batchForwardDelete(ids []int64) (int, int) {
@@ -3232,32 +2753,11 @@ func (h *Handler) batchForwardDelete(ids []int64) (int, int) {
 }
 
 func (h *Handler) batchForwardStatus(ids []int64, status int) (int, int) {
-	s := 0
-	f := 0
-	for _, id := range ids {
-		if _, err := h.repo.DB().Exec(`UPDATE forward SET status = ?, updated_time = ? WHERE id = ?`, status, time.Now().UnixMilli(), id); err != nil {
-			f++
-		} else {
-			s++
-		}
-	}
-	return s, f
+	return h.repo.BatchUpdateForwardStatus(ids, status)
 }
 
 func (h *Handler) tunnelEntryNodeIDs(tunnelID int64) ([]int64, error) {
-	rows, err := h.repo.DB().Query(`SELECT node_id FROM chain_tunnel WHERE tunnel_id = ? AND chain_type = '1' ORDER BY inx ASC, id ASC`, tunnelID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make([]int64, 0)
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err == nil {
-			out = append(out, id)
-		}
-	}
-	return out, rows.Err()
+	return h.repo.TunnelEntryNodeIDs(tunnelID)
 }
 
 func (h *Handler) pickTunnelPort(tunnelID int64) int {
@@ -3270,8 +2770,8 @@ func (h *Handler) pickTunnelPort(tunnelID int64) int {
 	firstNode := true
 
 	for _, nodeID := range entryNodes {
-		var portRange string
-		if err := h.repo.DB().QueryRow("SELECT port FROM node WHERE id = ?", nodeID).Scan(&portRange); err != nil {
+		portRange, err := h.repo.GetNodePortRange(nodeID)
+		if err != nil {
 			continue
 		}
 		if portRange == "" {
@@ -3326,30 +2826,7 @@ func (h *Handler) pickTunnelPort(tunnelID int64) int {
 }
 
 func (h *Handler) getUsedPorts(nodeID int64) (map[int]bool, error) {
-	used := make(map[int]bool)
-	rows, err := h.repo.DB().Query("SELECT port FROM forward_port WHERE node_id = ?", nodeID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var p int
-		if err := rows.Scan(&p); err == nil {
-			used[p] = true
-		}
-	}
-	rows2, err := h.repo.DB().Query("SELECT port FROM chain_tunnel WHERE node_id = ? AND port > 0", nodeID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows2.Close()
-	for rows2.Next() {
-		var p int
-		if err := rows2.Scan(&p); err == nil {
-			used[p] = true
-		}
-	}
-	return used, nil
+	return h.repo.GetUsedPortsOnNodeAsMap(nodeID)
 }
 
 func parsePorts(portRange string) ([]int, error) {
@@ -3385,55 +2862,47 @@ func parsePorts(portRange string) ([]int, error) {
 }
 
 func (h *Handler) replaceForwardPorts(forwardID, tunnelID int64, port int) error {
-	tx, err := h.repo.DB().Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.Exec(`DELETE FROM forward_port WHERE forward_id = ?`, forwardID); err != nil {
-		return err
-	}
 	entryNodes, err := h.tunnelEntryNodeIDs(tunnelID)
 	if err != nil {
 		return err
 	}
-	for _, nodeID := range entryNodes {
-		if _, err := tx.Exec(`INSERT INTO forward_port(forward_id, node_id, port) VALUES(?, ?, ?)`, forwardID, nodeID, port); err != nil {
-			return err
-		}
+	entries := make([]struct {
+		NodeID int64
+		Port   int
+	}, len(entryNodes))
+	for i, nid := range entryNodes {
+		entries[i] = struct {
+			NodeID int64
+			Port   int
+		}{NodeID: nid, Port: port}
 	}
-	return tx.Commit()
+	return h.repo.ReplaceForwardPorts(forwardID, entries)
 }
 
 func (h *Handler) replaceForwardPortsWithRecords(forwardID int64, ports []forwardPortRecord) error {
-	tx, err := h.repo.DB().Begin()
-	if err != nil {
-		return err
+	entries := make([]struct {
+		NodeID int64
+		Port   int
+	}, len(ports))
+	for i, fp := range ports {
+		entries[i] = struct {
+			NodeID int64
+			Port   int
+		}{NodeID: fp.NodeID, Port: fp.Port}
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err := tx.Exec(`DELETE FROM forward_port WHERE forward_id = ?`, forwardID); err != nil {
-		return err
-	}
-	for _, fp := range ports {
-		if _, err := tx.Exec(`INSERT INTO forward_port(forward_id, node_id, port) VALUES(?, ?, ?)`, forwardID, fp.NodeID, fp.Port); err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
+	return h.repo.ReplaceForwardPorts(forwardID, entries)
 }
 
 func (h *Handler) rollbackForwardMutation(oldForward *forwardRecord, oldPorts []forwardPortRecord) {
-	if h == nil || oldForward == nil || h.repo == nil || h.repo.DB() == nil {
+	if h == nil || oldForward == nil || h.repo == nil {
 		return
 	}
 
-	_, _ = h.repo.DB().Exec(`
-		UPDATE forward
-		SET user_id = ?, user_name = ?, name = ?, tunnel_id = ?, remote_addr = ?, strategy = ?, status = ?, updated_time = ?
-		WHERE id = ?
-	`, oldForward.UserID, oldForward.UserName, oldForward.Name, oldForward.TunnelID, oldForward.RemoteAddr, oldForward.Strategy, oldForward.Status, time.Now().UnixMilli(), oldForward.ID)
+	h.repo.RollbackForwardFields(
+		oldForward.ID, oldForward.UserID, oldForward.UserName, oldForward.Name,
+		oldForward.TunnelID, oldForward.RemoteAddr, oldForward.Strategy, oldForward.Status,
+		time.Now().UnixMilli(),
+	)
 
 	if err := h.replaceForwardPortsWithRecords(oldForward.ID, oldPorts); err != nil {
 		return
@@ -3448,18 +2917,9 @@ func (h *Handler) upsertUserTunnel(req map[string]interface{}) error {
 	if userID <= 0 || tunnelID <= 0 {
 		return fmt.Errorf("userId or tunnelId missing")
 	}
-	db := h.repo.DB()
-	var existingID int64
-	var currentFlow, currentNum, currentExpTime, currentFlowReset int64
-	var currentSpeedID sql.NullInt64
-	var currentStatus int
 
-	err := db.QueryRow(`
-		SELECT id, flow, num, exp_time, flow_reset_time, speed_id, status 
-		FROM user_tunnel 
-		WHERE user_id = ? AND tunnel_id = ? 
-		LIMIT 1
-	`, userID, tunnelID).Scan(&existingID, &currentFlow, &currentNum, &currentExpTime, &currentFlowReset, &currentSpeedID, &currentStatus)
+	existingID, currentFlow, currentNum, currentExpTime, currentFlowReset, currentSpeedID, currentStatus, err :=
+		h.repo.GetExistingUserTunnel(userID, tunnelID)
 
 	speedID := asAnyToInt64Ptr(req["speedId"])
 	reqFlow := asInt64(req["flow"], -1)
@@ -3470,13 +2930,13 @@ func (h *Handler) upsertUserTunnel(req map[string]interface{}) error {
 
 	if err == sql.ErrNoRows {
 		if reqFlow < 0 || reqNum < 0 || reqExpTime < 0 || reqFlowReset < 0 {
-			var uFlow, uNum, uExp, uReset int64
-			if uErr := db.QueryRow(`SELECT flow, num, exp_time, flow_reset_time FROM user WHERE id = ?`, userID).Scan(&uFlow, &uNum, &uExp, &uReset); uErr == nil {
+			uFlow, uNum, uExp, uReset, uErr := h.repo.GetUserDefaultsForTunnel(userID)
+			if uErr == nil {
 				if reqFlow < 0 {
 					reqFlow = uFlow
 				}
 				if reqNum < 0 {
-					reqNum = int(uNum)
+					reqNum = uNum
 				}
 				if reqExpTime < 0 {
 					reqExpTime = uExp
@@ -3502,9 +2962,7 @@ func (h *Handler) upsertUserTunnel(req map[string]interface{}) error {
 			reqStatus = 1
 		}
 
-		_, err = db.Exec(`INSERT INTO user_tunnel(user_id, tunnel_id, speed_id, num, flow, in_flow, out_flow, flow_reset_time, exp_time, status) VALUES(?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
-			userID, tunnelID, nullableInt(speedID), reqNum, reqFlow, reqFlowReset, reqExpTime, reqStatus)
-		return err
+		return h.repo.InsertUserTunnel(userID, tunnelID, nullableInt(speedID), reqNum, reqFlow, reqFlowReset, reqExpTime, reqStatus)
 	}
 	if err != nil {
 		return err
@@ -3542,8 +3000,7 @@ func (h *Handler) upsertUserTunnel(req map[string]interface{}) error {
 		newSpeedID = sql.NullInt64{Valid: false}
 	}
 
-	_, err = db.Exec(`UPDATE user_tunnel SET speed_id = ?, flow = ?, num = ?, exp_time = ?, flow_reset_time = ?, status = ? WHERE id = ?`,
-		newSpeedID, newFlow, newNum, newExpTime, newFlowReset, newStatus, existingID)
+	err = h.repo.UpdateUserTunnelFields(existingID, newSpeedID, newFlow, newNum, newExpTime, newFlowReset, newStatus)
 
 	if err == nil {
 		h.syncUserTunnelForwards(userID, tunnelID)
@@ -3730,19 +3187,4 @@ func randomToken(n int) string {
 		return strconv.FormatInt(time.Now().UnixNano(), 16)
 	}
 	return hex.EncodeToString(buf)
-}
-
-func nextIndex(db *store.DB, table string) int {
-	if db == nil {
-		return 0
-	}
-	row := db.QueryRow(`SELECT COALESCE(MAX(inx), -1) + 1 FROM ` + table)
-	var n int
-	if err := row.Scan(&n); err != nil {
-		return 0
-	}
-	if n < 0 {
-		return 0
-	}
-	return n
 }

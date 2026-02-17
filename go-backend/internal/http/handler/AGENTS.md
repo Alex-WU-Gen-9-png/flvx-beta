@@ -4,7 +4,7 @@
 
 ## OVERVIEW
 HTTP request handlers for FLVX Admin API. Core business logic layer.
-**Stack:** Go 1.23, net/http, raw SQL (no ORM).
+**Stack:** Go 1.23, net/http, GORM via Repository pattern.
 
 ## STRUCTURE
 ```
@@ -28,13 +28,14 @@ handler/
 | **Background Jobs** | `jobs.go` | Scheduled sync/cleanup tasks |
 
 ## CONVENTIONS
-- Inherits from parent: raw SQL, no ORM, JWT in Authorization header.
+- Inherits from parent: GORM via Repository pattern, JWT in Authorization header.
 - Large files expected (`mutations.go` 3716 LOC - central mutation hub).
-- Uses `sqlite.Repository` for DB access via `repo.XXX()` methods.
+- Uses `repo.Repository` for DB access via `h.repo.XXX()` methods.
+- Handlers never call `repo.DB()` directly — all queries go through Repository methods.
 - Domain-driven file split: one file per functional area (federation, jobs, etc.).
 
 ## ANTI-PATTERNS
-- Do NOT add ORM here - uses raw SQL throughout.
+- Do NOT let handlers call `repo.DB()` directly — add a Repository method instead.
 - Do NOT change handler signatures without updating router.go.
 
 ## COMMANDS

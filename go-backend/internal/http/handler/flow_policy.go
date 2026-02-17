@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"database/sql"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -207,22 +206,18 @@ func (h *Handler) getUserTunnelPolicy(userTunnelID int64) (*userTunnelPolicy, er
 	if userTunnelID <= 0 {
 		return nil, nil
 	}
-
-	row := h.repo.DB().QueryRow(`
-		SELECT id, user_id, tunnel_id, flow, in_flow, out_flow, exp_time, status
-		FROM user_tunnel
-		WHERE id = ?
-		LIMIT 1
-	`, userTunnelID)
-
-	var policy userTunnelPolicy
-	if err := row.Scan(&policy.ID, &policy.UserID, &policy.TunnelID, &policy.Flow, &policy.InFlow, &policy.OutFlow, &policy.ExpTime, &policy.Status); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
+	ut, err := h.repo.GetUserTunnelByID(userTunnelID)
+	if err != nil {
 		return nil, err
 	}
-	return &policy, nil
+	if ut == nil {
+		return nil, nil
+	}
+	return &userTunnelPolicy{
+		ID: ut.ID, UserID: ut.UserID, TunnelID: ut.TunnelID,
+		Flow: ut.Flow, InFlow: ut.InFlow, OutFlow: ut.OutFlow,
+		ExpTime: ut.ExpTime, Status: ut.Status,
+	}, nil
 }
 
 func (h *Handler) pauseUserForwards(userID int64, now int64) {
@@ -245,60 +240,20 @@ func (h *Handler) pauseForwardRecords(forwards []forwardRecord, now int64) {
 	for i := range forwards {
 		forward := forwards[i]
 		_ = h.controlForwardServices(&forward, "PauseService", false)
-		_, _ = h.repo.DB().Exec(`UPDATE forward SET status = 0, updated_time = ? WHERE id = ?`, now, forward.ID)
+		_ = h.repo.UpdateForwardStatus(forward.ID, 0, now)
 	}
 }
 
 func (h *Handler) listActiveForwardsByUser(userID int64) ([]forwardRecord, error) {
-	rows, err := h.repo.DB().Query(`
-		SELECT id, user_id, user_name, name, tunnel_id, remote_addr, COALESCE(strategy, 'fifo'), status
-		FROM forward
-		WHERE user_id = ? AND status = 1
-		ORDER BY id ASC
-	`, userID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	return scanForwardRecords(rows)
+	return h.repo.ListActiveForwardsByUser(userID)
 }
 
 func (h *Handler) listActiveForwardsByUserTunnel(userID int64, tunnelID int64) ([]forwardRecord, error) {
-	rows, err := h.repo.DB().Query(`
-		SELECT id, user_id, user_name, name, tunnel_id, remote_addr, COALESCE(strategy, 'fifo'), status
-		FROM forward
-		WHERE user_id = ? AND tunnel_id = ? AND status = 1
-		ORDER BY id ASC
-	`, userID, tunnelID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	return scanForwardRecords(rows)
-}
-
-func scanForwardRecords(rows *sql.Rows) ([]forwardRecord, error) {
-	out := make([]forwardRecord, 0)
-	for rows.Next() {
-		var record forwardRecord
-		if err := rows.Scan(&record.ID, &record.UserID, &record.UserName, &record.Name, &record.TunnelID, &record.RemoteAddr, &record.Strategy, &record.Status); err != nil {
-			return nil, err
-		}
-		if strings.TrimSpace(record.Strategy) == "" {
-			record.Strategy = "fifo"
-		}
-		out = append(out, record)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return h.repo.ListActiveForwardsByUserTunnel(userID, tunnelID)
 }
 
 func (h *Handler) cleanNodeConfigs(nodeID int64, rawConfig string) {
-	if h == nil || h.repo == nil || h.repo.DB() == nil || nodeID <= 0 {
+	if h == nil || h.repo == nil || nodeID <= 0 {
 		return
 	}
 	if strings.TrimSpace(rawConfig) == "" {
@@ -383,15 +338,13 @@ func (h *Handler) cleanOrphanedLimiters(nodeID int64, limiters []namedConfigItem
 }
 
 func (h *Handler) tunnelExists(tunnelID int64) bool {
-	var count int
-	err := h.repo.DB().QueryRow(`SELECT COUNT(1) FROM tunnel WHERE id = ?`, tunnelID).Scan(&count)
-	return err == nil && count > 0
+	ok, _ := h.repo.TunnelExists(tunnelID)
+	return ok
 }
 
 func (h *Handler) forwardExists(forwardID int64) bool {
-	var count int
-	err := h.repo.DB().QueryRow(`SELECT COUNT(1) FROM forward WHERE id = ?`, forwardID).Scan(&count)
-	return err == nil && count > 0
+	ok, _ := h.repo.ForwardExists(forwardID)
+	return ok
 }
 
 func (h *Handler) speedLimiterExists(name string) bool {
@@ -402,8 +355,6 @@ func (h *Handler) speedLimiterExists(name string) bool {
 	if err != nil || id <= 0 {
 		return false
 	}
-
-	var count int
-	err = h.repo.DB().QueryRow(`SELECT COUNT(1) FROM speed_limit WHERE id = ?`, id).Scan(&count)
-	return err == nil && count > 0
+	ok, _ := h.repo.SpeedLimitExists(id)
+	return ok
 }

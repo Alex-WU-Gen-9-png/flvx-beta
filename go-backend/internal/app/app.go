@@ -10,30 +10,30 @@ import (
 	"go-backend/internal/config"
 	httpserver "go-backend/internal/http"
 	"go-backend/internal/http/handler"
-	"go-backend/internal/store/sqlite"
+	"go-backend/internal/store/repo"
 )
 
 type App struct {
 	cfg    config.Config
 	server *http.Server
-	repo   *sqlite.Repository
+	repo   *repo.Repository
 	h      *handler.Handler
 }
 
 func New(cfg config.Config) (*App, error) {
 	var (
-		repo *sqlite.Repository
-		err  error
+		r   *repo.Repository
+		err error
 	)
 
 	switch strings.ToLower(strings.TrimSpace(cfg.DBType)) {
 	case "", "sqlite":
-		repo, err = sqlite.Open(cfg.DBPath)
+		r, err = repo.Open(cfg.DBPath)
 		if err != nil {
 			return nil, fmt.Errorf("open sqlite: %w", err)
 		}
 	case "postgres", "postgresql":
-		repo, err = sqlite.OpenPostgres(cfg.DatabaseURL)
+		r, err = repo.OpenPostgres(cfg.DatabaseURL)
 		if err != nil {
 			return nil, fmt.Errorf("open postgres: %w", err)
 		}
@@ -41,7 +41,7 @@ func New(cfg config.Config) (*App, error) {
 		return nil, fmt.Errorf("unsupported DB_TYPE %q", cfg.DBType)
 	}
 
-	h := handler.New(repo, cfg.JWTSecret)
+	h := handler.New(r, cfg.JWTSecret)
 	router := httpserver.NewRouter(h, cfg.JWTSecret)
 
 	s := &http.Server{
@@ -53,7 +53,7 @@ func New(cfg config.Config) (*App, error) {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	return &App{cfg: cfg, server: s, repo: repo, h: h}, nil
+	return &App{cfg: cfg, server: s, repo: r, h: h}, nil
 }
 
 func (a *App) Run() error {

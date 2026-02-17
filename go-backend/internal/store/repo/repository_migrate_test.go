@@ -1,35 +1,38 @@
-package sqlite
+package repo
 
 import (
-	"database/sql"
 	"errors"
 	"testing"
 
-	"go-backend/internal/store"
-
-	_ "modernc.org/sqlite"
+	gsqlite "github.com/glebarez/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func TestMigrateSchemaRunsPostgresIDRepairEvenAtCurrentVersion(t *testing.T) {
-	raw, err := sql.Open("sqlite", ":memory:")
+	db, err := gorm.Open(gsqlite.Open(":memory:"), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = raw.Close()
+		sqlDB, _ := db.DB()
+		if sqlDB != nil {
+			_ = sqlDB.Close()
+		}
 	})
 
-	db := store.Wrap(raw, store.DialectPostgres)
-	if _, err := db.Exec(`CREATE TABLE schema_version (version INTEGER NOT NULL DEFAULT 0)`); err != nil {
+	if err := db.Exec(`CREATE TABLE schema_version (version INTEGER NOT NULL DEFAULT 0)`).Error; err != nil {
 		t.Fatalf("create schema_version: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO schema_version(version) VALUES(?)`, currentSchemaVersion); err != nil {
+	if err := db.Exec(`INSERT INTO schema_version(version) VALUES(?)`, currentSchemaVersion).Error; err != nil {
 		t.Fatalf("seed schema_version: %v", err)
 	}
 
 	called := 0
 	original := ensurePostgresIDDefaultsFn
-	ensurePostgresIDDefaultsFn = func(db *store.DB) error {
+	ensurePostgresIDDefaultsFn = func(db *gorm.DB) error {
 		called++
 		return nil
 	}
@@ -46,25 +49,29 @@ func TestMigrateSchemaRunsPostgresIDRepairEvenAtCurrentVersion(t *testing.T) {
 }
 
 func TestMigrateSchemaReturnsPostgresIDRepairError(t *testing.T) {
-	raw, err := sql.Open("sqlite", ":memory:")
+	db, err := gorm.Open(gsqlite.Open(":memory:"), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = raw.Close()
+		sqlDB, _ := db.DB()
+		if sqlDB != nil {
+			_ = sqlDB.Close()
+		}
 	})
 
-	db := store.Wrap(raw, store.DialectPostgres)
-	if _, err := db.Exec(`CREATE TABLE schema_version (version INTEGER NOT NULL DEFAULT 0)`); err != nil {
+	if err := db.Exec(`CREATE TABLE schema_version (version INTEGER NOT NULL DEFAULT 0)`).Error; err != nil {
 		t.Fatalf("create schema_version: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO schema_version(version) VALUES(?)`, currentSchemaVersion); err != nil {
+	if err := db.Exec(`INSERT INTO schema_version(version) VALUES(?)`, currentSchemaVersion).Error; err != nil {
 		t.Fatalf("seed schema_version: %v", err)
 	}
 
 	wantErr := errors.New("repair failed")
 	original := ensurePostgresIDDefaultsFn
-	ensurePostgresIDDefaultsFn = func(db *store.DB) error {
+	ensurePostgresIDDefaultsFn = func(db *gorm.DB) error {
 		return wantErr
 	}
 	t.Cleanup(func() {

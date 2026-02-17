@@ -12,30 +12,26 @@ import (
 	"time"
 
 	"go-backend/internal/http/response"
-	"go-backend/internal/store/sqlite"
+	"go-backend/internal/store/repo"
 )
 
 func TestFederationShareCreateRejectsRemoteNode(t *testing.T) {
-	repo, err := sqlite.Open(filepath.Join(t.TempDir(), "panel.db"))
+	r, err := repo.Open(filepath.Join(t.TempDir(), "panel.db"))
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	t.Cleanup(func() { _ = repo.Close() })
+	t.Cleanup(func() { _ = r.Close() })
 
-	h := New(repo, "test-jwt-secret")
+	h := New(r, "test-jwt-secret")
 	now := time.Now().UnixMilli()
 
-	insertRes, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx, is_remote, remote_url, remote_token, remote_config)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, "remote-share-node", "remote-share-secret", "10.10.10.1", "10.10.10.1", "", "20000-20010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0, 1, "http://peer.example", "peer-token", `{"shareId":1}`)
-	if err != nil {
+	`, "remote-share-node", "remote-share-secret", "10.10.10.1", "10.10.10.1", "", "20000-20010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0, 1, "http://peer.example", "peer-token", `{"shareId":1}`).Error; err != nil {
 		t.Fatalf("insert remote node: %v", err)
 	}
-	remoteNodeID, err := insertRes.LastInsertId()
-	if err != nil {
-		t.Fatalf("get remote node id: %v", err)
-	}
+	remoteNodeID := mustLastInsertID(t, r, "remote-share-node")
 
 	body, err := json.Marshal(createPeerShareRequest{
 		Name:           "remote-node-share",
@@ -70,36 +66,29 @@ func TestFederationShareCreateRejectsRemoteNode(t *testing.T) {
 		t.Fatalf("expected rejection message %q, got %q", "Only local nodes can be shared", payload.Msg)
 	}
 
-	var shareCount int
-	if err := repo.DB().QueryRow(`SELECT COUNT(1) FROM peer_share WHERE node_id = ?`, remoteNodeID).Scan(&shareCount); err != nil {
-		t.Fatalf("query peer_share count: %v", err)
-	}
+	shareCount := mustQueryInt(t, r, `SELECT COUNT(1) FROM peer_share WHERE node_id = ?`, remoteNodeID)
 	if shareCount != 0 {
 		t.Fatalf("expected no share rows for remote node, got %d", shareCount)
 	}
 }
 
 func TestFederationShareCreateRejectsInvalidAllowedIPs(t *testing.T) {
-	repo, err := sqlite.Open(filepath.Join(t.TempDir(), "panel.db"))
+	r, err := repo.Open(filepath.Join(t.TempDir(), "panel.db"))
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	t.Cleanup(func() { _ = repo.Close() })
+	t.Cleanup(func() { _ = r.Close() })
 
-	h := New(repo, "test-jwt-secret")
+	h := New(r, "test-jwt-secret")
 	now := time.Now().UnixMilli()
 
-	insertRes, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx, is_remote, remote_url, remote_token, remote_config)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, "local-share-node", "local-share-secret", "10.20.30.40", "10.20.30.40", "", "21000-21010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0, 0, "", "", "")
-	if err != nil {
+	`, "local-share-node", "local-share-secret", "10.20.30.40", "10.20.30.40", "", "21000-21010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0, 0, "", "", "").Error; err != nil {
 		t.Fatalf("insert local node: %v", err)
 	}
-	localNodeID, err := insertRes.LastInsertId()
-	if err != nil {
-		t.Fatalf("get local node id: %v", err)
-	}
+	localNodeID := mustLastInsertID(t, r, "local-share-node")
 
 	body, err := json.Marshal(createPeerShareRequest{
 		Name:           "local-node-share",
@@ -135,26 +124,23 @@ func TestFederationShareCreateRejectsInvalidAllowedIPs(t *testing.T) {
 		t.Fatalf("expected invalid IP message, got %q", payload.Msg)
 	}
 
-	var shareCount int
-	if err := repo.DB().QueryRow(`SELECT COUNT(1) FROM peer_share WHERE node_id = ?`, localNodeID).Scan(&shareCount); err != nil {
-		t.Fatalf("query peer_share count: %v", err)
-	}
+	shareCount := mustQueryInt(t, r, `SELECT COUNT(1) FROM peer_share WHERE node_id = ?`, localNodeID)
 	if shareCount != 0 {
 		t.Fatalf("expected no share rows for node, got %d", shareCount)
 	}
 }
 
 func TestFederationShareListIncludesRemoteUsedPorts(t *testing.T) {
-	repo, err := sqlite.Open(filepath.Join(t.TempDir(), "panel.db"))
+	r, err := repo.Open(filepath.Join(t.TempDir(), "panel.db"))
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	t.Cleanup(func() { _ = repo.Close() })
+	t.Cleanup(func() { _ = r.Close() })
 
-	h := New(repo, "test-jwt-secret")
+	h := New(r, "test-jwt-secret")
 	now := time.Now().UnixMilli()
 
-	if err := repo.CreatePeerShare(&sqlite.PeerShare{
+	if err := r.CreatePeerShare(&repo.PeerShare{
 		Name:           "provider-share",
 		NodeID:         9,
 		Token:          "share-list-token",
@@ -169,12 +155,12 @@ func TestFederationShareListIncludesRemoteUsedPorts(t *testing.T) {
 		t.Fatalf("create peer share: %v", err)
 	}
 
-	share, err := repo.GetPeerShareByToken("share-list-token")
+	share, err := r.GetPeerShareByToken("share-list-token")
 	if err != nil || share == nil {
 		t.Fatalf("load peer share: %v", err)
 	}
 
-	if _, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO peer_share_runtime(share_id, node_id, reservation_id, resource_key, binding_id, role, chain_name, service_name, protocol, strategy, port, target, applied, status, created_time, updated_time)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?),
 		      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?),
@@ -183,7 +169,7 @@ func TestFederationShareListIncludesRemoteUsedPorts(t *testing.T) {
 		share.ID, share.NodeID, "r-1", "rk-1", "b-1", "middle", "fed_chain_1", "fed_svc_1", "tls", "round", 22001, "", 1, 1, now, now,
 		share.ID, share.NodeID, "r-2", "rk-2", "b-2", "exit", "", "fed_svc_2", "tls", "round", 22002, "", 1, 1, now, now,
 		share.ID, share.NodeID, "r-3", "rk-3", "", "", "", "", "tls", "round", 22003, "", 0, 0, now, now,
-	); err != nil {
+	).Error; err != nil {
 		t.Fatalf("insert peer_share_runtime rows: %v", err)
 	}
 
@@ -238,16 +224,16 @@ func TestFederationShareListIncludesRemoteUsedPorts(t *testing.T) {
 }
 
 func TestFederationShareDeleteCleansUpRuntimes(t *testing.T) {
-	repo, err := sqlite.Open(filepath.Join(t.TempDir(), "panel.db"))
+	r, err := repo.Open(filepath.Join(t.TempDir(), "panel.db"))
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	t.Cleanup(func() { _ = repo.Close() })
+	t.Cleanup(func() { _ = r.Close() })
 
-	h := New(repo, "test-jwt-secret")
+	h := New(r, "test-jwt-secret")
 	now := time.Now().UnixMilli()
 
-	if err := repo.CreatePeerShare(&sqlite.PeerShare{
+	if err := r.CreatePeerShare(&repo.PeerShare{
 		Name:           "delete-cleanup-share",
 		NodeID:         99,
 		Token:          "delete-cleanup-token",
@@ -261,26 +247,23 @@ func TestFederationShareDeleteCleansUpRuntimes(t *testing.T) {
 		t.Fatalf("create peer share: %v", err)
 	}
 
-	share, err := repo.GetPeerShareByToken("delete-cleanup-token")
+	share, err := r.GetPeerShareByToken("delete-cleanup-token")
 	if err != nil || share == nil {
 		t.Fatalf("load peer share: %v", err)
 	}
 
-	if _, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO peer_share_runtime(share_id, node_id, reservation_id, resource_key, binding_id, role, chain_name, service_name, protocol, strategy, port, target, applied, status, created_time, updated_time)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?),
 		      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		share.ID, 99, "dc-r1", "dc-rk1", "dc-b1", "exit", "", "fed_svc_dc1", "tls", "round", 40001, "", 1, 1, now, now,
 		share.ID, 99, "dc-r2", "dc-rk2", "dc-b2", "middle", "fed_chain_dc2", "fed_svc_dc2", "tls", "round", 40002, "", 1, 1, now, now,
-	); err != nil {
+	).Error; err != nil {
 		t.Fatalf("insert peer_share_runtime rows: %v", err)
 	}
 
-	var runtimeCount int
-	if err := repo.DB().QueryRow(`SELECT COUNT(1) FROM peer_share_runtime WHERE share_id = ? AND status = 1`, share.ID).Scan(&runtimeCount); err != nil {
-		t.Fatalf("count active runtimes before: %v", err)
-	}
+	runtimeCount := mustQueryInt(t, r, `SELECT COUNT(1) FROM peer_share_runtime WHERE share_id = ? AND status = 1`, share.ID)
 	if runtimeCount != 2 {
 		t.Fatalf("expected 2 active runtimes before delete, got %d", runtimeCount)
 	}
@@ -306,37 +289,31 @@ func TestFederationShareDeleteCleansUpRuntimes(t *testing.T) {
 		t.Fatalf("expected response code 0, got %d (%s)", payload.Code, payload.Msg)
 	}
 
-	var shareCount int
-	if err := repo.DB().QueryRow(`SELECT COUNT(1) FROM peer_share WHERE id = ?`, share.ID).Scan(&shareCount); err != nil {
-		t.Fatalf("count peer_share after: %v", err)
-	}
+	shareCount := mustQueryInt(t, r, `SELECT COUNT(1) FROM peer_share WHERE id = ?`, share.ID)
 	if shareCount != 0 {
 		t.Fatalf("expected peer_share deleted, got %d rows", shareCount)
 	}
 
-	var runtimeCountAfter int
-	if err := repo.DB().QueryRow(`SELECT COUNT(1) FROM peer_share_runtime WHERE share_id = ?`, share.ID).Scan(&runtimeCountAfter); err != nil {
-		t.Fatalf("count peer_share_runtime after: %v", err)
-	}
+	runtimeCountAfter := mustQueryInt(t, r, `SELECT COUNT(1) FROM peer_share_runtime WHERE share_id = ?`, share.ID)
 	if runtimeCountAfter != 0 {
 		t.Fatalf("expected all peer_share_runtime rows deleted, got %d", runtimeCountAfter)
 	}
 }
 
 func TestFederationRemoteUsageListSyncErrorFallback(t *testing.T) {
-	repo, err := sqlite.Open(filepath.Join(t.TempDir(), "panel.db"))
+	r, err := repo.Open(filepath.Join(t.TempDir(), "panel.db"))
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	t.Cleanup(func() { _ = repo.Close() })
+	t.Cleanup(func() { _ = r.Close() })
 
-	h := New(repo, "test-jwt-secret")
+	h := New(r, "test-jwt-secret")
 	now := time.Now().UnixMilli()
 
-	if _, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx, is_remote, remote_url, remote_token, remote_config)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, "sync-error-node", "sync-error-secret", "10.50.60.70", "10.50.60.70", "", "32000-32010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0, 1, "http://unreachable.invalid:9999", "bad-token", `{"shareId":42,"maxBandwidth":5368709120,"currentFlow":999999,"portRangeStart":32000,"portRangeEnd":32010}`); err != nil {
+	`, "sync-error-node", "sync-error-secret", "10.50.60.70", "10.50.60.70", "", "32000-32010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0, 1, "http://unreachable.invalid:9999", "bad-token", `{"shareId":42,"maxBandwidth":5368709120,"currentFlow":999999,"portRangeStart":32000,"portRangeEnd":32010}`).Error; err != nil {
 		t.Fatalf("insert remote node: %v", err)
 	}
 
@@ -380,15 +357,15 @@ func TestFederationRemoteUsageListSyncErrorFallback(t *testing.T) {
 }
 
 func TestFederationShareResetFlow(t *testing.T) {
-	repo, err := sqlite.Open(filepath.Join(t.TempDir(), "panel.db"))
+	r, err := repo.Open(filepath.Join(t.TempDir(), "panel.db"))
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	t.Cleanup(func() { _ = repo.Close() })
+	t.Cleanup(func() { _ = r.Close() })
 
-	h := New(repo, "test-jwt-secret")
+	h := New(r, "test-jwt-secret")
 	now := time.Now().UnixMilli()
-	if err := repo.CreatePeerShare(&sqlite.PeerShare{
+	if err := r.CreatePeerShare(&repo.PeerShare{
 		Name:           "reset-flow-share",
 		NodeID:         11,
 		Token:          "reset-flow-token",
@@ -402,7 +379,7 @@ func TestFederationShareResetFlow(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create peer share: %v", err)
 	}
-	share, err := repo.GetPeerShareByToken("reset-flow-token")
+	share, err := r.GetPeerShareByToken("reset-flow-token")
 	if err != nil || share == nil {
 		t.Fatalf("load peer share: %v", err)
 	}
@@ -428,7 +405,7 @@ func TestFederationShareResetFlow(t *testing.T) {
 		t.Fatalf("expected response code 0, got %d (%s)", payload.Code, payload.Msg)
 	}
 
-	updated, err := repo.GetPeerShare(share.ID)
+	updated, err := r.GetPeerShare(share.ID)
 	if err != nil || updated == nil {
 		t.Fatalf("reload peer share: %v", err)
 	}
@@ -438,47 +415,41 @@ func TestFederationShareResetFlow(t *testing.T) {
 }
 
 func TestFederationRemoteUsageList(t *testing.T) {
-	repo, err := sqlite.Open(filepath.Join(t.TempDir(), "panel.db"))
+	r, err := repo.Open(filepath.Join(t.TempDir(), "panel.db"))
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	t.Cleanup(func() { _ = repo.Close() })
+	t.Cleanup(func() { _ = r.Close() })
 
-	h := New(repo, "test-jwt-secret")
+	h := New(r, "test-jwt-secret")
 	now := time.Now().UnixMilli()
 
-	resNode, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx, is_remote, remote_url, remote_token, remote_config)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, "remote-consumer-node", "remote-consumer-secret", "10.30.40.50", "10.30.40.50", "", "31000-31010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0, 1, "http://peer.example", "peer-token", `{"shareId":88,"maxBandwidth":2147483648,"currentFlow":1073741824,"portRangeStart":31000,"portRangeEnd":31010}`)
-	if err != nil {
+	`, "remote-consumer-node", "remote-consumer-secret", "10.30.40.50", "10.30.40.50", "", "31000-31010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0, 1, "http://peer.example", "peer-token", `{"shareId":88,"maxBandwidth":2147483648,"currentFlow":1073741824,"portRangeStart":31000,"portRangeEnd":31010}`).Error; err != nil {
 		t.Fatalf("insert remote node: %v", err)
 	}
-	nodeID, err := resNode.LastInsertId()
-	if err != nil {
-		t.Fatalf("remote node id: %v", err)
-	}
+	nodeID := mustLastInsertID(t, r, "remote-consumer-node")
 
-	resTunnelA, err := repo.DB().Exec(`INSERT INTO tunnel(name, type, protocol, flow, created_time, updated_time, status, in_ip, inx) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`, "consumer-tunnel-a", 2, "tls", 1, now, now, 1, "", 0)
-	if err != nil {
+	if err := r.DB().Exec(`INSERT INTO tunnel(name, type, protocol, flow, created_time, updated_time, status, in_ip, inx) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`, "consumer-tunnel-a", 2, "tls", 1, now, now, 1, "", 0).Error; err != nil {
 		t.Fatalf("insert tunnel a: %v", err)
 	}
-	tunnelAID, _ := resTunnelA.LastInsertId()
+	tunnelAID := mustLastInsertID(t, r, "consumer-tunnel-a")
 
-	resTunnelB, err := repo.DB().Exec(`INSERT INTO tunnel(name, type, protocol, flow, created_time, updated_time, status, in_ip, inx) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`, "consumer-tunnel-b", 2, "tls", 1, now, now, 1, "", 0)
-	if err != nil {
+	if err := r.DB().Exec(`INSERT INTO tunnel(name, type, protocol, flow, created_time, updated_time, status, in_ip, inx) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`, "consumer-tunnel-b", 2, "tls", 1, now, now, 1, "", 0).Error; err != nil {
 		t.Fatalf("insert tunnel b: %v", err)
 	}
-	tunnelBID, _ := resTunnelB.LastInsertId()
+	tunnelBID := mustLastInsertID(t, r, "consumer-tunnel-b")
 
-	if _, err := repo.DB().Exec(`
+	if err := r.DB().Exec(`
 		INSERT INTO federation_tunnel_binding(tunnel_id, node_id, chain_type, hop_inx, remote_url, resource_key, remote_binding_id, allocated_port, status, created_time, updated_time)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?),
 		      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		tunnelAID, nodeID, 2, 1, "http://peer.example", "rk-a", "rb-a", 31001, 1, now, now,
 		tunnelBID, nodeID, 3, 0, "http://peer.example", "rk-b", "rb-b", 31002, 1, now, now,
-	); err != nil {
+	).Error; err != nil {
 		t.Fatalf("insert federation bindings: %v", err)
 	}
 
@@ -532,13 +503,13 @@ func TestFederationRemoteUsageList(t *testing.T) {
 }
 
 func TestAuthPeerAllowedIPs(t *testing.T) {
-	repo, err := sqlite.Open(filepath.Join(t.TempDir(), "panel.db"))
+	r, err := repo.Open(filepath.Join(t.TempDir(), "panel.db"))
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	t.Cleanup(func() { _ = repo.Close() })
+	t.Cleanup(func() { _ = r.Close() })
 
-	h := New(repo, "test-jwt-secret")
+	h := New(r, "test-jwt-secret")
 	now := time.Now().UnixMilli()
 
 	tests := []struct {
@@ -585,7 +556,7 @@ func TestAuthPeerAllowedIPs(t *testing.T) {
 	for idx, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			token := fmt.Sprintf("share-token-%d", idx)
-			if err := repo.CreatePeerShare(&sqlite.PeerShare{
+			if err := r.CreatePeerShare(&repo.PeerShare{
 				Name:           "share-" + tt.name,
 				NodeID:         1,
 				Token:          token,
