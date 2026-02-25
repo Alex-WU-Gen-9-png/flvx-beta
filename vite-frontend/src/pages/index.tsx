@@ -9,6 +9,7 @@ import { Input } from "@/shadcn-bridge/heroui/input";
 import { Button } from "@/shadcn-bridge/heroui/button";
 import { siteConfig } from "@/config/site";
 import { title } from "@/components/primitives";
+import { VersionFooter } from "@/components/version-footer";
 import DefaultLayout from "@/layouts/default";
 import { login, LoginData, checkCaptcha, getConfigByName } from "@/api";
 import { writeLoginSession } from "@/utils/session";
@@ -213,22 +214,13 @@ export default function IndexPage() {
 
         {/* 版权信息 - 固定在底部，不占据布局空间 */}
 
-        <div className="fixed inset-x-0 bottom-4 text-center py-4">
-          <p className="text-xs text-gray-400 dark:text-gray-500">
-            Powered by{" "}
-            <a
-              className="text-gray-500 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
-              href={siteConfig.github_repo}
-              rel="noopener noreferrer"
-              target="_blank"
-            >
-              FLVX
-            </a>
-          </p>
-          <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
-            v{isWebView ? siteConfig.app_version : siteConfig.version}
-          </p>
-        </div>
+        <VersionFooter
+          containerClassName="fixed inset-x-0 bottom-4 text-center py-4"
+          poweredClassName="text-xs text-gray-400 dark:text-gray-500"
+          updateBadgeClassName="ml-2 inline-flex items-center rounded-full bg-rose-500/90 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-white"
+          version={isWebView ? siteConfig.app_version : siteConfig.version}
+          versionClassName="text-xs text-gray-400 dark:text-gray-500 mt-1"
+        />
 
         {/* 验证码弹层 */}
         {showCaptcha && siteKey && (

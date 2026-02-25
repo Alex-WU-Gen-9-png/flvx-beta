@@ -70,6 +70,13 @@ func TestRunResetAndExpiryJobResetsFlowAndDisablesExpiredRecords(t *testing.T) {
 	}
 
 	if err := r.DB().Exec(`
+		INSERT INTO user(id, user, pwd, role_id, exp_time, flow, in_flow, out_flow, flow_reset_time, num, created_time, updated_time, status)
+		VALUES(3, 'non_expiring_user', 'x', 1, 0, 100, 1000, 2000, 15, 1, ?, ?, 1)
+	`, nowMs, nowMs).Error; err != nil {
+		t.Fatalf("insert non-expiring user: %v", err)
+	}
+
+	if err := r.DB().Exec(`
 		INSERT INTO tunnel(id, name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
 		VALUES(1, 't1', 1.0, 1, 'tls', 1, ?, ?, 1, NULL, 0)
 	`, nowMs, nowMs).Error; err != nil {
@@ -84,10 +91,24 @@ func TestRunResetAndExpiryJobResetsFlowAndDisablesExpiredRecords(t *testing.T) {
 	}
 
 	if err := r.DB().Exec(`
+		INSERT INTO user_tunnel(id, user_id, tunnel_id, speed_id, num, flow, in_flow, out_flow, flow_reset_time, exp_time, status)
+		VALUES(11, 3, 1, NULL, 1, 1, 300, 400, 15, 0, 1)
+	`).Error; err != nil {
+		t.Fatalf("insert non-expiring user_tunnel: %v", err)
+	}
+
+	if err := r.DB().Exec(`
 		INSERT INTO forward(id, user_id, user_name, name, tunnel_id, remote_addr, strategy, in_flow, out_flow, created_time, updated_time, status, inx)
 		VALUES(20, 2, 'expired_user', 'f1', 1, '1.1.1.1:443', 'fifo', 0, 0, ?, ?, 1, 0)
 	`, nowMs, nowMs).Error; err != nil {
 		t.Fatalf("insert forward: %v", err)
+	}
+
+	if err := r.DB().Exec(`
+		INSERT INTO forward(id, user_id, user_name, name, tunnel_id, remote_addr, strategy, in_flow, out_flow, created_time, updated_time, status, inx)
+		VALUES(21, 3, 'non_expiring_user', 'f2', 1, '1.1.1.1:443', 'fifo', 0, 0, ?, ?, 1, 1)
+	`, nowMs, nowMs).Error; err != nil {
+		t.Fatalf("insert non-expiring forward: %v", err)
 	}
 
 	h.runResetAndExpiryJob(now)
@@ -105,5 +126,20 @@ func TestRunResetAndExpiryJobResetsFlowAndDisablesExpiredRecords(t *testing.T) {
 	forwardStatus := mustQueryInt(t, r, `SELECT status FROM forward WHERE id = 20`)
 	if forwardStatus != 0 {
 		t.Fatalf("expected forward status=0 after expiry handling, got %d", forwardStatus)
+	}
+
+	nonExpUserStatus := mustQueryInt(t, r, `SELECT status FROM user WHERE id = 3`)
+	if nonExpUserStatus != 1 {
+		t.Fatalf("expected non-expiring user to remain enabled, got status=%d", nonExpUserStatus)
+	}
+
+	nonExpTunnelStatus := mustQueryInt(t, r, `SELECT status FROM user_tunnel WHERE id = 11`)
+	if nonExpTunnelStatus != 1 {
+		t.Fatalf("expected non-expiring user_tunnel to remain enabled, got status=%d", nonExpTunnelStatus)
+	}
+
+	nonExpForwardStatus := mustQueryInt(t, r, `SELECT status FROM forward WHERE id = 21`)
+	if nonExpForwardStatus != 1 {
+		t.Fatalf("expected non-expiring forward to remain enabled, got status=%d", nonExpForwardStatus)
 	}
 }

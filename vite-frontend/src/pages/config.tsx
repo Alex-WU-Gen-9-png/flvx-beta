@@ -33,6 +33,11 @@ import {
   clearConfigCache,
   updateSiteConfig,
 } from "@/config/site";
+import {
+  type UpdateReleaseChannel,
+  getUpdateReleaseChannel,
+  setUpdateReleaseChannel,
+} from "@/utils/version-update";
 
 // 简单的保存图标组件
 const SaveIcon = ({ className }: { className?: string }) => (
@@ -182,6 +187,9 @@ export default function ConfigPage() {
   });
   const [announcementLoading, setAnnouncementLoading] = useState(true);
   const [announcementSaving, setAnnouncementSaving] = useState(false);
+  const [updateChannel, setUpdateChannel] = useState<UpdateReleaseChannel>(
+    getUpdateReleaseChannel(),
+  );
 
   // 权限检查
   useEffect(() => {
@@ -265,6 +273,14 @@ export default function ConfigPage() {
     } finally {
       setAnnouncementSaving(false);
     }
+  };
+
+  const handleUpdateChannelChange = (channel: UpdateReleaseChannel) => {
+    setUpdateChannel(channel);
+    setUpdateReleaseChannel(channel);
+    toast.success(
+      `更新通道已切换为${channel === "stable" ? "稳定版" : "开发版"}`,
+    );
   };
 
   const handleConfigChange = (key: string, value: string) => {
@@ -643,6 +659,42 @@ export default function ConfigPage() {
               </div>
             );
           })}
+
+          <Divider className="my-2" />
+
+          <div className="space-y-3">
+            <div className="flex flex-col gap-1">
+              <p className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                更新通道
+              </p>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                稳定版仅匹配纯数字版本；开发版仅匹配包含 alpha / beta / rc
+                的版本。
+              </p>
+            </div>
+
+            <Select
+              selectedKeys={[updateChannel]}
+              size="md"
+              variant="bordered"
+              onSelectionChange={(keys) => {
+                const selected =
+                  (Array.from(keys)[0] as UpdateReleaseChannel) || "stable";
+
+                handleUpdateChannelChange(selected);
+              }}
+            >
+              <SelectItem key="stable" description="仅纯数字版本，如 2.1.4">
+                稳定版
+              </SelectItem>
+              <SelectItem
+                key="dev"
+                description="仅 alpha / beta / rc 关键字版本"
+              >
+                开发版
+              </SelectItem>
+            </Select>
+          </div>
         </CardBody>
       </Card>
 

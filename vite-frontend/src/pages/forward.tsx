@@ -3199,7 +3199,7 @@ export default function ForwardPage() {
               <ModalBody>
                 <div className="flex flex-col gap-4 py-2">
                   <div className="flex flex-col gap-2">
-                    <label className="text-sm font-medium">按用户筛选</label>
+                    <p className="text-sm font-medium">按用户筛选</p>
                     <Select
                       aria-label="筛选用户"
                       className="w-full"
@@ -3220,7 +3220,7 @@ export default function ForwardPage() {
                     </Select>
                   </div>
                   <div className="flex flex-col gap-2">
-                    <label className="text-sm font-medium">按隧道筛选</label>
+                    <p className="text-sm font-medium">按隧道筛选</p>
                     <Select
                       aria-label="筛选隧道"
                       className="w-full"

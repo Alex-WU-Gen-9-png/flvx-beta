@@ -19,11 +19,18 @@ function mapColor(color: LinkColor) {
   return "text-default-600 hover:text-default-700";
 }
 
-export function Link({ className, color = "default", ...props }: LinkProps) {
+export function Link({
+  className,
+  color = "default",
+  children,
+  ...props
+}: LinkProps) {
   return (
     <a
       className={cn("transition-colors", mapColor(color), className)}
       {...props}
-    />
+    >
+      {children}
+    </a>
   );
 }
