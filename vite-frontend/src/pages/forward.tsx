@@ -50,6 +50,7 @@ import { Checkbox } from "@/shadcn-bridge/heroui/checkbox";
 import {
   createForward,
   getForwardList,
+  getPeerShareList,
   getPeerRemoteUsageList,
   updateForward,
   deleteForward,
@@ -258,27 +259,52 @@ export default function ForwardPage() {
     }
 
     try {
-      const usageRes = await getPeerRemoteUsageList();
-
-      if (usageRes.code !== 0 || !Array.isArray(usageRes.data)) {
-        return forwardsData;
-      }
+      const [usageRes, localShareRes] = await Promise.all([
+        getPeerRemoteUsageList(),
+        getPeerShareList(),
+      ]);
 
       const flowByShare = new Map<number, number>();
 
-      usageRes.data.forEach((item: Record<string, unknown>) => {
-        const shareId = Number(item.shareId || 0);
-        const currentFlow = Number(item.currentFlow || 0);
+      if (usageRes.code === 0 && Array.isArray(usageRes.data)) {
+        usageRes.data.forEach((item: Record<string, unknown>) => {
+          const shareId = Number(item.shareId || 0);
+          const currentFlow = Number(item.currentFlow || 0);
 
-        if (
-          Number.isFinite(shareId) &&
-          shareId > 0 &&
-          Number.isFinite(currentFlow) &&
-          currentFlow > 0
-        ) {
-          flowByShare.set(shareId, currentFlow);
-        }
-      });
+          if (
+            Number.isFinite(shareId) &&
+            shareId > 0 &&
+            Number.isFinite(currentFlow) &&
+            currentFlow > 0
+          ) {
+            const prev = flowByShare.get(shareId) || 0;
+
+            flowByShare.set(shareId, Math.max(prev, currentFlow));
+          }
+        });
+      }
+
+      if (localShareRes.code === 0 && Array.isArray(localShareRes.data)) {
+        localShareRes.data.forEach((item: Record<string, unknown>) => {
+          const shareId = Number(item.id || 0);
+          const currentFlow = Number(item.currentFlow || 0);
+
+          if (
+            Number.isFinite(shareId) &&
+            shareId > 0 &&
+            Number.isFinite(currentFlow) &&
+            currentFlow > 0
+          ) {
+            const prev = flowByShare.get(shareId) || 0;
+
+            flowByShare.set(shareId, Math.max(prev, currentFlow));
+          }
+        });
+      }
+
+      if (flowByShare.size === 0) {
+        return forwardsData;
+      }
 
       const forwardCountByShare = new Map<number, number>();
 
