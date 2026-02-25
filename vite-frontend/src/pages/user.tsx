@@ -638,7 +638,6 @@ export default function UserPage() {
           ) : (
             <div className="flex w-full items-center gap-2 animate-appearance-in">
               <Input
-                autoFocus
                 classNames={{
                   base: "bg-default-100",
                   input: "bg-transparent",

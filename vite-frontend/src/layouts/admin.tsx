@@ -20,6 +20,7 @@ import {
 } from "@/shadcn-bridge/heroui/modal";
 import { Input } from "@/shadcn-bridge/heroui/input";
 import { Logo } from "@/components/icons";
+import { VersionFooter } from "@/components/version-footer";
 import { updatePassword } from "@/api";
 import { safeLogout } from "@/utils/logout";
 import { siteConfig } from "@/config/site";
@@ -337,9 +338,6 @@ export default function AdminLayout({
             <h1 className="text-sm font-bold text-foreground overflow-hidden whitespace-nowrap text-ellipsis">
               {siteConfig.name}
             </h1>
-            <p className="text-xs text-default-500 overflow-hidden whitespace-nowrap text-ellipsis">
-              v{siteConfig.version}
-            </p>
           </div>
         </div>
 
@@ -405,17 +403,12 @@ export default function AdminLayout({
           <div
             className={`transition-all duration-300 overflow-hidden flex items-center ${isCollapsed ? "max-w-0 opacity-0" : "max-w-[200px] opacity-100"}`}
           >
-            <p className="text-xs text-gray-400 dark:text-gray-500">
-              Powered by{" "}
-              <a
-                className="text-gray-500 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
-                href={siteConfig.github_repo}
-                rel="noopener noreferrer"
-                target="_blank"
-              >
-                FLVX
-              </a>
-            </p>
+            <VersionFooter
+              poweredClassName="text-xs text-gray-400 dark:text-gray-500"
+              updateBadgeClassName="ml-2 inline-flex items-center rounded-full bg-rose-500/90 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-white"
+              version={siteConfig.version}
+              versionClassName="text-xs text-gray-400 dark:text-gray-500"
+            />
           </div>
 
           {/* 桌面端折叠按钮 */}

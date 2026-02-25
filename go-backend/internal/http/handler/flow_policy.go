@@ -157,6 +157,12 @@ func (h *Handler) processPeerShareFlowFromForward(forwardID int64, serviceName s
 	if h == nil || h.repo == nil || forwardID <= 0 {
 		return
 	}
+
+	delta := item.D + item.U
+	if delta <= 0 {
+		return
+	}
+
 	forward, err := h.getForwardRecord(forwardID)
 	if err != nil || forward == nil {
 		// Forward not found in local database - might be a federation port-forward
@@ -164,25 +170,21 @@ func (h *Handler) processPeerShareFlowFromForward(forwardID int64, serviceName s
 		h.processPeerShareFlowByServiceName(serviceName, item)
 		return
 	}
-	tunnel, err := h.getTunnelRecord(forward.TunnelID)
-	if err != nil || tunnel == nil {
-		return
-	}
 	tunnelName, err := h.repo.GetTunnelName(forward.TunnelID)
 	if err != nil {
+		h.processPeerShareFlowByServiceName(serviceName, item)
 		return
 	}
 	shareID, ok := parsePeerShareIDFromFederationTunnelName(tunnelName)
 	if !ok {
+		h.processPeerShareFlowByServiceName(serviceName, item)
 		return
 	}
 
-	delta := item.D + item.U
-	if delta <= 0 {
+	if err := h.repo.AddPeerShareCurrentFlow(shareID, delta); err != nil {
+		h.processPeerShareFlowByServiceName(serviceName, item)
 		return
 	}
-
-	_ = h.repo.AddPeerShareCurrentFlow(shareID, delta)
 
 	share, err := h.repo.GetPeerShare(shareID)
 	if err != nil || share == nil {
@@ -404,6 +406,11 @@ func (h *Handler) cleanOrphanedServices(nodeID int64, services []namedConfigItem
 	if err != nil {
 		return
 	}
+	minUpdatedTime := time.Now().Add(-10 * time.Minute).UnixMilli()
+	hasUnboundForwardPeerRuntime, err := h.repo.HasRecentUnboundForwardPeerShareRuntimeOnNode(nodeID, minUpdatedTime)
+	if err != nil {
+		hasUnboundForwardPeerRuntime = false
+	}
 	runtimeServiceSet := make(map[string]struct{}, len(runtimeServiceNames))
 	for _, serviceName := range runtimeServiceNames {
 		serviceName = strings.TrimSpace(serviceName)
@@ -432,6 +439,9 @@ func (h *Handler) cleanOrphanedServices(nodeID int64, services []namedConfigItem
 		parts := strings.Split(name, "_")
 		if len(parts) >= 3 {
 			forwardID, err := strconv.ParseInt(parts[0], 10, 64)
+			if err == nil && forwardID > 0 && hasUnboundForwardPeerRuntime {
+				continue
+			}
 			if err == nil && forwardID > 0 && !h.forwardExists(forwardID) {
 				_, _ = h.sendNodeCommand(nodeID, "DeleteService", map[string]interface{}{"services": []string{name, parts[0] + "_" + parts[1] + "_" + parts[2], parts[0] + "_" + parts[1] + "_" + parts[2] + "_tcp", parts[0] + "_" + parts[1] + "_" + parts[2] + "_udp"}}, false, true)
 				continue
@@ -451,6 +461,9 @@ func (h *Handler) cleanOrphanedServices(nodeID int64, services []namedConfigItem
 				continue
 			}
 			forwardID, err := strconv.ParseInt(parts[0], 10, 64)
+			if err == nil && forwardID > 0 && hasUnboundForwardPeerRuntime {
+				continue
+			}
 			if err != nil || forwardID <= 0 || h.forwardExists(forwardID) {
 				continue
 			}

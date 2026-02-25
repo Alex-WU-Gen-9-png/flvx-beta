@@ -5,7 +5,13 @@ import toast from "react-hot-toast";
 import { Input } from "@/shadcn-bridge/heroui/input";
 import { Button } from "@/shadcn-bridge/heroui/button";
 import { Card, CardBody } from "@/shadcn-bridge/heroui/card";
+import { Select, SelectItem } from "@/shadcn-bridge/heroui/select";
 import { reinitializeBaseURL } from "@/api/network";
+import {
+  type UpdateReleaseChannel,
+  getUpdateReleaseChannel,
+  setUpdateReleaseChannel,
+} from "@/utils/version-update";
 import {
   getPanelAddresses,
   savePanelAddress,
@@ -25,6 +31,9 @@ export const SettingsPage = () => {
   const [panelAddresses, setPanelAddresses] = useState<PanelAddress[]>([]);
   const [newName, setNewName] = useState("");
   const [newAddress, setNewAddress] = useState("");
+  const [updateChannel, setUpdateChannel] = useState<UpdateReleaseChannel>(
+    getUpdateReleaseChannel(),
+  );
 
   const setPanelAddressesFunc = (newAddress: PanelAddress[]) => {
     setPanelAddresses(newAddress);
@@ -79,6 +88,14 @@ export const SettingsPage = () => {
     loadPanelAddresses();
   }, []);
 
+  const handleUpdateChannelChange = (channel: UpdateReleaseChannel) => {
+    setUpdateChannel(channel);
+    setUpdateReleaseChannel(channel);
+    toast.success(
+      `更新通道已切换为${channel === "stable" ? "稳定版" : "开发版"}`,
+    );
+  };
+
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-black">
       {/* 顶部导航 */}
@@ -117,6 +134,36 @@ export const SettingsPage = () => {
       {/* 内容区域 */}
       <div className="max-w-4xl mx-auto px-4 py-6">
         <div className="space-y-6">
+          <Card className="border border-gray-200 dark:border-gray-700">
+            <CardBody className="p-6">
+              <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4">
+                更新设置
+              </h2>
+              <div className="space-y-2">
+                <Select
+                  label="更新通道"
+                  selectedKeys={[updateChannel]}
+                  onSelectionChange={(keys) => {
+                    const selected =
+                      (Array.from(keys)[0] as UpdateReleaseChannel) || "stable";
+
+                    handleUpdateChannelChange(selected);
+                  }}
+                >
+                  <SelectItem key="stable" textValue="stable">
+                    稳定版（纯数字版本，如 2.1.4）
+                  </SelectItem>
+                  <SelectItem key="dev" textValue="dev">
+                    开发版（含 alpha / beta / rc）
+                  </SelectItem>
+                </Select>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  版本提示会根据该通道检查最新版本。
+                </p>
+              </div>
+            </CardBody>
+          </Card>
+
           {/* 添加新地址 */}
           <Card className="border border-gray-200 dark:border-gray-700">
             <CardBody className="p-6">

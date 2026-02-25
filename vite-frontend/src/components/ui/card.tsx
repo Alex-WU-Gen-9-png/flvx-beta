@@ -25,7 +25,11 @@ function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
   );
 }
 
-function CardTitle({ className, ...props }: React.ComponentProps<"h3">) {
+function CardTitle({
+  className,
+  children,
+  ...props
+}: React.ComponentProps<"h3">) {
   return (
     <h3
       className={cn(
@@ -34,7 +38,9 @@ function CardTitle({ className, ...props }: React.ComponentProps<"h3">) {
       )}
       data-slot="card-title"
       {...props}
-    />
+    >
+      {children}
+    </h3>
   );
 }
 

@@ -177,6 +177,66 @@ func TestProcessFlowItemTracksPeerShareFlowByForwardServiceName(t *testing.T) {
 	}
 }
 
+func TestProcessFlowItemFallsBackToServiceNameWhenForwardIDCollidesAcrossPanels(t *testing.T) {
+	r, err := repo.Open(filepath.Join(t.TempDir(), "panel-forward-collision.db"))
+	if err != nil {
+		t.Fatalf("open repo: %v", err)
+	}
+	defer r.Close()
+
+	now := time.Now().UnixMilli()
+	if err := r.CreatePeerShare(&repo.PeerShare{
+		Name:           "collision-share",
+		NodeID:         1,
+		Token:          "collision-token",
+		MaxBandwidth:   0,
+		CurrentFlow:    0,
+		PortRangeStart: 31400,
+		PortRangeEnd:   31410,
+		IsActive:       1,
+		CreatedTime:    now,
+		UpdatedTime:    now,
+	}); err != nil {
+		t.Fatalf("create peer share: %v", err)
+	}
+	share, err := r.GetPeerShareByToken("collision-token")
+	if err != nil || share == nil {
+		t.Fatalf("load peer share: %v", err)
+	}
+
+	if err := r.DB().Exec(`
+		INSERT INTO peer_share_runtime(share_id, node_id, reservation_id, resource_key, binding_id, role, chain_name, service_name, protocol, strategy, port, target, applied, status, created_time, updated_time)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, share.ID, share.NodeID, "collision-r1", "collision-rk1", "", "forward", "", "20_2_10", "tcp", "fifo", 31401, "", 1, 1, now, now).Error; err != nil {
+		t.Fatalf("insert peer_share_runtime: %v", err)
+	}
+
+	if err := r.DB().Exec(`
+		INSERT INTO tunnel(id, name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
+		VALUES(2, 'local-tunnel-with-colliding-forward-id', 1.0, 1, 'tls', 1, ?, ?, 1, NULL, 0)
+	`, now, now).Error; err != nil {
+		t.Fatalf("insert local tunnel: %v", err)
+	}
+
+	if err := r.DB().Exec(`
+		INSERT INTO forward(id, user_id, user_name, name, tunnel_id, remote_addr, strategy, in_flow, out_flow, created_time, updated_time, status, inx)
+		VALUES(20, 1, 'local-user', 'local-f20', 2, '8.8.8.8:53', 'fifo', 0, 0, ?, ?, 1, 0)
+	`, now, now).Error; err != nil {
+		t.Fatalf("insert local forward: %v", err)
+	}
+
+	h := &Handler{repo: r}
+	h.processFlowItem(flowItem{N: "20_2_10_tcp", U: 120, D: 80})
+
+	updatedShare, err := r.GetPeerShare(share.ID)
+	if err != nil || updatedShare == nil {
+		t.Fatalf("reload share: %v", err)
+	}
+	if updatedShare.CurrentFlow != 200 {
+		t.Fatalf("expected current_flow=200, got %d", updatedShare.CurrentFlow)
+	}
+}
+
 func TestProcessFlowItemSkipsPeerShareFlowWhenServiceNameIsAmbiguous(t *testing.T) {
 	r, err := repo.Open(filepath.Join(t.TempDir(), "panel-forward-ambiguous.db"))
 	if err != nil {
@@ -298,4 +358,49 @@ func TestCleanOrphanedServicesSkipsFederationServicePrefix(t *testing.T) {
 	}()
 
 	h.cleanOrphanedServices(1, []namedConfigItem{{Name: "fed_svc_999_tcp"}})
+}
+
+func TestCleanOrphanedServicesSkipsForwardPatternWhenNodeHasActivePeerShareForwardRuntime(t *testing.T) {
+	r, err := repo.Open(filepath.Join(t.TempDir(), "panel-cleanup-forward-runtime-empty-service.db"))
+	if err != nil {
+		t.Fatalf("open repo: %v", err)
+	}
+	defer r.Close()
+
+	now := time.Now().UnixMilli()
+	if err := r.CreatePeerShare(&repo.PeerShare{
+		Name:           "cleanup-forward-runtime-empty-service",
+		NodeID:         1,
+		Token:          "cleanup-forward-runtime-empty-service-token",
+		MaxBandwidth:   0,
+		CurrentFlow:    0,
+		PortRangeStart: 31420,
+		PortRangeEnd:   31430,
+		IsActive:       1,
+		CreatedTime:    now,
+		UpdatedTime:    now,
+	}); err != nil {
+		t.Fatalf("create peer share: %v", err)
+	}
+	share, err := r.GetPeerShareByToken("cleanup-forward-runtime-empty-service-token")
+	if err != nil || share == nil {
+		t.Fatalf("load peer share: %v", err)
+	}
+
+	if err := r.DB().Exec(`
+		INSERT INTO peer_share_runtime(share_id, node_id, reservation_id, resource_key, binding_id, role, chain_name, service_name, protocol, strategy, port, target, applied, status, created_time, updated_time)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, share.ID, share.NodeID, "cleanup-forward-empty-r1", "cleanup-forward-empty-rk1", "", "forward", "", "", "tcp", "fifo", 31421, "", 0, 1, now, now).Error; err != nil {
+		t.Fatalf("insert peer_share_runtime with empty service name: %v", err)
+	}
+
+	h := &Handler{repo: r}
+
+	defer func() {
+		if rec := recover(); rec != nil {
+			t.Fatalf("cleanOrphanedServices should skip forward-pattern services when active peer-share forward runtime exists; got panic: %v", rec)
+		}
+	}()
+
+	h.cleanOrphanedServices(share.NodeID, []namedConfigItem{{Name: "20_2_10_tcp"}})
 }

@@ -1304,6 +1304,20 @@ func (r *Repository) ListActiveForwardPeerShareRuntimeServiceNamesByNode(nodeID 
 	return names, nil
 }
 
+func (r *Repository) HasRecentUnboundForwardPeerShareRuntimeOnNode(nodeID int64, minUpdatedTime int64) (bool, error) {
+	if r == nil || r.db == nil {
+		return false, errors.New("repository not initialized")
+	}
+	var count int64
+	err := r.db.Model(&model.PeerShareRuntime{}).
+		Where("node_id = ? AND status = 1 AND role = ? AND applied = 0 AND updated_time >= ? AND (service_name = '' OR service_name IS NULL)", nodeID, "forward", minUpdatedTime).
+		Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 func (r *Repository) GetActiveForwardPeerShareRuntimeByPort(shareID int64, port int) (*model.PeerShareRuntime, error) {
 	if r == nil || r.db == nil {
 		return nil, errors.New("repository not initialized")
@@ -2327,7 +2341,7 @@ func (r *Repository) ListExpiredActiveUserIDs(nowMs int64) ([]int64, error) {
 	}
 	var ids []int64
 	err := r.db.Model(&model.User{}).
-		Where("role_id != 0 AND status = 1 AND exp_time IS NOT NULL AND exp_time < ?", nowMs).
+		Where("role_id != 0 AND status = 1 AND exp_time > 0 AND exp_time < ?", nowMs).
 		Pluck("id", &ids).Error
 	if err != nil {
 		return nil, err
@@ -2347,7 +2361,7 @@ func (r *Repository) ListExpiredActiveUserTunnels(nowMs int64) ([]model.ExpiredU
 		return nil, errors.New("repository not initialized")
 	}
 	var uts []model.UserTunnel
-	err := r.db.Where("status = 1 AND exp_time IS NOT NULL AND exp_time < ?", nowMs).Find(&uts).Error
+	err := r.db.Where("status = 1 AND exp_time > 0 AND exp_time < ?", nowMs).Find(&uts).Error
 	if err != nil {
 		return nil, err
 	}
