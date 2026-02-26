@@ -217,6 +217,8 @@ export default function LimitPage() {
         const createData = { ...form };
 
         delete createData.id;
+        createData.tunnelId = null;
+        createData.tunnelName = "";
 
         res = await createSpeedLimit(createData);
       }
@@ -391,9 +393,7 @@ export default function LimitPage() {
                   {isEdit ? "编辑限速规则" : "新增限速规则"}
                 </h2>
                 <p className="text-small text-default-500">
-                  {isEdit
-                    ? "修改现有限速规则的配置信息"
-                    : "创建新的限速规则并绑定到隧道"}
+                  {isEdit ? "修改现有限速规则的配置信息" : "创建新的限速规则"}
                 </p>
               </ModalHeader>
               <ModalBody>
@@ -433,42 +433,44 @@ export default function LimitPage() {
                     }
                   />
 
-                  <Select
-                    description="绑定隧道为可选项，不绑定则创建通用限速规则"
-                    errorMessage={errors.tunnelId}
-                    isInvalid={!!errors.tunnelId}
-                    label="绑定隧道"
-                    placeholder="可选择要绑定的隧道（可选）"
-                    selectedKeys={
-                      form.tunnelId ? [form.tunnelId.toString()] : []
-                    }
-                    variant="bordered"
-                    onSelectionChange={(keys) => {
-                      const selectedKey = Array.from(keys)[0] as string;
-
-                      if (selectedKey) {
-                        const selectedTunnel = tunnels.find(
-                          (tunnel) => tunnel.id === parseInt(selectedKey),
-                        );
-
-                        setForm((prev) => ({
-                          ...prev,
-                          tunnelId: parseInt(selectedKey),
-                          tunnelName: selectedTunnel?.name || "",
-                        }));
-                      } else {
-                        setForm((prev) => ({
-                          ...prev,
-                          tunnelId: null,
-                          tunnelName: "",
-                        }));
+                  {isEdit && (
+                    <Select
+                      description="仅编辑时可调整绑定隧道"
+                      errorMessage={errors.tunnelId}
+                      isInvalid={!!errors.tunnelId}
+                      label="绑定隧道"
+                      placeholder="可选择要绑定的隧道（可选）"
+                      selectedKeys={
+                        form.tunnelId ? [form.tunnelId.toString()] : []
                       }
-                    }}
-                  >
-                    {tunnels.map((tunnel) => (
-                      <SelectItem key={tunnel.id}>{tunnel.name}</SelectItem>
-                    ))}
-                  </Select>
+                      variant="bordered"
+                      onSelectionChange={(keys) => {
+                        const selectedKey = Array.from(keys)[0] as string;
+
+                        if (selectedKey) {
+                          const selectedTunnel = tunnels.find(
+                            (tunnel) => tunnel.id === parseInt(selectedKey),
+                          );
+
+                          setForm((prev) => ({
+                            ...prev,
+                            tunnelId: parseInt(selectedKey),
+                            tunnelName: selectedTunnel?.name || "",
+                          }));
+                        } else {
+                          setForm((prev) => ({
+                            ...prev,
+                            tunnelId: null,
+                            tunnelName: "",
+                          }));
+                        }
+                      }}
+                    >
+                      {tunnels.map((tunnel) => (
+                        <SelectItem key={tunnel.id}>{tunnel.name}</SelectItem>
+                      ))}
+                    </Select>
+                  )}
                 </div>
               </ModalBody>
               <ModalFooter>

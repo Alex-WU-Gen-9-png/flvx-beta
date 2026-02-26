@@ -656,7 +656,7 @@ func (r *Repository) ListUsers() ([]map[string]interface{}, error) {
 		return nil, errors.New("repository not initialized")
 	}
 	var users []model.User
-	if err := r.db.Where("role_id != ?", 0).Order("id ASC").Find(&users).Error; err != nil {
+	if err := r.db.Where("role_id != ?", 0).Order("id DESC").Find(&users).Error; err != nil {
 		return nil, err
 	}
 	items := make([]map[string]interface{}, 0, len(users))
@@ -678,7 +678,7 @@ func (r *Repository) ListSpeedLimits() ([]map[string]interface{}, error) {
 		return nil, errors.New("repository not initialized")
 	}
 	var limits []model.SpeedLimit
-	if err := r.db.Order("id ASC").Find(&limits).Error; err != nil {
+	if err := r.db.Order("id DESC").Find(&limits).Error; err != nil {
 		return nil, err
 	}
 	items := make([]map[string]interface{}, 0, len(limits))
@@ -1318,7 +1318,6 @@ func (r *Repository) ListActiveForwardPeerShareRuntimesByNodeAndServiceName(node
 	}
 	return items, nil
 }
-
 
 func (r *Repository) ListActiveForwardPeerShareRuntimeServiceNamesByNode(nodeID int64) ([]string, error) {
 	if r == nil || r.db == nil {

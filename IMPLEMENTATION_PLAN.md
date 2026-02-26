@@ -12,6 +12,12 @@
 
 ## 二、实施计划清单
 
+### 2.0 计划状态（审计更新：2026-02-26）
+
+- 总体状态：**进行中（未验收通过）**
+- 已完成：模型、仓储查询、限速 CRUD、控制面优先级、限速页与类型改造、编译与测试通过
+- 未完成：**Forward 独立限速写入链路**（前端表单 -> API handler -> repository 落库 `forward.speed_id`）
+
 ### 2.1 后端模型层 (Model)
 
 | 序号 | 任务 | 文件 | 状态 |
@@ -80,6 +86,19 @@
 |------|------|------|
 | B1 | Go 后端编译通过 | ✅ 完成 |
 | B2 | TypeScript 类型检查通过 | ✅ 完成 |
+| B3 | `go test ./...` 全量通过 | ✅ 完成 |
+| B4 | `go test ./tests/contract/... -run SpeedLimit` 通过 | ✅ 完成 |
+
+### 2.8 Forward 独立限速写入链路补全（新增）
+
+| 序号 | 任务 | 文件 | 状态 |
+|------|------|------|------|
+| N1 | forwardCreate 支持接收并校验可选 speedId，写入 Forward.SpeedID | `go-backend/internal/http/handler/mutations.go` | ✅ 完成 |
+| N2 | forwardUpdate 支持更新/清空 speedId，并触发服务重下发 | `go-backend/internal/http/handler/mutations.go` | ✅ 完成 |
+| N3 | CreateForwardTx 支持落库 speed_id | `go-backend/internal/store/repo/repository_mutations.go` | ✅ 完成 |
+| N4 | UpdateForward 支持更新 speed_id | `go-backend/internal/store/repo/repository_mutations.go` | ✅ 完成 |
+| N5 | Forward 页面新增限速选择并透传 speedId | `vite-frontend/src/pages/forward.tsx` | ✅ 完成 |
+| N6 | Forward 相关契约测试补充 speedId 写入/清空断言 | `go-backend/tests/contract/forward_contract_test.go` | ✅ 完成 |
 
 ---
 
@@ -100,23 +119,30 @@
 
 ## 五、验证检查项
 
-### 5.1 功能验证 (待手动测试)
+### 5.1 功能验证（审计后）
 
-- [ ] 创建不限速规则的限速 (不绑定隧道)
-- [ ] 创建绑定隧道的限速 (兼容旧逻辑)
-- [ ] 编辑限速规则，切换隧道绑定状态
+- [x] 创建不限速规则的限速 (不绑定隧道)
+- [x] 创建绑定隧道的限速 (兼容旧逻辑)
+- [x] 编辑限速规则，切换隧道绑定状态
 - [ ] 删除限速规则
 - [ ] 转发列表正确显示 speedId
 
-### 5.2 API 验证 (待手动测试)
+### 5.2 API 验证（审计后）
 
-- [ ] GET /api/speed-limit/list 返回可选 tunnelId
-- [ ] POST /api/speed-limit/create 接受可选 tunnelId
-- [ ] POST /api/speed-limit/update 接受可选 tunnelId
+- [x] GET /api/speed-limit/list 返回可选 tunnelId
+- [x] POST /api/speed-limit/create 接受可选 tunnelId
+- [x] POST /api/speed-limit/update 接受可选 tunnelId
 - [ ] GET /api/forward/list 返回 speedId
 
-### 5.3 兼容性验证 (待手动测试)
+### 5.3 兼容性验证（审计后）
 
-- [ ] 现有绑定隧道的限速规则继续正常工作
+- [x] 现有绑定隧道的限速规则继续正常工作
 - [ ] 现有 UserTunnel 的限速继续正常工作
 - [ ] 备份/恢复功能正常
+
+### 5.4 Forward 独立限速闭环验证（新增）
+
+- [x] POST /api/forward/create 接受 speedId 并写入 `forward.speed_id`
+- [x] POST /api/forward/update 可更新/清空 speedId
+- [x] Forward 表单可选择限速并提交 speedId
+- [ ] `syncForwardServices` 实际使用 Forward.SpeedID 而非仅回退 UserTunnel.SpeedID

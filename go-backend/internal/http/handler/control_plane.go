@@ -185,7 +185,9 @@ func (h *Handler) syncForwardServices(forward *forwardRecord, method string, all
 
 	for _, fp := range ports {
 		if limiterID != nil && speed != nil {
-			h.ensureLimiterOnNode(fp.NodeID, *limiterID, *speed)
+			if err := h.ensureLimiterOnNode(fp.NodeID, *limiterID, *speed); err != nil {
+				return err
+			}
 		}
 
 		node, err := h.getNodeRecord(fp.NodeID)
@@ -1051,12 +1053,16 @@ func (h *Handler) sendDeleteLimiterConfig(limiterID int64, tunnelID int64) error
 	return nil
 }
 
-func (h *Handler) ensureLimiterOnNode(nodeID int64, limiterID int64, speed int) {
+func (h *Handler) ensureLimiterOnNode(nodeID int64, limiterID int64, speed int) error {
 	rate := float64(speed) / 8.0
 	limitStr := fmt.Sprintf("$ %.1fMB %.1fMB", rate, rate)
 	payload := map[string]interface{}{
 		"name":   strconv.FormatInt(limiterID, 10),
 		"limits": []string{limitStr},
 	}
-	_, _ = h.sendNodeCommand(nodeID, "AddLimiters", payload, false, false)
+	if _, err := h.sendNodeCommand(nodeID, "AddLimiters", payload, false, false); err != nil {
+		return fmt.Errorf("限速规则下发失败: %w", err)
+	}
+
+	return nil
 }
