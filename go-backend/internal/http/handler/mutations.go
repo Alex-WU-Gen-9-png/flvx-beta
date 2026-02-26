@@ -1586,29 +1586,37 @@ func (h *Handler) speedLimitCreate(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSON(w, response.ErrDefault("请求参数错误"))
 		return
 	}
-	tunnelID := asInt64(req["tunnelId"], 0)
-	if tunnelID <= 0 {
-		response.WriteJSON(w, response.ErrDefault("隧道ID不能为空"))
-		return
-	}
+
 	name := asString(req["name"])
 	if name == "" {
 		response.WriteJSON(w, response.ErrDefault("名称不能为空"))
 		return
 	}
-	tunnelName := h.repo.GetTunnelNameByID(tunnelID)
-	if tunnelName == "" {
-		response.WriteJSON(w, response.ErrDefault("隧道不存在"))
-		return
-	}
-	now := time.Now().UnixMilli()
+
 	speed := asInt(req["speed"], 100)
+
+	var tunnelID *int64
+	var tunnelName string
+	if tid := asInt64(req["tunnelId"], 0); tid > 0 {
+		tunnelID = &tid
+		tunnelName = h.repo.GetTunnelNameByID(tid)
+		if tunnelName == "" {
+			response.WriteJSON(w, response.ErrDefault("隧道不存在"))
+			return
+		}
+	}
+
+	now := time.Now().UnixMilli()
 	id, err := h.repo.CreateSpeedLimit(name, speed, tunnelID, tunnelName, now, asInt(req["status"], 1))
 	if err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	_ = h.sendLimiterConfig(id, speed, tunnelID)
+
+	if tunnelID != nil && *tunnelID > 0 {
+		_ = h.sendLimiterConfig(id, speed, *tunnelID)
+	}
+
 	response.WriteJSON(w, response.OKEmpty())
 }
 
@@ -1618,23 +1626,41 @@ func (h *Handler) speedLimitUpdate(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSON(w, response.ErrDefault("请求参数错误"))
 		return
 	}
+
 	id := asInt64(req["id"], 0)
-	tunnelID := asInt64(req["tunnelId"], 0)
-	if id <= 0 || tunnelID <= 0 {
-		response.WriteJSON(w, response.ErrDefault("请求参数错误"))
+	if id <= 0 {
+		response.WriteJSON(w, response.ErrDefault("限速规则ID不能为空"))
 		return
 	}
-	tunnelName := h.repo.GetTunnelNameByID(tunnelID)
-	if tunnelName == "" {
-		response.WriteJSON(w, response.ErrDefault("隧道不存在"))
+
+	name := asString(req["name"])
+	if name == "" {
+		response.WriteJSON(w, response.ErrDefault("名称不能为空"))
 		return
 	}
+
 	speed := asInt(req["speed"], 100)
-	if err := h.repo.UpdateSpeedLimit(id, asString(req["name"]), speed, tunnelID, tunnelName, asInt(req["status"], 1), time.Now().UnixMilli()); err != nil {
+
+	var tunnelID *int64
+	var tunnelName string
+	if tid := asInt64(req["tunnelId"], 0); tid > 0 {
+		tunnelID = &tid
+		tunnelName = h.repo.GetTunnelNameByID(tid)
+		if tunnelName == "" {
+			response.WriteJSON(w, response.ErrDefault("隧道不存在"))
+			return
+		}
+	}
+
+	if err := h.repo.UpdateSpeedLimit(id, name, speed, tunnelID, tunnelName, asInt(req["status"], 1), time.Now().UnixMilli()); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	_ = h.sendLimiterConfig(id, speed, tunnelID)
+
+	if tunnelID != nil && *tunnelID > 0 {
+		_ = h.sendLimiterConfig(id, speed, *tunnelID)
+	}
+
 	response.WriteJSON(w, response.OKEmpty())
 }
 
@@ -1643,15 +1669,18 @@ func (h *Handler) speedLimitDelete(w http.ResponseWriter, r *http.Request) {
 	if id <= 0 {
 		return
 	}
+
 	tunnelID := h.repo.GetSpeedLimitTunnelID(id)
 
 	if err := h.repo.DeleteSpeedLimit(id); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	if tunnelID > 0 {
-		_ = h.sendDeleteLimiterConfig(id, tunnelID)
+
+	if tunnelID.Valid && tunnelID.Int64 > 0 {
+		_ = h.sendDeleteLimiterConfig(id, tunnelID.Int64)
 	}
+
 	response.WriteJSON(w, response.OKEmpty())
 }
 

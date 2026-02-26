@@ -152,11 +152,32 @@ func (h *Handler) syncForwardServices(forward *forwardRecord, method string, all
 		return errors.New("转发入口端口不存在")
 	}
 
-	userTunnelID, limiterID, speed, err := h.resolveUserTunnelAndLimiter(forward.UserID, forward.TunnelID)
-	if err != nil {
-		return err
+	// Determine limiter from forward's SpeedID first, fallback to UserTunnel's limiter
+	var limiterID *int64
+	var speed *int
+
+	if forward.SpeedID.Valid && forward.SpeedID.Int64 > 0 {
+		// Forward has its own speed limit
+		speedVal, err := h.repo.GetSpeedLimitSpeed(forward.SpeedID.Int64)
+		if err == nil && speedVal > 0 {
+			limiterID = &forward.SpeedID.Int64
+			speed = &speedVal
+		}
 	}
-	serviceBase := buildForwardServiceBase(forward.ID, forward.UserID, userTunnelID)
+
+	if limiterID == nil {
+		// Fall back to UserTunnel speed limit
+		var utLimiterID *int64
+		var utSpeed *int
+		_, utLimiterID, utSpeed, err = h.resolveUserTunnelAndLimiter(forward.UserID, forward.TunnelID)
+		if err != nil {
+			return err
+		}
+		limiterID = utLimiterID
+		speed = utSpeed
+	}
+
+	serviceBase := buildForwardServiceBase(forward.ID, forward.UserID, 0)
 	tunnelTLSProtocol, err := h.isTunnelSelectedTLSProtocol(forward.TunnelID)
 	if err != nil {
 		return err

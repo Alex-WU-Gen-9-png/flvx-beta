@@ -34,8 +34,8 @@ interface SpeedLimitRule {
   name: string;
   speed: number;
   status: number;
-  tunnelId: number;
-  tunnelName: string;
+  tunnelId?: number | null;
+  tunnelName?: string;
   createdTime: string;
   updatedTime: string;
 }
@@ -139,9 +139,7 @@ export default function LimitPage() {
       newErrors.speed = "请输入有效的速度限制（≥1 Mbps）";
     }
 
-    if (!form.tunnelId) {
-      newErrors.tunnelId = "请选择要绑定的隧道";
-    }
+    // tunnelId is optional - speed limits can be created without binding to a tunnel
 
     setErrors(newErrors);
 
@@ -169,8 +167,8 @@ export default function LimitPage() {
       id: rule.id,
       name: rule.name,
       speed: rule.speed,
-      tunnelId: rule.tunnelId,
-      tunnelName: rule.tunnelName,
+      tunnelId: rule.tunnelId ?? null,
+      tunnelName: rule.tunnelName ?? "",
       status: rule.status,
     });
     setErrors({});
@@ -436,12 +434,11 @@ export default function LimitPage() {
                   />
 
                   <Select
-                    description={isEdit ? "编辑时无法修改绑定隧道" : undefined}
+                    description="绑定隧道为可选项，不绑定则创建通用限速规则"
                     errorMessage={errors.tunnelId}
-                    isDisabled={isEdit}
                     isInvalid={!!errors.tunnelId}
                     label="绑定隧道"
-                    placeholder="请选择要绑定的隧道"
+                    placeholder="可选择要绑定的隧道（可选）"
                     selectedKeys={
                       form.tunnelId ? [form.tunnelId.toString()] : []
                     }
