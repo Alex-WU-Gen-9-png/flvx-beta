@@ -1212,6 +1212,7 @@ export default function TunnelPage() {
                     <Select
                       description="当节点同时拥有IPv4和IPv6地址时，选择隧道连接使用的地址类型"
                       label="隧道连接地址偏好"
+                      placeholder="自动选择"
                       selectedKeys={[form.ipPreference || ""]}
                       variant="bordered"
                       onSelectionChange={(keys) => {
@@ -1223,7 +1224,6 @@ export default function TunnelPage() {
                         }));
                       }}
                     >
-                      <SelectItem key="">自动选择</SelectItem>
                       <SelectItem key="v4">优先IPv4</SelectItem>
                       <SelectItem key="v6">优先IPv6</SelectItem>
                     </Select>
