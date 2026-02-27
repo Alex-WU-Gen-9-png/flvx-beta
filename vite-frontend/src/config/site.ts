@@ -128,6 +128,33 @@ export const getCachedConfigs = async (): Promise<Record<string, string>> => {
     }
   });
 
+  const fetchPublicConfigs = async (): Promise<Record<string, string>> => {
+    const publicConfigMap: Record<string, string> = {};
+
+    await Promise.all(
+      configKeys.map(async (key) => {
+        try {
+          const response = await getConfigByName(key);
+
+          if (
+            response.code === 0 &&
+            response.data &&
+            typeof response.data.value === "string"
+          ) {
+            const value = response.data.value;
+
+            publicConfigMap[key] = value;
+            configCache.set(key, value);
+          }
+        } catch {
+          // ignore single key fetch error
+        }
+      }),
+    );
+
+    return publicConfigMap;
+  };
+
   // 从API获取最新配置
   try {
     const response = await getConfigs();
@@ -142,14 +169,20 @@ export const getCachedConfigs = async (): Promise<Record<string, string>> => {
 
       return configs;
     }
+
+    if (hasCachedData) {
+      return cachedConfigs;
+    }
+
+    return await fetchPublicConfigs();
   } catch {
     // API失败时返回缓存的数据
     if (hasCachedData) {
       return cachedConfigs;
     }
-  }
 
-  return {};
+    return await fetchPublicConfigs();
+  }
 };
 
 const updateDocumentFavicon = (faviconUrl: string) => {
@@ -210,9 +243,28 @@ export const updateSiteConfig = async (configMap?: Record<string, string>) => {
     configCache.set(key, String(value));
   });
 
-  const appName = (resolvedConfigMap.app_name || "").trim();
-  const appLogo = (resolvedConfigMap.app_logo || "").trim();
-  const appFavicon = (resolvedConfigMap.app_favicon || "").trim();
+  const hasAppName = Object.prototype.hasOwnProperty.call(
+    resolvedConfigMap,
+    "app_name",
+  );
+  const hasAppLogo = Object.prototype.hasOwnProperty.call(
+    resolvedConfigMap,
+    "app_logo",
+  );
+  const hasAppFavicon = Object.prototype.hasOwnProperty.call(
+    resolvedConfigMap,
+    "app_favicon",
+  );
+
+  const appName = hasAppName
+    ? String(resolvedConfigMap.app_name || "").trim()
+    : siteConfig.name;
+  const appLogo = hasAppLogo
+    ? String(resolvedConfigMap.app_logo || "").trim()
+    : (siteConfig.app_logo || "").trim();
+  const appFavicon = hasAppFavicon
+    ? String(resolvedConfigMap.app_favicon || "").trim()
+    : (siteConfig.app_favicon || "").trim();
 
   if (appName && appName !== siteConfig.name) {
     siteConfig.name = appName;
