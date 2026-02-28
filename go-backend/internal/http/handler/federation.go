@@ -1232,16 +1232,20 @@ func (h *Handler) federationRuntimeDiagnose(w http.ResponseWriter, r *http.Reque
 	if req.Count <= 0 {
 		req.Count = 4
 	}
-	if req.Timeout <= 0 {
-		req.Timeout = 5000
+	if req.Timeout <= 0 || req.Timeout > int(diagnosisCommandTimeout/time.Millisecond) {
+		req.Timeout = int(diagnosisCommandTimeout / time.Millisecond)
+	}
+	commandTimeout := time.Duration(req.Timeout) * time.Millisecond
+	if commandTimeout <= 0 || commandTimeout > diagnosisCommandTimeout {
+		commandTimeout = diagnosisCommandTimeout
 	}
 
-	res, err := h.sendNodeCommand(share.NodeID, "TcpPing", map[string]interface{}{
+	res, err := h.sendNodeCommandWithTimeout(share.NodeID, "TcpPing", map[string]interface{}{
 		"ip":      req.IP,
 		"port":    req.Port,
 		"count":   req.Count,
 		"timeout": req.Timeout,
-	}, false, false)
+	}, commandTimeout, false, false)
 	if err != nil {
 		response.WriteJSON(w, response.ErrDefault(err.Error()))
 		return

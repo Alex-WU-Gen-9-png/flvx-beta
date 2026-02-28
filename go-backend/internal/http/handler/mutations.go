@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -787,7 +788,9 @@ func (h *Handler) tunnelDiagnose(w http.ResponseWriter, r *http.Request) {
 	if id <= 0 {
 		return
 	}
-	result, err := h.diagnoseTunnelRuntime(id)
+	ctx, cancel := context.WithTimeout(r.Context(), diagnosisRequestTimeout)
+	defer cancel()
+	result, err := h.diagnoseTunnelRuntime(ctx, id)
 	if err != nil {
 		if strings.Contains(err.Error(), "不存在") || strings.Contains(err.Error(), "不完整") {
 			response.WriteJSON(w, response.ErrDefault(err.Error()))
@@ -1399,7 +1402,9 @@ func (h *Handler) forwardDiagnose(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	payload, err := h.diagnoseForwardRuntime(forward)
+	ctx, cancel := context.WithTimeout(r.Context(), diagnosisRequestTimeout)
+	defer cancel()
+	payload, err := h.diagnoseForwardRuntime(ctx, forward)
 	if err != nil {
 		if strings.Contains(err.Error(), "不存在") || strings.Contains(err.Error(), "不能为空") || strings.Contains(err.Error(), "错误") {
 			response.WriteJSON(w, response.ErrDefault(err.Error()))

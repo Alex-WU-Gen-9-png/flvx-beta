@@ -118,7 +118,11 @@ export const updateTunnel = (data: TunnelMutationPayload) =>
 export const deleteTunnel = (id: number) =>
   Network.post("/tunnel/delete", { id });
 export const diagnoseTunnel = (tunnelId: number) =>
-  Network.post<TunnelDiagnosisApiData>("/tunnel/diagnose", { tunnelId });
+  Network.post<TunnelDiagnosisApiData>(
+    "/tunnel/diagnose",
+    { tunnelId },
+    { timeout: 120 * 1000 },
+  );
 export const updateTunnelOrder = (data: {
   tunnels: Array<{ id: number; inx: number }>;
 }) => Network.post("/tunnel/update-order", data);
@@ -159,7 +163,11 @@ export const resumeForwardService = (forwardId: number) =>
 
 // 转发诊断操作
 export const diagnoseForward = (forwardId: number) =>
-  Network.post<ForwardDiagnosisApiData>("/forward/diagnose", { forwardId });
+  Network.post<ForwardDiagnosisApiData>(
+    "/forward/diagnose",
+    { forwardId },
+    { timeout: 120 * 1000 },
+  );
 
 // 转发排序操作
 export const updateForwardOrder = (data: {

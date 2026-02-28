@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -8,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go-backend/internal/http/client"
@@ -29,6 +31,40 @@ type diagnosisTarget struct {
 	IP      string
 	Port    int
 }
+
+type diagnosisWorkItem struct {
+	fromNodeID   int64
+	targetIP     string
+	targetPort   int
+	description  string
+	metadata     map[string]interface{}
+	toNode       chainNodeRecord
+	hasChainHop  bool
+	ipPreference string
+}
+
+type diagnosisExecOptions struct {
+	commandTimeout time.Duration
+	pingTimeoutMS  int
+	timeoutMessage string
+}
+
+type diagnosisProgress struct {
+	Total     int `json:"total"`
+	Completed int `json:"completed"`
+	Success   int `json:"success"`
+	Failed    int `json:"failed"`
+}
+
+type diagnosisItemEmitter func(index int, item map[string]interface{}, progress diagnosisProgress)
+
+const diagnosisMaxConcurrency = 8
+
+const (
+	defaultNodeCommandTimeout = 6 * time.Second
+	diagnosisCommandTimeout   = 2 * time.Minute
+	diagnosisRequestTimeout   = 2 * time.Minute
+)
 
 func (h *Handler) resolveForwardAccess(r *http.Request, forwardID int64) (*forwardRecord, int64, int, error) {
 	userID, roleID, err := userRoleFromRequest(r)
@@ -295,16 +331,23 @@ func (h *Handler) applyNodeProtocolChange(nodeID int64, httpVal, tlsVal, socksVa
 }
 
 func (h *Handler) sendNodeCommand(nodeID int64, commandType string, data interface{}, tolerateExists bool, tolerateNotFound bool) (ws.CommandResult, error) {
+	return h.sendNodeCommandWithTimeout(nodeID, commandType, data, defaultNodeCommandTimeout, tolerateExists, tolerateNotFound)
+}
+
+func (h *Handler) sendNodeCommandWithTimeout(nodeID int64, commandType string, data interface{}, timeout time.Duration, tolerateExists bool, tolerateNotFound bool) (ws.CommandResult, error) {
 	var (
 		result ws.CommandResult
 		err    error
 	)
+	if timeout <= 0 {
+		timeout = defaultNodeCommandTimeout
+	}
 
 	node, nodeErr := h.getNodeRecord(nodeID)
 	if nodeErr == nil && node != nil && node.IsRemote == 1 {
-		result, err = h.sendRemoteNodeCommand(node, commandType, data)
+		result, err = h.sendRemoteNodeCommandWithTimeout(node, commandType, data, timeout)
 	} else {
-		result, err = h.wsServer.SendCommand(nodeID, commandType, data, 12*time.Second)
+		result, err = h.wsServer.SendCommand(nodeID, commandType, data, timeout)
 	}
 	if err == nil {
 		return result, nil
@@ -324,6 +367,10 @@ func (h *Handler) sendNodeCommand(nodeID int64, commandType string, data interfa
 }
 
 func (h *Handler) sendRemoteNodeCommand(node *nodeRecord, commandType string, data interface{}) (ws.CommandResult, error) {
+	return h.sendRemoteNodeCommandWithTimeout(node, commandType, data, 0)
+}
+
+func (h *Handler) sendRemoteNodeCommandWithTimeout(node *nodeRecord, commandType string, data interface{}, timeout time.Duration) (ws.CommandResult, error) {
 	if node == nil {
 		return ws.CommandResult{}, errors.New("节点不存在")
 	}
@@ -334,6 +381,9 @@ func (h *Handler) sendRemoteNodeCommand(node *nodeRecord, commandType string, da
 	}
 
 	fc := client.NewFederationClient()
+	if timeout > 0 {
+		fc = client.NewFederationClientWithTimeout(timeout)
+	}
 	res, err := fc.Command(remoteURL, remoteToken, h.federationLocalDomain(), client.RuntimeNodeCommandRequest{
 		CommandType: commandType,
 		Data:        data,
@@ -361,41 +411,65 @@ func (h *Handler) sendRemoteNodeCommand(node *nodeRecord, commandType string, da
 	return result, nil
 }
 
-func (h *Handler) diagnoseForwardRuntime(forward *forwardRecord) (map[string]interface{}, error) {
+func (h *Handler) diagnoseForwardRuntime(ctx context.Context, forward *forwardRecord) (map[string]interface{}, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	forwardName, workItems, err := h.prepareForwardDiagnosis(forward)
+	if err != nil {
+		return nil, err
+	}
+
+	results := h.runDiagnosisWorkItems(ctx, workItems, nil)
+
+	payload := map[string]interface{}{
+		"forwardName": forwardName,
+		"timestamp":   time.Now().UnixMilli(),
+		"results":     results,
+	}
+	return payload, nil
+}
+
+func (h *Handler) prepareForwardDiagnosis(forward *forwardRecord) (string, []diagnosisWorkItem, error) {
 	if forward == nil {
-		return nil, errForwardNotFound
+		return "", nil, errForwardNotFound
 	}
 	targets, err := resolveDiagnosisTargets(forward.RemoteAddr)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 
 	tunnel, err := h.getTunnelRecord(forward.TunnelID)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 
 	chainRows, err := h.listChainNodesForTunnel(forward.TunnelID)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	if len(chainRows) == 0 {
-		return nil, errors.New("隧道配置不完整")
+		return "", nil, errors.New("隧道配置不完整")
 	}
 
 	ipPreference := h.repo.GetTunnelIPPreference(forward.TunnelID)
 
 	inNodes, chainHops, outNodes := splitChainNodeGroups(chainRows)
-	results := make([]map[string]interface{}, 0, len(chainRows)*2+len(targets))
-	nodeCache := map[int64]*nodeRecord{}
+	workItems := make([]diagnosisWorkItem, 0, len(chainRows)*2+len(targets))
 
 	switch tunnel.Type {
 	case 1:
 		for _, inNode := range inNodes {
 			for _, target := range targets {
 				description := fmt.Sprintf("入口(%s)->目标(%s)", inNode.NodeName, target.Address)
-				h.appendPathDiagnosis(&results, nodeCache, inNode.NodeID, target.IP, target.Port, description, map[string]interface{}{
-					"fromChainType": 1,
+				workItems = append(workItems, diagnosisWorkItem{
+					fromNodeID:  inNode.NodeID,
+					targetIP:    target.IP,
+					targetPort:  target.Port,
+					description: description,
+					metadata: map[string]interface{}{
+						"fromChainType": 1,
+					},
 				})
 			}
 		}
@@ -404,19 +478,33 @@ func (h *Handler) diagnoseForwardRuntime(forward *forwardRecord) (map[string]int
 			if len(chainHops) > 0 {
 				for _, firstNode := range chainHops[0] {
 					description := fmt.Sprintf("入口(%s)->第1跳(%s)", inNode.NodeName, firstNode.NodeName)
-					h.appendChainHopDiagnosis(&results, nodeCache, inNode.NodeID, firstNode, description, map[string]interface{}{
-						"fromChainType": 1,
-						"toChainType":   2,
-						"toInx":         firstNode.Inx,
-					}, ipPreference)
+					workItems = append(workItems, diagnosisWorkItem{
+						fromNodeID:   inNode.NodeID,
+						toNode:       firstNode,
+						hasChainHop:  true,
+						ipPreference: ipPreference,
+						description:  description,
+						metadata: map[string]interface{}{
+							"fromChainType": 1,
+							"toChainType":   2,
+							"toInx":         firstNode.Inx,
+						},
+					})
 				}
 			} else {
 				for _, outNode := range outNodes {
 					description := fmt.Sprintf("入口(%s)->出口(%s)", inNode.NodeName, outNode.NodeName)
-					h.appendChainHopDiagnosis(&results, nodeCache, inNode.NodeID, outNode, description, map[string]interface{}{
-						"fromChainType": 1,
-						"toChainType":   3,
-					}, ipPreference)
+					workItems = append(workItems, diagnosisWorkItem{
+						fromNodeID:   inNode.NodeID,
+						toNode:       outNode,
+						hasChainHop:  true,
+						ipPreference: ipPreference,
+						description:  description,
+						metadata: map[string]interface{}{
+							"fromChainType": 1,
+							"toChainType":   3,
+						},
+					})
 				}
 			}
 		}
@@ -426,21 +514,35 @@ func (h *Handler) diagnoseForwardRuntime(forward *forwardRecord) (map[string]int
 				if i+1 < len(chainHops) {
 					for _, nextNode := range chainHops[i+1] {
 						description := fmt.Sprintf("第%d跳(%s)->第%d跳(%s)", i+1, currentNode.NodeName, i+2, nextNode.NodeName)
-						h.appendChainHopDiagnosis(&results, nodeCache, currentNode.NodeID, nextNode, description, map[string]interface{}{
-							"fromChainType": 2,
-							"fromInx":       currentNode.Inx,
-							"toChainType":   2,
-							"toInx":         nextNode.Inx,
-						}, ipPreference)
+						workItems = append(workItems, diagnosisWorkItem{
+							fromNodeID:   currentNode.NodeID,
+							toNode:       nextNode,
+							hasChainHop:  true,
+							ipPreference: ipPreference,
+							description:  description,
+							metadata: map[string]interface{}{
+								"fromChainType": 2,
+								"fromInx":       currentNode.Inx,
+								"toChainType":   2,
+								"toInx":         nextNode.Inx,
+							},
+						})
 					}
 				} else {
 					for _, outNode := range outNodes {
 						description := fmt.Sprintf("第%d跳(%s)->出口(%s)", i+1, currentNode.NodeName, outNode.NodeName)
-						h.appendChainHopDiagnosis(&results, nodeCache, currentNode.NodeID, outNode, description, map[string]interface{}{
-							"fromChainType": 2,
-							"fromInx":       currentNode.Inx,
-							"toChainType":   3,
-						}, ipPreference)
+						workItems = append(workItems, diagnosisWorkItem{
+							fromNodeID:   currentNode.NodeID,
+							toNode:       outNode,
+							hasChainHop:  true,
+							ipPreference: ipPreference,
+							description:  description,
+							metadata: map[string]interface{}{
+								"fromChainType": 2,
+								"fromInx":       currentNode.Inx,
+								"toChainType":   3,
+							},
+						})
 					}
 				}
 			}
@@ -449,8 +551,14 @@ func (h *Handler) diagnoseForwardRuntime(forward *forwardRecord) (map[string]int
 		for _, outNode := range outNodes {
 			for _, target := range targets {
 				description := fmt.Sprintf("出口(%s)->目标(%s)", outNode.NodeName, target.Address)
-				h.appendPathDiagnosis(&results, nodeCache, outNode.NodeID, target.IP, target.Port, description, map[string]interface{}{
-					"fromChainType": 3,
+				workItems = append(workItems, diagnosisWorkItem{
+					fromNodeID:  outNode.NodeID,
+					targetIP:    target.IP,
+					targetPort:  target.Port,
+					description: description,
+					metadata: map[string]interface{}{
+						"fromChainType": 3,
+					},
 				})
 			}
 		}
@@ -458,54 +566,80 @@ func (h *Handler) diagnoseForwardRuntime(forward *forwardRecord) (map[string]int
 		for _, inNode := range inNodes {
 			for _, target := range targets {
 				description := fmt.Sprintf("入口(%s)->目标(%s)", inNode.NodeName, target.Address)
-				h.appendPathDiagnosis(&results, nodeCache, inNode.NodeID, target.IP, target.Port, description, map[string]interface{}{
-					"fromChainType": 1,
+				workItems = append(workItems, diagnosisWorkItem{
+					fromNodeID:  inNode.NodeID,
+					targetIP:    target.IP,
+					targetPort:  target.Port,
+					description: description,
+					metadata: map[string]interface{}{
+						"fromChainType": 1,
+					},
 				})
 			}
 		}
 	}
 
+	return forward.Name, workItems, nil
+}
+
+func (h *Handler) diagnoseTunnelRuntime(ctx context.Context, tunnelID int64) (map[string]interface{}, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	tunnelName, tunnelType, workItems, err := h.prepareTunnelDiagnosis(tunnelID)
+	if err != nil {
+		return nil, err
+	}
+
+	results := h.runDiagnosisWorkItems(ctx, workItems, nil)
+
 	payload := map[string]interface{}{
-		"forwardName": forward.Name,
-		"timestamp":   time.Now().UnixMilli(),
-		"results":     results,
+		"tunnelName": tunnelName,
+		"tunnelType": tunnelType,
+		"timestamp":  time.Now().UnixMilli(),
+		"results":    results,
 	}
 	return payload, nil
 }
 
-func (h *Handler) diagnoseTunnelRuntime(tunnelID int64) (map[string]interface{}, error) {
+func (h *Handler) prepareTunnelDiagnosis(tunnelID int64) (string, string, []diagnosisWorkItem, error) {
 	tunnel, err := h.getTunnelRecord(tunnelID)
 	if err != nil {
-		return nil, err
+		return "", "", nil, err
 	}
 
 	tunnelName, err := h.repo.GetTunnelName(tunnelID)
 	if err != nil {
-		return nil, err
+		return "", "", nil, err
 	}
 	if tunnelName == "" {
-		return nil, errors.New("隧道不存在")
+		return "", "", nil, errors.New("隧道不存在")
 	}
 
 	chainRows, err := h.listChainNodesForTunnel(tunnelID)
 	if err != nil {
-		return nil, err
+		return "", "", nil, err
 	}
 	if len(chainRows) == 0 {
-		return nil, errors.New("隧道配置不完整")
+		return "", "", nil, errors.New("隧道配置不完整")
 	}
 
 	ipPreference := h.repo.GetTunnelIPPreference(tunnelID)
 	inNodes, chainHops, outNodes := splitChainNodeGroups(chainRows)
-	results := make([]map[string]interface{}, 0, len(chainRows)*2)
-	nodeCache := map[int64]*nodeRecord{}
+	workItems := make([]diagnosisWorkItem, 0, len(chainRows)*2)
 
 	switch tunnel.Type {
 	case 1:
 		for _, inNode := range inNodes {
 			description := fmt.Sprintf("入口(%s)->外网", inNode.NodeName)
-			h.appendPathDiagnosis(&results, nodeCache, inNode.NodeID, "www.bing.com", 443, description, map[string]interface{}{
-				"fromChainType": 1,
+			workItems = append(workItems, diagnosisWorkItem{
+				fromNodeID:  inNode.NodeID,
+				targetIP:    "www.bing.com",
+				targetPort:  443,
+				description: description,
+				metadata: map[string]interface{}{
+					"fromChainType": 1,
+				},
 			})
 		}
 	case 2:
@@ -513,19 +647,33 @@ func (h *Handler) diagnoseTunnelRuntime(tunnelID int64) (map[string]interface{},
 			if len(chainHops) > 0 {
 				for _, firstNode := range chainHops[0] {
 					description := fmt.Sprintf("入口(%s)->第1跳(%s)", inNode.NodeName, firstNode.NodeName)
-					h.appendChainHopDiagnosis(&results, nodeCache, inNode.NodeID, firstNode, description, map[string]interface{}{
-						"fromChainType": 1,
-						"toChainType":   2,
-						"toInx":         firstNode.Inx,
-					}, ipPreference)
+					workItems = append(workItems, diagnosisWorkItem{
+						fromNodeID:   inNode.NodeID,
+						toNode:       firstNode,
+						hasChainHop:  true,
+						ipPreference: ipPreference,
+						description:  description,
+						metadata: map[string]interface{}{
+							"fromChainType": 1,
+							"toChainType":   2,
+							"toInx":         firstNode.Inx,
+						},
+					})
 				}
 			} else {
 				for _, outNode := range outNodes {
 					description := fmt.Sprintf("入口(%s)->出口(%s)", inNode.NodeName, outNode.NodeName)
-					h.appendChainHopDiagnosis(&results, nodeCache, inNode.NodeID, outNode, description, map[string]interface{}{
-						"fromChainType": 1,
-						"toChainType":   3,
-					}, ipPreference)
+					workItems = append(workItems, diagnosisWorkItem{
+						fromNodeID:   inNode.NodeID,
+						toNode:       outNode,
+						hasChainHop:  true,
+						ipPreference: ipPreference,
+						description:  description,
+						metadata: map[string]interface{}{
+							"fromChainType": 1,
+							"toChainType":   3,
+						},
+					})
 				}
 			}
 		}
@@ -535,21 +683,35 @@ func (h *Handler) diagnoseTunnelRuntime(tunnelID int64) (map[string]interface{},
 				if i+1 < len(chainHops) {
 					for _, nextNode := range chainHops[i+1] {
 						description := fmt.Sprintf("第%d跳(%s)->第%d跳(%s)", i+1, currentNode.NodeName, i+2, nextNode.NodeName)
-						h.appendChainHopDiagnosis(&results, nodeCache, currentNode.NodeID, nextNode, description, map[string]interface{}{
-							"fromChainType": 2,
-							"fromInx":       currentNode.Inx,
-							"toChainType":   2,
-							"toInx":         nextNode.Inx,
-						}, ipPreference)
+						workItems = append(workItems, diagnosisWorkItem{
+							fromNodeID:   currentNode.NodeID,
+							toNode:       nextNode,
+							hasChainHop:  true,
+							ipPreference: ipPreference,
+							description:  description,
+							metadata: map[string]interface{}{
+								"fromChainType": 2,
+								"fromInx":       currentNode.Inx,
+								"toChainType":   2,
+								"toInx":         nextNode.Inx,
+							},
+						})
 					}
 				} else {
 					for _, outNode := range outNodes {
 						description := fmt.Sprintf("第%d跳(%s)->出口(%s)", i+1, currentNode.NodeName, outNode.NodeName)
-						h.appendChainHopDiagnosis(&results, nodeCache, currentNode.NodeID, outNode, description, map[string]interface{}{
-							"fromChainType": 2,
-							"fromInx":       currentNode.Inx,
-							"toChainType":   3,
-						}, ipPreference)
+						workItems = append(workItems, diagnosisWorkItem{
+							fromNodeID:   currentNode.NodeID,
+							toNode:       outNode,
+							hasChainHop:  true,
+							ipPreference: ipPreference,
+							description:  description,
+							metadata: map[string]interface{}{
+								"fromChainType": 2,
+								"fromInx":       currentNode.Inx,
+								"toChainType":   3,
+							},
+						})
 					}
 				}
 			}
@@ -557,26 +719,33 @@ func (h *Handler) diagnoseTunnelRuntime(tunnelID int64) (map[string]interface{},
 
 		for _, outNode := range outNodes {
 			description := fmt.Sprintf("出口(%s)->外网", outNode.NodeName)
-			h.appendPathDiagnosis(&results, nodeCache, outNode.NodeID, "www.bing.com", 443, description, map[string]interface{}{
-				"fromChainType": 3,
+			workItems = append(workItems, diagnosisWorkItem{
+				fromNodeID:  outNode.NodeID,
+				targetIP:    "www.bing.com",
+				targetPort:  443,
+				description: description,
+				metadata: map[string]interface{}{
+					"fromChainType": 3,
+				},
 			})
 		}
 	default:
 		for _, inNode := range inNodes {
 			description := fmt.Sprintf("入口(%s)->外网", inNode.NodeName)
-			h.appendPathDiagnosis(&results, nodeCache, inNode.NodeID, "www.bing.com", 443, description, map[string]interface{}{
-				"fromChainType": 1,
+			workItems = append(workItems, diagnosisWorkItem{
+				fromNodeID:  inNode.NodeID,
+				targetIP:    "www.bing.com",
+				targetPort:  443,
+				description: description,
+				metadata: map[string]interface{}{
+					"fromChainType": 1,
+				},
 			})
 		}
 	}
 
-	payload := map[string]interface{}{
-		"tunnelName": tunnelName,
-		"tunnelType": map[bool]string{true: "端口转发", false: "隧道转发"}[tunnel.Type == 1],
-		"timestamp":  time.Now().UnixMilli(),
-		"results":    results,
-	}
-	return payload, nil
+	tunnelType := map[bool]string{true: "端口转发", false: "隧道转发"}[tunnel.Type == 1]
+	return tunnelName, tunnelType, workItems, nil
 }
 
 func splitChainNodeGroups(rows []chainNodeRecord) ([]chainNodeRecord, [][]chainNodeRecord, []chainNodeRecord) {
@@ -628,6 +797,157 @@ func resolveDiagnosisTargets(remoteAddr string) ([]diagnosisTarget, error) {
 	return targets, nil
 }
 
+func diagnosisContextMessage(ctx context.Context) string {
+	if ctx == nil {
+		return "诊断超时（2分钟）"
+	}
+	switch ctx.Err() {
+	case context.DeadlineExceeded:
+		return "诊断超时（2分钟）"
+	case context.Canceled:
+		return "诊断已取消"
+	default:
+		return "诊断超时（2分钟）"
+	}
+}
+
+func diagnosisExecOptionsFromContext(ctx context.Context) diagnosisExecOptions {
+	timeout := diagnosisCommandTimeout
+	if ctx != nil {
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				remaining = 100 * time.Millisecond
+			}
+			if remaining < timeout {
+				timeout = remaining
+			}
+		}
+	}
+	if timeout <= 0 {
+		timeout = 100 * time.Millisecond
+	}
+	pingTimeoutMS := int(timeout / time.Millisecond)
+	if pingTimeoutMS <= 0 {
+		pingTimeoutMS = 100
+	}
+	return diagnosisExecOptions{
+		commandTimeout: timeout,
+		pingTimeoutMS:  pingTimeoutMS,
+		timeoutMessage: diagnosisContextMessage(ctx),
+	}
+}
+
+func newDiagnosisTimeoutItem(workItem diagnosisWorkItem, message string) map[string]interface{} {
+	targetPort := workItem.targetPort
+	if targetPort <= 0 {
+		targetPort = workItem.toNode.Port
+	}
+	item := newDiagnosisResultItem(workItem.fromNodeID, workItem.targetIP, targetPort, workItem.description, workItem.metadata)
+	item["success"] = false
+	if strings.TrimSpace(message) == "" {
+		message = "诊断超时（2分钟）"
+	}
+	item["message"] = message
+	return item
+}
+
+func (h *Handler) executeDiagnosisWorkItem(workItem diagnosisWorkItem, options diagnosisExecOptions) map[string]interface{} {
+	single := make([]map[string]interface{}, 0, 1)
+	nodeCache := map[int64]*nodeRecord{}
+	if workItem.hasChainHop {
+		h.appendChainHopDiagnosis(&single, nodeCache, workItem.fromNodeID, workItem.toNode, workItem.description, workItem.metadata, workItem.ipPreference, options)
+	} else {
+		h.appendPathDiagnosis(&single, nodeCache, workItem.fromNodeID, workItem.targetIP, workItem.targetPort, workItem.description, workItem.metadata, options)
+	}
+
+	if len(single) == 0 {
+		return newDiagnosisTimeoutItem(workItem, "诊断任务未返回结果")
+	}
+	return single[0]
+}
+
+func (h *Handler) runDiagnosisWorkItems(ctx context.Context, workItems []diagnosisWorkItem, emitter diagnosisItemEmitter) []map[string]interface{} {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	results := make([]map[string]interface{}, len(workItems))
+	if len(workItems) == 0 {
+		return results
+	}
+
+	workerLimit := diagnosisMaxConcurrency
+	if workerLimit < 1 {
+		workerLimit = 1
+	}
+	if workerLimit > len(workItems) {
+		workerLimit = len(workItems)
+	}
+
+	type diagnosisWorkResult struct {
+		index int
+		item  map[string]interface{}
+	}
+
+	jobs := make(chan int)
+	resultCh := make(chan diagnosisWorkResult, len(workItems))
+
+	var wg sync.WaitGroup
+	for i := 0; i < workerLimit; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				select {
+				case <-ctx.Done():
+					resultCh <- diagnosisWorkResult{index: index, item: newDiagnosisTimeoutItem(workItems[index], diagnosisContextMessage(ctx))}
+					continue
+				default:
+				}
+				options := diagnosisExecOptionsFromContext(ctx)
+				resultCh <- diagnosisWorkResult{index: index, item: h.executeDiagnosisWorkItem(workItems[index], options)}
+			}
+		}()
+	}
+
+enqueueLoop:
+	for i := 0; i < len(workItems); i++ {
+		select {
+		case <-ctx.Done():
+			message := diagnosisContextMessage(ctx)
+			for j := i; j < len(workItems); j++ {
+				resultCh <- diagnosisWorkResult{index: j, item: newDiagnosisTimeoutItem(workItems[j], message)}
+			}
+			break enqueueLoop
+		case jobs <- i:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	close(resultCh)
+
+	progress := diagnosisProgress{Total: len(workItems)}
+	for result := range resultCh {
+		results[result.index] = result.item
+		progress.Completed++
+		if asBool(result.item["success"], false) {
+			progress.Success++
+		} else {
+			progress.Failed++
+		}
+		if emitter != nil {
+			emitter(result.index, result.item, progress)
+		}
+	}
+
+	for i := range results {
+		if results[i] == nil {
+			results[i] = newDiagnosisTimeoutItem(workItems[i], "诊断超时（2分钟）")
+		}
+	}
+	return results
+}
+
 func (h *Handler) cachedNode(nodeCache map[int64]*nodeRecord, nodeID int64) (*nodeRecord, error) {
 	if node, ok := nodeCache[nodeID]; ok {
 		return node, nil
@@ -669,7 +989,7 @@ func (h *Handler) appendFailedDiagnosis(results *[]map[string]interface{}, nodeC
 	*results = append(*results, item)
 }
 
-func (h *Handler) appendPathDiagnosis(results *[]map[string]interface{}, nodeCache map[int64]*nodeRecord, fromNodeID int64, targetIP string, targetPort int, description string, metadata map[string]interface{}) {
+func (h *Handler) appendPathDiagnosis(results *[]map[string]interface{}, nodeCache map[int64]*nodeRecord, fromNodeID int64, targetIP string, targetPort int, description string, metadata map[string]interface{}, options diagnosisExecOptions) {
 	item := newDiagnosisResultItem(fromNodeID, targetIP, targetPort, description, metadata)
 
 	fromNode, err := h.cachedNode(nodeCache, fromNodeID)
@@ -686,9 +1006,9 @@ func (h *Handler) appendPathDiagnosis(results *[]map[string]interface{}, nodeCac
 		pingErr  error
 	)
 	if fromNode.IsRemote == 1 {
-		pingData, pingErr = h.tcpPingViaRemoteNode(fromNode, targetIP, targetPort)
+		pingData, pingErr = h.tcpPingViaRemoteNode(fromNode, targetIP, targetPort, options)
 	} else {
-		pingData, pingErr = h.tcpPingViaNode(fromNodeID, targetIP, targetPort)
+		pingData, pingErr = h.tcpPingViaNode(fromNodeID, targetIP, targetPort, options)
 	}
 	if pingErr != nil {
 		item["success"] = false
@@ -719,7 +1039,7 @@ func (h *Handler) appendPathDiagnosis(results *[]map[string]interface{}, nodeCac
 	*results = append(*results, item)
 }
 
-func (h *Handler) appendChainHopDiagnosis(results *[]map[string]interface{}, nodeCache map[int64]*nodeRecord, fromNodeID int64, toNode chainNodeRecord, description string, metadata map[string]interface{}, ipPreference string) {
+func (h *Handler) appendChainHopDiagnosis(results *[]map[string]interface{}, nodeCache map[int64]*nodeRecord, fromNodeID int64, toNode chainNodeRecord, description string, metadata map[string]interface{}, ipPreference string, options diagnosisExecOptions) {
 	fromNode, _ := h.cachedNode(nodeCache, fromNodeID)
 	targetNode, err := h.cachedNode(nodeCache, toNode.NodeID)
 	if err != nil {
@@ -731,7 +1051,7 @@ func (h *Handler) appendChainHopDiagnosis(results *[]map[string]interface{}, nod
 		h.appendFailedDiagnosis(results, nodeCache, fromNodeID, strings.Trim(strings.TrimSpace(targetNode.ServerIP), "[]"), toNode.Port, description, metadata, err.Error())
 		return
 	}
-	h.appendPathDiagnosis(results, nodeCache, fromNodeID, targetIP, targetPort, description, metadata)
+	h.appendPathDiagnosis(results, nodeCache, fromNodeID, targetIP, targetPort, description, metadata, options)
 }
 
 func resolveChainProbeTarget(fromNode, targetNode *nodeRecord, preferredPort int, ipPreference string) (string, int, error) {
@@ -784,13 +1104,19 @@ func (h *Handler) listChainNodesForTunnel(tunnelID int64) ([]chainNodeRecord, er
 	return h.repo.ListChainNodesForTunnel(tunnelID)
 }
 
-func (h *Handler) tcpPingViaNode(nodeID int64, ip string, port int) (map[string]interface{}, error) {
-	res, err := h.sendNodeCommand(nodeID, "TcpPing", map[string]interface{}{
+func (h *Handler) tcpPingViaNode(nodeID int64, ip string, port int, options diagnosisExecOptions) (map[string]interface{}, error) {
+	if options.commandTimeout <= 0 {
+		options.commandTimeout = diagnosisCommandTimeout
+	}
+	if options.pingTimeoutMS <= 0 {
+		options.pingTimeoutMS = int(diagnosisCommandTimeout / time.Millisecond)
+	}
+	res, err := h.sendNodeCommandWithTimeout(nodeID, "TcpPing", map[string]interface{}{
 		"ip":      ip,
 		"port":    port,
 		"count":   4,
-		"timeout": 5000,
-	}, false, false)
+		"timeout": options.pingTimeoutMS,
+	}, options.commandTimeout, false, false)
 	if err != nil {
 		return nil, err
 	}
@@ -800,7 +1126,7 @@ func (h *Handler) tcpPingViaNode(nodeID int64, ip string, port int) (map[string]
 	return res.Data, nil
 }
 
-func (h *Handler) tcpPingViaRemoteNode(node *nodeRecord, ip string, port int) (map[string]interface{}, error) {
+func (h *Handler) tcpPingViaRemoteNode(node *nodeRecord, ip string, port int, options diagnosisExecOptions) (map[string]interface{}, error) {
 	if node == nil {
 		return nil, errors.New("节点不存在")
 	}
@@ -809,13 +1135,19 @@ func (h *Handler) tcpPingViaRemoteNode(node *nodeRecord, ip string, port int) (m
 	if remoteURL == "" || remoteToken == "" {
 		return nil, errors.New("远程节点缺少共享配置")
 	}
+	if options.commandTimeout <= 0 {
+		options.commandTimeout = diagnosisCommandTimeout
+	}
+	if options.pingTimeoutMS <= 0 {
+		options.pingTimeoutMS = int(diagnosisCommandTimeout / time.Millisecond)
+	}
 
-	fc := client.NewFederationClient()
+	fc := client.NewFederationClientWithTimeout(options.commandTimeout)
 	return fc.Diagnose(remoteURL, remoteToken, h.federationLocalDomain(), client.RuntimeDiagnoseRequest{
 		IP:      strings.TrimSpace(ip),
 		Port:    port,
 		Count:   4,
-		Timeout: 5000,
+		Timeout: options.pingTimeoutMS,
 	})
 }
 
