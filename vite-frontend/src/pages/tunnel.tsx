@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import toast from "react-hot-toast";
 import {
   DndContext,
@@ -53,6 +53,7 @@ import {
   getDiagnosisQualityDisplay,
   type DiagnosisResult,
 } from "@/pages/tunnel/diagnosis";
+import { diagnoseTunnelStream } from "@/api/diagnosis-stream";
 import {
   createTunnelFormDefaults,
   getTunnelFlowDisplay,
@@ -133,6 +134,14 @@ export default function TunnelPage() {
     useState<Tunnel | null>(null);
   const [diagnosisResult, setDiagnosisResult] =
     useState<DiagnosisResult | null>(null);
+  const [diagnosisProgress, setDiagnosisProgress] = useState({
+    total: 0,
+    completed: 0,
+    success: 0,
+    failed: 0,
+    timedOut: false,
+  });
+  const diagnosisAbortRef = useRef<AbortController | null>(null);
 
   // 表单状态
   const [form, setForm] = useState<TunnelForm>(createTunnelFormDefaults());
@@ -145,6 +154,13 @@ export default function TunnelPage() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [batchDeleteModalOpen, setBatchDeleteModalOpen] = useState(false);
   const [batchLoading, setBatchLoading] = useState(false);
+
+  useEffect(() => {
+    return () => {
+      diagnosisAbortRef.current?.abort();
+      diagnosisAbortRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     loadData();
@@ -434,28 +450,158 @@ export default function TunnelPage() {
 
   // 诊断隧道
   const handleDiagnose = async (tunnel: Tunnel) => {
+    diagnosisAbortRef.current?.abort();
+    const abortController = new AbortController();
+    diagnosisAbortRef.current = abortController;
+
     setCurrentDiagnosisTunnel(tunnel);
     setDiagnosisModalOpen(true);
     setDiagnosisLoading(true);
-    setDiagnosisResult(null);
+    setDiagnosisProgress({
+      total: 0,
+      completed: 0,
+      success: 0,
+      failed: 0,
+      timedOut: false,
+    });
+    setDiagnosisResult({
+      tunnelName: tunnel.name,
+      tunnelType: tunnel.type === 1 ? "端口转发" : "隧道转发",
+      timestamp: Date.now(),
+      results: [],
+    });
 
     try {
-      const response = await diagnoseTunnel(tunnel.id);
+      let streamErrorMessage = "";
+      const streamResult = await diagnoseTunnelStream(
+        tunnel.id,
+        {
+          onStart: (payload) => {
+            const startTunnelName =
+              typeof payload.tunnelName === "string" &&
+              payload.tunnelName.trim() !== ""
+                ? payload.tunnelName
+                : tunnel.name;
+            const startTunnelType =
+              typeof payload.tunnelType === "string" &&
+              payload.tunnelType.trim() !== ""
+                ? payload.tunnelType
+                : tunnel.type === 1
+                  ? "端口转发"
+                  : "隧道转发";
+            const startTotal = Number(payload.total);
+            setDiagnosisResult((prev) => ({
+              tunnelName: startTunnelName,
+              tunnelType: startTunnelType,
+              timestamp: Date.now(),
+              results: prev?.results || [],
+            }));
+            if (Number.isFinite(startTotal) && startTotal >= 0) {
+              setDiagnosisProgress((prev) => ({
+                ...prev,
+                total: startTotal,
+              }));
+            }
+          },
+          onItem: ({ result, progress }) => {
+            setDiagnosisResult((prev) => {
+              const base: DiagnosisResult = prev || {
+                tunnelName: tunnel.name,
+                tunnelType: tunnel.type === 1 ? "端口转发" : "隧道转发",
+                timestamp: Date.now(),
+                results: [],
+              };
+              const nextResults = [...base.results];
+              const existingIndex = nextResults.findIndex(
+                (item) =>
+                  item.description === result.description &&
+                  item.nodeId === result.nodeId &&
+                  item.targetIp === result.targetIp &&
+                  item.targetPort === result.targetPort,
+              );
 
-      if (response.code === 0) {
-        setDiagnosisResult(response.data as DiagnosisResult);
-      } else {
-        toast.error(response.msg || "诊断失败");
-        setDiagnosisResult(
-          buildDiagnosisFallbackResult({
-            tunnelName: tunnel.name,
-            tunnelType: tunnel.type,
-            description: "诊断失败",
-            message: response.msg || "诊断过程中发生错误",
-          }),
-        );
+              if (existingIndex >= 0) {
+                nextResults[existingIndex] = result;
+              } else {
+                nextResults.push(result);
+              }
+              return {
+                ...base,
+                timestamp: Date.now(),
+                results: nextResults,
+              };
+            });
+            setDiagnosisProgress({
+              total: progress.total,
+              completed: progress.completed,
+              success: progress.success,
+              failed: progress.failed,
+              timedOut: Boolean(progress.timedOut),
+            });
+          },
+          onDone: (progress) => {
+            setDiagnosisProgress({
+              total: progress.total,
+              completed: progress.completed,
+              success: progress.success,
+              failed: progress.failed,
+              timedOut: Boolean(progress.timedOut),
+            });
+          },
+          onError: (message) => {
+            streamErrorMessage = message;
+          },
+        },
+        abortController.signal,
+      );
+
+      if (streamResult.fallback) {
+        const response = await diagnoseTunnel(tunnel.id);
+
+        if (response.code === 0) {
+          const resultData = response.data as DiagnosisResult;
+          const successCount = resultData.results.filter((r) => r.success).length;
+          const failedCount = resultData.results.length - successCount;
+          setDiagnosisResult(resultData);
+          setDiagnosisProgress({
+            total: resultData.results.length,
+            completed: resultData.results.length,
+            success: successCount,
+            failed: failedCount,
+            timedOut: false,
+          });
+        } else {
+          toast.error(response.msg || "诊断失败");
+          setDiagnosisResult(
+            buildDiagnosisFallbackResult({
+              tunnelName: tunnel.name,
+              tunnelType: tunnel.type,
+              description: "诊断失败",
+              message: response.msg || "诊断过程中发生错误",
+            }),
+          );
+          setDiagnosisProgress({
+            total: 1,
+            completed: 1,
+            success: 0,
+            failed: 1,
+            timedOut: false,
+          });
+        }
+
+        return;
+      }
+
+      if (streamErrorMessage) {
+        toast.error(streamErrorMessage);
+      }
+      if (streamResult.timedOut) {
+        toast.error("诊断达到2分钟超时，已返回当前结果");
       }
     } catch {
+      if (abortController.signal.aborted) {
+        return;
+      }
       toast.error("网络错误，请重试");
       setDiagnosisResult(
         buildDiagnosisFallbackResult({
@@ -465,7 +611,17 @@ export default function TunnelPage() {
           message: "无法连接到服务器",
         }),
       );
+      setDiagnosisProgress({
+        total: 1,
+        completed: 1,
+        success: 0,
+        failed: 1,
+        timedOut: false,
+      });
     } finally {
+      if (diagnosisAbortRef.current === abortController) {
+        diagnosisAbortRef.current = null;
+      }
       setDiagnosisLoading(false);
     }
   };
@@ -1914,7 +2070,14 @@ export default function TunnelPage() {
         placement="center"
         scrollBehavior="inside"
         size="4xl"
-        onOpenChange={setDiagnosisModalOpen}
+        onOpenChange={(open) => {
+          setDiagnosisModalOpen(open);
+          if (!open) {
+            diagnosisAbortRef.current?.abort();
+            diagnosisAbortRef.current = null;
+            setDiagnosisLoading(false);
+          }
+        }}
       >
         <ModalContent>
           {(onClose) => (
@@ -1943,7 +2106,8 @@ export default function TunnelPage() {
                 )}
               </ModalHeader>
               <ModalBody className="bg-content1">
-                {diagnosisLoading ? (
+                {diagnosisLoading &&
+                (!diagnosisResult || diagnosisResult.results.length === 0) ? (
                   <div className="flex items-center justify-center py-16">
                     <div className="flex items-center gap-3">
                       <Spinner size="sm" />
@@ -1952,11 +2116,39 @@ export default function TunnelPage() {
                   </div>
                 ) : diagnosisResult ? (
                   <div className="space-y-4">
+                    {diagnosisLoading && (
+                      <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 px-3 py-2">
+                        <div className="flex items-center gap-2 text-sm text-primary">
+                          <Spinner size="sm" />
+                          <span>
+                            正在诊断 {diagnosisProgress.completed}/
+                            {diagnosisProgress.total > 0
+                              ? diagnosisProgress.total
+                              : "?"}
+                          </span>
+                        </div>
+                        <Chip color="primary" size="sm" variant="flat">
+                          流式更新中
+                        </Chip>
+                      </div>
+                    )}
+
+                    {diagnosisProgress.timedOut && (
+                      <Alert
+                        color="warning"
+                        description="诊断已达到2分钟超时，以下为当前已完成结果。"
+                        title="诊断超时"
+                        variant="flat"
+                      />
+                    )}
+
                     {/* 统计摘要 */}
                     <div className="grid grid-cols-3 gap-3">
                       <div className="text-center p-3 bg-default-100 dark:bg-gray-800 rounded-lg border border-divider">
                         <div className="text-2xl font-bold text-foreground">
-                          {diagnosisResult.results.length}
+                          {diagnosisProgress.total > 0
+                            ? diagnosisProgress.total
+                            : diagnosisResult.results.length}
                         </div>
                         <div className="text-xs text-default-500 mt-1">
                           总测试数
@@ -1964,10 +2156,11 @@ export default function TunnelPage() {
                       </div>
                       <div className="text-center p-3 bg-success-50 dark:bg-success-900/20 rounded-lg border border-success-200 dark:border-success-700">
                         <div className="text-2xl font-bold text-success-600 dark:text-success-400">
-                          {
-                            diagnosisResult.results.filter((r) => r.success)
-                              .length
-                          }
+                          {diagnosisProgress.completed > 0 ||
+                          diagnosisProgress.total > 0
+                            ? diagnosisProgress.success
+                            : diagnosisResult.results.filter((r) => r.success)
+                                .length}
                         </div>
                         <div className="text-xs text-success-600 dark:text-success-400/80 mt-1">
                           成功
@@ -1975,10 +2168,11 @@ export default function TunnelPage() {
                       </div>
                       <div className="text-center p-3 bg-danger-50 dark:bg-danger-900/20 rounded-lg border border-danger-200 dark:border-danger-700">
                         <div className="text-2xl font-bold text-danger-600 dark:text-danger-400">
-                          {
-                            diagnosisResult.results.filter((r) => !r.success)
-                              .length
-                          }
+                          {diagnosisProgress.completed > 0 ||
+                          diagnosisProgress.total > 0
+                            ? diagnosisProgress.failed
+                            : diagnosisResult.results.filter((r) => !r.success)
+                                .length}
                         </div>
                         <div className="text-xs text-danger-600 dark:text-danger-400/80 mt-1">
                           失败

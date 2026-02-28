@@ -1,6 +1,6 @@
 import type { SpeedLimitApiItem } from "@/api/types";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import toast from "react-hot-toast";
 import {
   DndContext,
@@ -76,6 +76,7 @@ import {
   getForwardDiagnosisQualityDisplay,
   type ForwardDiagnosisResult,
 } from "@/pages/forward/diagnosis";
+import { diagnoseForwardStream } from "@/api/diagnosis-stream";
 import {
   executeForwardBatchChangeTunnel,
   executeForwardBatchDelete,
@@ -133,10 +134,17 @@ interface ForwardForm {
 interface ForwardUserGroup {
   userId: number;
   userName: string;
+  tunnels: ForwardTunnelGroup[];
+}
+
+interface ForwardTunnelGroup {
+  tunnelKey: string;
+  tunnelName: string;
   items: Forward[];
 }
 
 const UNKNOWN_FORWARD_USER_NAME = "未知用户";
+const UNCATEGORIZED_FORWARD_TUNNEL_NAME = "未分类";
 
 const normalizeForwardUserName = (userName?: string): string => {
   const normalized = (userName || UNKNOWN_FORWARD_USER_NAME).trim();
@@ -145,6 +153,29 @@ const normalizeForwardUserName = (userName?: string): string => {
 };
 
 const compareForwardUserNameAsc = (a: string, b: string): number => {
+  return a.localeCompare(b, "en", {
+    sensitivity: "base",
+    numeric: true,
+  });
+};
+
+const normalizeForwardTunnelName = (tunnelName?: string): string => {
+  const normalized = (tunnelName || "").trim();
+
+  return normalized || UNCATEGORIZED_FORWARD_TUNNEL_NAME;
+};
+
+const buildForwardTunnelGroupKey = (tunnelName?: string): string => {
+  const normalized = normalizeForwardTunnelName(tunnelName);
+
+  if (normalized === UNCATEGORIZED_FORWARD_TUNNEL_NAME) {
+    return "__uncategorized__";
+  }
+
+  return normalized.toLocaleLowerCase();
+};
+
+const compareForwardTunnelNameAsc = (a: string, b: string): number => {
   return a.localeCompare(b, "en", {
     sensitivity: "base",
     numeric: true,
@@ -198,6 +229,14 @@ export default function ForwardPage() {
     useState<Forward | null>(null);
   const [diagnosisResult, setDiagnosisResult] =
     useState<ForwardDiagnosisResult | null>(null);
+  const [diagnosisProgress, setDiagnosisProgress] = useState({
+    total: 0,
+    completed: 0,
+    success: 0,
+    failed: 0,
+    timedOut: false,
+  });
+  const diagnosisAbortRef = useRef<AbortController | null>(null);
   const [addressModalTitle, setAddressModalTitle] = useState("");
   const [addressList, setAddressList] = useState<ForwardAddressItem[]>([]);
 
@@ -249,6 +288,13 @@ export default function ForwardPage() {
     null,
   );
   const [batchLoading, setBatchLoading] = useState(false);
+
+  useEffect(() => {
+    return () => {
+      diagnosisAbortRef.current?.abort();
+      diagnosisAbortRef.current = null;
+    };
+  }, []);
 
   const parseShareIdFromTunnelName = (tunnelName: string): number | null => {
     const normalized = (tunnelName || "").trim();
@@ -800,28 +846,148 @@ export default function ForwardPage() {
 
   // 诊断转发
   const handleDiagnose = async (forward: Forward) => {
+    diagnosisAbortRef.current?.abort();
+    const abortController = new AbortController();
+    diagnosisAbortRef.current = abortController;
+
     setCurrentDiagnosisForward(forward);
     setDiagnosisModalOpen(true);
     setDiagnosisLoading(true);
-    setDiagnosisResult(null);
+    setDiagnosisProgress({
+      total: 0,
+      completed: 0,
+      success: 0,
+      failed: 0,
+      timedOut: false,
+    });
+    setDiagnosisResult({
+      forwardName: forward.name,
+      timestamp: Date.now(),
+      results: [],
+    });
 
     try {
-      const response = await diagnoseForward(forward.id);
+      let streamErrorMessage = "";
+      const streamResult = await diagnoseForwardStream(
+        forward.id,
+        {
+          onStart: (payload) => {
+            const startForwardName =
+              typeof payload.forwardName === "string" &&
+              payload.forwardName.trim() !== ""
+                ? payload.forwardName
+                : forward.name;
+            const startTotal = Number(payload.total);
+            setDiagnosisResult((prev) => ({
+              forwardName: startForwardName,
+              timestamp: Date.now(),
+              results: prev?.results || [],
+            }));
+            if (Number.isFinite(startTotal) && startTotal >= 0) {
+              setDiagnosisProgress((prev) => ({
+                ...prev,
+                total: startTotal,
+              }));
+            }
+          },
+          onItem: ({ result, progress }) => {
+            setDiagnosisResult((prev) => {
+              const base: ForwardDiagnosisResult = prev || {
+                forwardName: forward.name,
+                timestamp: Date.now(),
+                results: [],
+              };
+              const nextResults = [...base.results];
+              const existingIndex = nextResults.findIndex(
+                (item) =>
+                  item.description === result.description &&
+                  item.nodeId === result.nodeId &&
+                  item.targetIp === result.targetIp &&
+                  item.targetPort === result.targetPort,
+              );
 
-      if (response.code === 0) {
-        setDiagnosisResult(response.data as ForwardDiagnosisResult);
-      } else {
-        toast.error(response.msg || "诊断失败");
-        setDiagnosisResult(
-          buildForwardDiagnosisFallbackResult({
-            forwardName: forward.name,
-            remoteAddr: forward.remoteAddr,
-            description: "诊断失败",
-            message: response.msg || "诊断过程中发生错误",
-          }),
-        );
+              if (existingIndex >= 0) {
+                nextResults[existingIndex] = result;
+              } else {
+                nextResults.push(result);
+              }
+              return {
+                ...base,
+                timestamp: Date.now(),
+                results: nextResults,
+              };
+            });
+            setDiagnosisProgress({
+              total: progress.total,
+              completed: progress.completed,
+              success: progress.success,
+              failed: progress.failed,
+              timedOut: Boolean(progress.timedOut),
+            });
+          },
+          onDone: (progress) => {
+            setDiagnosisProgress({
+              total: progress.total,
+              completed: progress.completed,
+              success: progress.success,
+              failed: progress.failed,
+              timedOut: Boolean(progress.timedOut),
+            });
+          },
+          onError: (message) => {
+            streamErrorMessage = message;
+          },
+        },
+        abortController.signal,
+      );
+
+      if (streamResult.fallback) {
+        const response = await diagnoseForward(forward.id);
+
+        if (response.code === 0) {
+          const resultData = response.data as ForwardDiagnosisResult;
+          const successCount = resultData.results.filter((r) => r.success).length;
+          const failedCount = resultData.results.length - successCount;
+          setDiagnosisResult(resultData);
+          setDiagnosisProgress({
+            total: resultData.results.length,
+            completed: resultData.results.length,
+            success: successCount,
+            failed: failedCount,
+            timedOut: false,
+          });
+        } else {
+          toast.error(response.msg || "诊断失败");
+          setDiagnosisResult(
+            buildForwardDiagnosisFallbackResult({
+              forwardName: forward.name,
+              remoteAddr: forward.remoteAddr,
+              description: "诊断失败",
+              message: response.msg || "诊断过程中发生错误",
+            }),
+          );
+          setDiagnosisProgress({
+            total: 1,
+            completed: 1,
+            success: 0,
+            failed: 1,
+            timedOut: false,
+          });
+        }
+
+        return;
+      }
+
+      if (streamErrorMessage) {
+        toast.error(streamErrorMessage);
+      }
+      if (streamResult.timedOut) {
+        toast.error("诊断达到2分钟超时，已返回当前结果");
       }
     } catch {
+      if (abortController.signal.aborted) {
+        return;
+      }
       toast.error("网络错误，请重试");
       setDiagnosisResult(
         buildForwardDiagnosisFallbackResult({
@@ -831,7 +997,17 @@ export default function ForwardPage() {
           message: "无法连接到服务器",
         }),
       );
+      setDiagnosisProgress({
+        total: 1,
+        completed: 1,
+        success: 0,
+        failed: 1,
+        timedOut: false,
+      });
     } finally {
+      if (diagnosisAbortRef.current === abortController) {
+        diagnosisAbortRef.current = null;
+      }
       setDiagnosisLoading(false);
     }
   };
@@ -1170,9 +1346,13 @@ export default function ForwardPage() {
     const overForward = forwards.find((forward) => forward.id === overId);
     const activeUserId = activeForward?.userId ?? 0;
     const overUserId = overForward?.userId ?? 0;
+    const activeTunnelGroupKey = buildForwardTunnelGroupKey(
+      activeForward?.tunnelName,
+    );
+    const overTunnelGroupKey = buildForwardTunnelGroupKey(overForward?.tunnelName);
 
-    // 仅允许在同一用户分组内拖拽，避免不同用户数据混排
-    if (activeUserId !== overUserId) {
+    // 仅允许在同一用户+隧道分组内拖拽，避免混排
+    if (activeUserId !== overUserId || activeTunnelGroupKey !== overTunnelGroupKey) {
       return;
     }
 
@@ -1469,34 +1649,86 @@ export default function ForwardPage() {
       return [];
     }
 
-    const userGroupMap = new Map<number, ForwardUserGroup>();
+    type MutableForwardUserGroup = {
+      userId: number;
+      userName: string;
+      tunnelMap: Map<string, ForwardTunnelGroup>;
+    };
+
+    const userGroupMap = new Map<number, MutableForwardUserGroup>();
 
     orderedForwards.forEach((forward) => {
       const userId = forward.userId ?? 0;
       const userName = normalizeForwardUserName(forward.userName);
-      const existingGroup = userGroupMap.get(userId);
+      const tunnelName = normalizeForwardTunnelName(forward.tunnelName);
+      const tunnelKey = buildForwardTunnelGroupKey(forward.tunnelName);
+
+      let existingGroup = userGroupMap.get(userId);
 
       if (!existingGroup) {
-        userGroupMap.set(userId, {
+        existingGroup = {
           userId,
           userName,
+          tunnelMap: new Map<string, ForwardTunnelGroup>(),
+        };
+        userGroupMap.set(userId, existingGroup);
+      } else if (
+        existingGroup.userName === UNKNOWN_FORWARD_USER_NAME &&
+        userName !== UNKNOWN_FORWARD_USER_NAME
+      ) {
+        existingGroup.userName = userName;
+      }
+
+      const existingTunnelGroup = existingGroup.tunnelMap.get(tunnelKey);
+
+      if (!existingTunnelGroup) {
+        existingGroup.tunnelMap.set(tunnelKey, {
+          tunnelKey,
+          tunnelName,
           items: [forward],
         });
 
         return;
       }
 
-      existingGroup.items.push(forward);
+      existingTunnelGroup.items.push(forward);
 
       if (
-        existingGroup.userName === UNKNOWN_FORWARD_USER_NAME &&
-        userName !== UNKNOWN_FORWARD_USER_NAME
+        existingTunnelGroup.tunnelName === UNCATEGORIZED_FORWARD_TUNNEL_NAME &&
+        tunnelName !== UNCATEGORIZED_FORWARD_TUNNEL_NAME
       ) {
-        existingGroup.userName = userName;
+        existingTunnelGroup.tunnelName = tunnelName;
       }
     });
 
-    const groups = Array.from(userGroupMap.values());
+    const groups = Array.from(userGroupMap.values()).map((group) => {
+      const tunnels = Array.from(group.tunnelMap.values());
+
+      tunnels.sort((a, b) => {
+        const aIsUncategorized =
+          a.tunnelName === UNCATEGORIZED_FORWARD_TUNNEL_NAME;
+        const bIsUncategorized =
+          b.tunnelName === UNCATEGORIZED_FORWARD_TUNNEL_NAME;
+
+        if (aIsUncategorized !== bIsUncategorized) {
+          return aIsUncategorized ? 1 : -1;
+        }
+
+        const nameCompare = compareForwardTunnelNameAsc(a.tunnelName, b.tunnelName);
+
+        if (nameCompare !== 0) {
+          return nameCompare;
+        }
+
+        return compareForwardTunnelNameAsc(a.tunnelKey, b.tunnelKey);
+      });
+
+      return {
+        userId: group.userId,
+        userName: group.userName,
+        tunnels,
+      };
+    });
 
     groups.sort((a, b) => {
       if (isAdmin && tokenUserId !== null) {
@@ -1521,7 +1753,10 @@ export default function ForwardPage() {
   }, [orderedForwards, isAdmin, tokenUserId]);
 
   const sortedForwards = useMemo(
-    () => groupedForwards.flatMap((group) => group.items),
+    () =>
+      groupedForwards.flatMap((group) =>
+        group.tunnels.flatMap((tunnel) => tunnel.items),
+      ),
     [groupedForwards],
   );
 
@@ -1672,17 +1907,6 @@ export default function ForwardPage() {
         </TableCell>
         <TableCell className="whitespace-nowrap font-semibold text-foreground">
           {forward.name}
-        </TableCell>
-        <TableCell className="whitespace-nowrap">
-          <Chip
-            className="border-none bg-secondary/10 px-2"
-            color="secondary"
-            size="sm"
-          >
-            <span className="font-medium text-secondary-700">
-              {forward.tunnelName}
-            </span>
-          </Chip>
         </TableCell>
         <TableCell className="max-w-[220px]">
           <button
@@ -1837,7 +2061,7 @@ export default function ForwardPage() {
                 {forward.name}
               </h3>
               <p className="text-xs text-default-500 truncate">
-                {forward.tunnelName}
+                {normalizeForwardTunnelName(forward.tunnelName)}
               </p>
             </div>
             <div className="flex items-center gap-1.5 ml-2">
@@ -2322,11 +2546,12 @@ export default function ForwardPage() {
         sortedForwards.length > 0 ? (
           <div className="space-y-4">
             {groupedForwards.map((group) => {
-              const groupSortableForwardIds = group.items
-                .map((item) => item.id)
-                .filter((id) => id > 0);
               const isSelfGroup =
                 isAdmin && tokenUserId !== null && group.userId === tokenUserId;
+              const groupForwardCount = group.tunnels.reduce(
+                (total, tunnel) => total + tunnel.items.length,
+                0,
+              );
 
               return (
                 <div
@@ -2345,65 +2570,91 @@ export default function ForwardPage() {
                       )}
                     </div>
                     <span className="text-xs text-default-600">
-                      {group.items.length} 条转发
+                      {groupForwardCount} 条转发
                     </span>
                   </div>
 
-                  <DndContext
-                    collisionDetection={closestCenter}
-                    sensors={sensors}
-                    onDragEnd={handleDragEnd}
-                  >
-                    <Table
-                      aria-label={`${group.userName}转发列表`}
-                      classNames={{
-                        th: "bg-default-100/50 text-default-600 font-semibold text-sm border-b border-divider py-3 uppercase tracking-wider",
-                        td: "py-3 border-b border-divider/50 group-data-[last=true]:border-b-0",
-                        tr: "hover:bg-default-50/50 transition-colors",
-                      }}
-                    >
-                      <TableHeader>
-                        {selectMode && (
-                          <TableColumn className="w-14">选择</TableColumn>
-                        )}
-                        <TableColumn className="w-10 pl-4" />
-                        <TableColumn>名称</TableColumn>
-                        <TableColumn>隧道</TableColumn>
-                        <TableColumn>入口</TableColumn>
-                        <TableColumn>目标</TableColumn>
-                        <TableColumn>策略</TableColumn>
-                        <TableColumn>总流量</TableColumn>
-                        <TableColumn>状态</TableColumn>
-                        <TableColumn className="text-right">操作</TableColumn>
-                      </TableHeader>
-                      <TableBody emptyContent="暂无转发配置" items={group.items}>
-                        {(forward) => (
-                          <SortableContext
-                            key={forward.id}
-                            items={groupSortableForwardIds}
-                            strategy={verticalListSortingStrategy}
+                  <div className="space-y-4 p-4">
+                    {group.tunnels.map((tunnel) => {
+                      const tunnelSortableForwardIds = tunnel.items
+                        .map((item) => item.id)
+                        .filter((id) => id > 0);
+
+                      return (
+                        <div
+                          key={`grouped-table-${group.userId}-${tunnel.tunnelKey}`}
+                          className="overflow-hidden rounded-lg border border-secondary/20 bg-secondary/5"
+                        >
+                          <div className="flex items-center justify-between border-b border-secondary/20 bg-secondary/10 px-4 py-2.5">
+                            <span className="text-sm font-semibold text-secondary-700">
+                              {tunnel.tunnelName}
+                            </span>
+                            <span className="text-xs text-secondary-700">
+                              {tunnel.items.length} 条转发
+                            </span>
+                          </div>
+
+                          <DndContext
+                            collisionDetection={closestCenter}
+                            sensors={sensors}
+                            onDragEnd={handleDragEnd}
                           >
-                            <SortableTableRow
-                              formatFlow={formatFlow}
-                              formatInAddress={formatInAddress}
-                              formatRemoteAddress={formatRemoteAddress}
-                              forward={forward}
-                              getStrategyDisplay={getStrategyDisplay}
-                              handleDelete={handleDelete}
-                              handleDiagnose={handleDiagnose}
-                              handleEdit={handleEdit}
-                              handleServiceToggle={handleServiceToggle}
-                              hasMultipleAddresses={hasMultipleAddresses}
-                              selectMode={selectMode}
-                              selectedIds={selectedIds}
-                              showAddressModal={showAddressModal}
-                              toggleSelect={toggleSelect}
-                            />
-                          </SortableContext>
-                        )}
-                      </TableBody>
-                    </Table>
-                  </DndContext>
+                            <Table
+                              aria-label={`${group.userName}-${tunnel.tunnelName}转发列表`}
+                              classNames={{
+                                th: "bg-default-100/50 text-default-600 font-semibold text-sm border-b border-divider py-3 uppercase tracking-wider",
+                                td: "py-3 border-b border-divider/50 group-data-[last=true]:border-b-0",
+                                tr: "hover:bg-default-50/50 transition-colors",
+                              }}
+                            >
+                              <TableHeader>
+                                {selectMode && (
+                                  <TableColumn className="w-14">选择</TableColumn>
+                                )}
+                                <TableColumn className="w-10 pl-4" />
+                                <TableColumn>名称</TableColumn>
+                                <TableColumn>入口</TableColumn>
+                                <TableColumn>目标</TableColumn>
+                                <TableColumn>策略</TableColumn>
+                                <TableColumn>总流量</TableColumn>
+                                <TableColumn>状态</TableColumn>
+                                <TableColumn className="text-right">操作</TableColumn>
+                              </TableHeader>
+                              <TableBody
+                                emptyContent="暂无转发配置"
+                                items={tunnel.items}
+                              >
+                                {(forward) => (
+                                  <SortableContext
+                                    key={forward.id}
+                                    items={tunnelSortableForwardIds}
+                                    strategy={verticalListSortingStrategy}
+                                  >
+                                    <SortableTableRow
+                                      formatFlow={formatFlow}
+                                      formatInAddress={formatInAddress}
+                                      formatRemoteAddress={formatRemoteAddress}
+                                      forward={forward}
+                                      getStrategyDisplay={getStrategyDisplay}
+                                      handleDelete={handleDelete}
+                                      handleDiagnose={handleDiagnose}
+                                      handleEdit={handleEdit}
+                                      handleServiceToggle={handleServiceToggle}
+                                      hasMultipleAddresses={hasMultipleAddresses}
+                                      selectMode={selectMode}
+                                      selectedIds={selectedIds}
+                                      showAddressModal={showAddressModal}
+                                      toggleSelect={toggleSelect}
+                                    />
+                                  </SortableContext>
+                                )}
+                              </TableBody>
+                            </Table>
+                          </DndContext>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               );
             })}
@@ -2425,11 +2676,12 @@ export default function ForwardPage() {
       sortedForwards.length > 0 ? (
         <div className="space-y-5">
           {groupedForwards.map((group) => {
-            const groupSortableForwardIds = group.items
-              .map((item) => item.id)
-              .filter((id) => id > 0);
             const isSelfGroup =
               isAdmin && tokenUserId !== null && group.userId === tokenUserId;
+            const groupForwardCount = group.tunnels.reduce(
+              (total, tunnel) => total + tunnel.items.length,
+              0,
+            );
 
             return (
               <div
@@ -2445,32 +2697,59 @@ export default function ForwardPage() {
                       <Chip color="primary" size="sm" variant="flat">
                         管理员本人
                       </Chip>
-                    )}
+                      )}
                   </div>
                   <span className="text-xs text-default-600">
-                    {group.items.length} 条转发
+                    {groupForwardCount} 条转发
                   </span>
                 </div>
 
-                <DndContext
-                  collisionDetection={closestCenter}
-                  sensors={sensors}
-                  onDragEnd={handleDragEnd}
-                  onDragStart={() => {}} // 添加空的 onDragStart 处理器
-                >
-                  <SortableContext
-                    items={groupSortableForwardIds}
-                    strategy={rectSortingStrategy}
-                  >
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
-                      {group.items.map((forward) =>
-                        forward && forward.id ? (
-                          <SortableForwardCard key={forward.id} forward={forward} />
-                        ) : null,
-                      )}
-                    </div>
-                  </SortableContext>
-                </DndContext>
+                <div className="space-y-4">
+                  {group.tunnels.map((tunnel) => {
+                    const tunnelSortableForwardIds = tunnel.items
+                      .map((item) => item.id)
+                      .filter((id) => id > 0);
+
+                    return (
+                      <div
+                        key={`direct-group-${group.userId}-${tunnel.tunnelKey}`}
+                        className="rounded-xl border border-secondary/20 bg-secondary/5 p-3 space-y-3"
+                      >
+                        <div className="flex items-center justify-between rounded-lg bg-secondary/10 px-3 py-2">
+                          <span className="text-sm font-semibold text-secondary-700">
+                            {tunnel.tunnelName}
+                          </span>
+                          <span className="text-xs text-secondary-700">
+                            {tunnel.items.length} 条转发
+                          </span>
+                        </div>
+
+                        <DndContext
+                          collisionDetection={closestCenter}
+                          sensors={sensors}
+                          onDragEnd={handleDragEnd}
+                          onDragStart={() => {}} // 添加空的 onDragStart 处理器
+                        >
+                          <SortableContext
+                            items={tunnelSortableForwardIds}
+                            strategy={rectSortingStrategy}
+                          >
+                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
+                              {tunnel.items.map((forward) =>
+                                forward && forward.id ? (
+                                  <SortableForwardCard
+                                    key={forward.id}
+                                    forward={forward}
+                                  />
+                                ) : null,
+                              )}
+                            </div>
+                          </SortableContext>
+                        </DndContext>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             );
           })}
@@ -3085,7 +3364,14 @@ export default function ForwardPage() {
         placement="center"
         scrollBehavior="inside"
         size="4xl"
-        onOpenChange={setDiagnosisModalOpen}
+        onOpenChange={(open) => {
+          setDiagnosisModalOpen(open);
+          if (!open) {
+            diagnosisAbortRef.current?.abort();
+            diagnosisAbortRef.current = null;
+            setDiagnosisLoading(false);
+          }
+        }}
       >
         <ModalContent>
           {(onClose) => (
@@ -3109,7 +3395,8 @@ export default function ForwardPage() {
                 )}
               </ModalHeader>
               <ModalBody className="bg-content1">
-                {diagnosisLoading ? (
+                {diagnosisLoading &&
+                (!diagnosisResult || diagnosisResult.results.length === 0) ? (
                   <div className="flex items-center justify-center py-16">
                     <div className="flex items-center gap-3">
                       <Spinner size="sm" />
@@ -3118,11 +3405,39 @@ export default function ForwardPage() {
                   </div>
                 ) : diagnosisResult ? (
                   <div className="space-y-4">
+                    {diagnosisLoading && (
+                      <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 px-3 py-2">
+                        <div className="flex items-center gap-2 text-sm text-primary">
+                          <Spinner size="sm" />
+                          <span>
+                            正在诊断 {diagnosisProgress.completed}/
+                            {diagnosisProgress.total > 0
+                              ? diagnosisProgress.total
+                              : "?"}
+                          </span>
+                        </div>
+                        <Chip color="primary" size="sm" variant="flat">
+                          流式更新中
+                        </Chip>
+                      </div>
+                    )}
+
+                    {diagnosisProgress.timedOut && (
+                      <Alert
+                        color="warning"
+                        description="诊断已达到2分钟超时，以下为当前已完成结果。"
+                        title="诊断超时"
+                        variant="flat"
+                      />
+                    )}
+
                     {/* 统计摘要 */}
                     <div className="grid grid-cols-3 gap-3">
                       <div className="text-center p-3 bg-default-100 dark:bg-gray-800 rounded-lg border border-divider">
                         <div className="text-2xl font-bold text-foreground">
-                          {diagnosisResult.results.length}
+                          {diagnosisProgress.total > 0
+                            ? diagnosisProgress.total
+                            : diagnosisResult.results.length}
                         </div>
                         <div className="text-xs text-default-500 mt-1">
                           总测试数
@@ -3130,10 +3445,11 @@ export default function ForwardPage() {
                       </div>
                       <div className="text-center p-3 bg-success-50 dark:bg-success-900/20 rounded-lg border border-success-200 dark:border-success-700">
                         <div className="text-2xl font-bold text-success-600 dark:text-success-400">
-                          {
-                            diagnosisResult.results.filter((r) => r.success)
-                              .length
-                          }
+                          {diagnosisProgress.completed > 0 ||
+                          diagnosisProgress.total > 0
+                            ? diagnosisProgress.success
+                            : diagnosisResult.results.filter((r) => r.success)
+                                .length}
                         </div>
                         <div className="text-xs text-success-600 dark:text-success-400/80 mt-1">
                           成功
@@ -3141,10 +3457,11 @@ export default function ForwardPage() {
                       </div>
                       <div className="text-center p-3 bg-danger-50 dark:bg-danger-900/20 rounded-lg border border-danger-200 dark:border-danger-700">
                         <div className="text-2xl font-bold text-danger-600 dark:text-danger-400">
-                          {
-                            diagnosisResult.results.filter((r) => !r.success)
-                              .length
-                          }
+                          {diagnosisProgress.completed > 0 ||
+                          diagnosisProgress.total > 0
+                            ? diagnosisProgress.failed
+                            : diagnosisResult.results.filter((r) => !r.success)
+                                .length}
                         </div>
                         <div className="text-xs text-danger-600 dark:text-danger-400/80 mt-1">
                           失败

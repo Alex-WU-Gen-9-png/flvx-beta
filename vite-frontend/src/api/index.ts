@@ -121,7 +121,7 @@ export const diagnoseTunnel = (tunnelId: number) =>
   Network.post<TunnelDiagnosisApiData>(
     "/tunnel/diagnose",
     { tunnelId },
-    { timeout: 60 * 1000 },
+    { timeout: 120 * 1000 },
   );
 export const updateTunnelOrder = (data: {
   tunnels: Array<{ id: number; inx: number }>;
@@ -166,7 +166,7 @@ export const diagnoseForward = (forwardId: number) =>
   Network.post<ForwardDiagnosisApiData>(
     "/forward/diagnose",
     { forwardId },
-    { timeout: 60 * 1000 },
+    { timeout: 120 * 1000 },
   );
 
 // 转发排序操作
