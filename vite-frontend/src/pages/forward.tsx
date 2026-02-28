@@ -130,6 +130,27 @@ interface ForwardForm {
   speedId: number | null;
 }
 
+interface ForwardUserGroup {
+  userId: number;
+  userName: string;
+  items: Forward[];
+}
+
+const UNKNOWN_FORWARD_USER_NAME = "未知用户";
+
+const normalizeForwardUserName = (userName?: string): string => {
+  const normalized = (userName || UNKNOWN_FORWARD_USER_NAME).trim();
+
+  return normalized || UNKNOWN_FORWARD_USER_NAME;
+};
+
+const compareForwardUserNameAsc = (a: string, b: string): number => {
+  return a.localeCompare(b, "en", {
+    sensitivity: "base",
+    numeric: true,
+  });
+};
+
 export default function ForwardPage() {
   const [loading, setLoading] = useState(true);
   const [forwards, setForwards] = useState<Forward[]>([]);
@@ -1145,6 +1166,16 @@ export default function ForwardPage() {
     // 检查 ID 是否有效
     if (isNaN(activeId) || isNaN(overId)) return;
 
+    const activeForward = forwards.find((forward) => forward.id === activeId);
+    const overForward = forwards.find((forward) => forward.id === overId);
+    const activeUserId = activeForward?.userId ?? 0;
+    const overUserId = overForward?.userId ?? 0;
+
+    // 仅允许在同一用户分组内拖拽，避免不同用户数据混排
+    if (activeUserId !== overUserId) {
+      return;
+    }
+
     const oldIndex = forwardOrder.indexOf(activeId);
     const newIndex = forwardOrder.indexOf(overId);
 
@@ -1342,9 +1373,11 @@ export default function ForwardPage() {
   );
 
   const tokenUserId = JwtUtil.getUserIdFromToken();
+  const tokenRoleId = JwtUtil.getRoleIdFromToken();
+  const isAdmin = tokenRoleId === 0;
 
   // 根据排序顺序获取转发列表
-  const sortedForwards = useMemo((): Forward[] => {
+  const orderedForwards = useMemo((): Forward[] => {
     // 确保 forwards 数组存在且有效
     if (!forwards || forwards.length === 0) {
       return [];
@@ -1426,16 +1459,70 @@ export default function ForwardPage() {
   }, [
     forwards,
     forwardOrder,
-    viewMode,
-    tokenUserId,
     filterUserId,
     filterTunnelId,
     searchKeyword,
   ]);
 
-  const sortableForwardIds = useMemo(
-    () => sortedForwards.map((f) => f.id).filter((id) => id > 0),
-    [sortedForwards],
+  const groupedForwards = useMemo((): ForwardUserGroup[] => {
+    if (orderedForwards.length === 0) {
+      return [];
+    }
+
+    const userGroupMap = new Map<number, ForwardUserGroup>();
+
+    orderedForwards.forEach((forward) => {
+      const userId = forward.userId ?? 0;
+      const userName = normalizeForwardUserName(forward.userName);
+      const existingGroup = userGroupMap.get(userId);
+
+      if (!existingGroup) {
+        userGroupMap.set(userId, {
+          userId,
+          userName,
+          items: [forward],
+        });
+
+        return;
+      }
+
+      existingGroup.items.push(forward);
+
+      if (
+        existingGroup.userName === UNKNOWN_FORWARD_USER_NAME &&
+        userName !== UNKNOWN_FORWARD_USER_NAME
+      ) {
+        existingGroup.userName = userName;
+      }
+    });
+
+    const groups = Array.from(userGroupMap.values());
+
+    groups.sort((a, b) => {
+      if (isAdmin && tokenUserId !== null) {
+        const aIsSelf = a.userId === tokenUserId;
+        const bIsSelf = b.userId === tokenUserId;
+
+        if (aIsSelf !== bIsSelf) {
+          return aIsSelf ? -1 : 1;
+        }
+      }
+
+      const nameCompare = compareForwardUserNameAsc(a.userName, b.userName);
+
+      if (nameCompare !== 0) {
+        return nameCompare;
+      }
+
+      return a.userId - b.userId;
+    });
+
+    return groups;
+  }, [orderedForwards, isAdmin, tokenUserId]);
+
+  const sortedForwards = useMemo(
+    () => groupedForwards.flatMap((group) => group.items),
+    [groupedForwards],
   );
 
   // 可拖拽的转发卡片组件
@@ -1474,15 +1561,46 @@ export default function ForwardPage() {
     const userMap = new Map<number, { id: number; name: string }>();
 
     forwards.forEach((f) => {
-      const uId = f.userId || 0;
+      const uId = f.userId ?? 0;
+      const userName = normalizeForwardUserName(f.userName);
+      const existingUser = userMap.get(uId);
 
-      if (!userMap.has(uId)) {
-        userMap.set(uId, { id: uId, name: f.userName || "未知用户" });
+      if (!existingUser) {
+        userMap.set(uId, { id: uId, name: userName });
+        return;
+      }
+
+      if (
+        existingUser.name === UNKNOWN_FORWARD_USER_NAME &&
+        userName !== UNKNOWN_FORWARD_USER_NAME
+      ) {
+        existingUser.name = userName;
       }
     });
 
-    return Array.from(userMap.values());
-  }, [forwards]);
+    const users = Array.from(userMap.values());
+
+    users.sort((a, b) => {
+      if (isAdmin && tokenUserId !== null) {
+        const aIsSelf = a.id === tokenUserId;
+        const bIsSelf = b.id === tokenUserId;
+
+        if (aIsSelf !== bIsSelf) {
+          return aIsSelf ? -1 : 1;
+        }
+      }
+
+      const nameCompare = compareForwardUserNameAsc(a.name, b.name);
+
+      if (nameCompare !== 0) {
+        return nameCompare;
+      }
+
+      return a.id - b.id;
+    });
+
+    return users;
+  }, [forwards, isAdmin, tokenUserId]);
 
   // 可拖拽的表格行组件
   const SortableTableRow = ({
@@ -1551,11 +1669,6 @@ export default function ForwardPage() {
               <path d="M7 2a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 2zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 8zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 14zm6-8a2 2 0 1 1-.001-4.001A2 2 0 0 1 13 6zm0 2a2 2 0 1 1 .001 4.001A2 2 0 0 1 13 8zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 13 14z" />
             </svg>
           </div>
-        </TableCell>
-        <TableCell className="whitespace-nowrap">
-          <span className="text-sm font-medium text-default-700">
-            {forward.userName || "未知用户"}
-          </span>
         </TableCell>
         <TableCell className="whitespace-nowrap font-semibold text-foreground">
           {forward.name}
@@ -2207,63 +2320,93 @@ export default function ForwardPage() {
       {/* 根据显示模式渲染不同内容 */}
       {viewMode === "grouped" ? (
         sortedForwards.length > 0 ? (
-          <div className="overflow-hidden rounded-xl border border-divider bg-content1 shadow-md">
-            <DndContext
-              collisionDetection={closestCenter}
-              sensors={sensors}
-              onDragEnd={handleDragEnd}
-            >
-              <Table
-                aria-label="全部转发列表"
-                classNames={{
-                  th: "bg-default-100/50 text-default-600 font-semibold text-sm border-b border-divider py-3 uppercase tracking-wider",
-                  td: "py-3 border-b border-divider/50 group-data-[last=true]:border-b-0",
-                  tr: "hover:bg-default-50/50 transition-colors",
-                }}
-              >
-                <TableHeader>
-                  {selectMode && (
-                    <TableColumn className="w-14">选择</TableColumn>
-                  )}
-                  <TableColumn className="w-10 pl-4" />
-                  <TableColumn>用户</TableColumn>
-                  <TableColumn>名称</TableColumn>
-                  <TableColumn>隧道</TableColumn>
-                  <TableColumn>入口</TableColumn>
-                  <TableColumn>目标</TableColumn>
-                  <TableColumn>策略</TableColumn>
-                  <TableColumn>总流量</TableColumn>
-                  <TableColumn>状态</TableColumn>
-                  <TableColumn className="text-right">操作</TableColumn>
-                </TableHeader>
-                <TableBody emptyContent="暂无转发配置" items={sortedForwards}>
-                  {(forward) => (
-                    <SortableContext
-                      key={forward.id}
-                      items={sortableForwardIds}
-                      strategy={verticalListSortingStrategy}
+          <div className="space-y-4">
+            {groupedForwards.map((group) => {
+              const groupSortableForwardIds = group.items
+                .map((item) => item.id)
+                .filter((id) => id > 0);
+              const isSelfGroup =
+                isAdmin && tokenUserId !== null && group.userId === tokenUserId;
+
+              return (
+                <div
+                  key={`grouped-table-${group.userId}-${group.userName}`}
+                  className="overflow-hidden rounded-xl border border-divider bg-content1 shadow-md"
+                >
+                  <div className="flex items-center justify-between border-b border-divider bg-default-100/40 px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-foreground">
+                        {group.userName}
+                      </span>
+                      {isSelfGroup && (
+                        <Chip color="primary" size="sm" variant="flat">
+                          管理员本人
+                        </Chip>
+                      )}
+                    </div>
+                    <span className="text-xs text-default-600">
+                      {group.items.length} 条转发
+                    </span>
+                  </div>
+
+                  <DndContext
+                    collisionDetection={closestCenter}
+                    sensors={sensors}
+                    onDragEnd={handleDragEnd}
+                  >
+                    <Table
+                      aria-label={`${group.userName}转发列表`}
+                      classNames={{
+                        th: "bg-default-100/50 text-default-600 font-semibold text-sm border-b border-divider py-3 uppercase tracking-wider",
+                        td: "py-3 border-b border-divider/50 group-data-[last=true]:border-b-0",
+                        tr: "hover:bg-default-50/50 transition-colors",
+                      }}
                     >
-                      <SortableTableRow
-                        formatFlow={formatFlow}
-                        formatInAddress={formatInAddress}
-                        formatRemoteAddress={formatRemoteAddress}
-                        forward={forward}
-                        getStrategyDisplay={getStrategyDisplay}
-                        handleDelete={handleDelete}
-                        handleDiagnose={handleDiagnose}
-                        handleEdit={handleEdit}
-                        handleServiceToggle={handleServiceToggle}
-                        hasMultipleAddresses={hasMultipleAddresses}
-                        selectMode={selectMode}
-                        selectedIds={selectedIds}
-                        showAddressModal={showAddressModal}
-                        toggleSelect={toggleSelect}
-                      />
-                    </SortableContext>
-                  )}
-                </TableBody>
-              </Table>
-            </DndContext>
+                      <TableHeader>
+                        {selectMode && (
+                          <TableColumn className="w-14">选择</TableColumn>
+                        )}
+                        <TableColumn className="w-10 pl-4" />
+                        <TableColumn>名称</TableColumn>
+                        <TableColumn>隧道</TableColumn>
+                        <TableColumn>入口</TableColumn>
+                        <TableColumn>目标</TableColumn>
+                        <TableColumn>策略</TableColumn>
+                        <TableColumn>总流量</TableColumn>
+                        <TableColumn>状态</TableColumn>
+                        <TableColumn className="text-right">操作</TableColumn>
+                      </TableHeader>
+                      <TableBody emptyContent="暂无转发配置" items={group.items}>
+                        {(forward) => (
+                          <SortableContext
+                            key={forward.id}
+                            items={groupSortableForwardIds}
+                            strategy={verticalListSortingStrategy}
+                          >
+                            <SortableTableRow
+                              formatFlow={formatFlow}
+                              formatInAddress={formatInAddress}
+                              formatRemoteAddress={formatRemoteAddress}
+                              forward={forward}
+                              getStrategyDisplay={getStrategyDisplay}
+                              handleDelete={handleDelete}
+                              handleDiagnose={handleDiagnose}
+                              handleEdit={handleEdit}
+                              handleServiceToggle={handleServiceToggle}
+                              hasMultipleAddresses={hasMultipleAddresses}
+                              selectMode={selectMode}
+                              selectedIds={selectedIds}
+                              showAddressModal={showAddressModal}
+                              toggleSelect={toggleSelect}
+                            />
+                          </SortableContext>
+                        )}
+                      </TableBody>
+                    </Table>
+                  </DndContext>
+                </div>
+              );
+            })}
           </div>
         ) : (
           /* 空状态 */
@@ -2279,26 +2422,59 @@ export default function ForwardPage() {
           </Card>
         )
       ) : /* 直接显示模式 */
-      forwards.length > 0 ? (
-        <DndContext
-          collisionDetection={closestCenter}
-          sensors={sensors}
-          onDragEnd={handleDragEnd}
-          onDragStart={() => {}} // 添加空的 onDragStart 处理器
-        >
-          <SortableContext
-            items={sortableForwardIds}
-            strategy={rectSortingStrategy}
-          >
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
-              {sortedForwards.map((forward) =>
-                forward && forward.id ? (
-                  <SortableForwardCard key={forward.id} forward={forward} />
-                ) : null,
-              )}
-            </div>
-          </SortableContext>
-        </DndContext>
+      sortedForwards.length > 0 ? (
+        <div className="space-y-5">
+          {groupedForwards.map((group) => {
+            const groupSortableForwardIds = group.items
+              .map((item) => item.id)
+              .filter((id) => id > 0);
+            const isSelfGroup =
+              isAdmin && tokenUserId !== null && group.userId === tokenUserId;
+
+            return (
+              <div
+                key={`direct-group-${group.userId}-${group.userName}`}
+                className="space-y-3"
+              >
+                <div className="flex items-center justify-between px-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold text-foreground">
+                      {group.userName}
+                    </span>
+                    {isSelfGroup && (
+                      <Chip color="primary" size="sm" variant="flat">
+                        管理员本人
+                      </Chip>
+                    )}
+                  </div>
+                  <span className="text-xs text-default-600">
+                    {group.items.length} 条转发
+                  </span>
+                </div>
+
+                <DndContext
+                  collisionDetection={closestCenter}
+                  sensors={sensors}
+                  onDragEnd={handleDragEnd}
+                  onDragStart={() => {}} // 添加空的 onDragStart 处理器
+                >
+                  <SortableContext
+                    items={groupSortableForwardIds}
+                    strategy={rectSortingStrategy}
+                  >
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
+                      {group.items.map((forward) =>
+                        forward && forward.id ? (
+                          <SortableForwardCard key={forward.id} forward={forward} />
+                        ) : null,
+                      )}
+                    </div>
+                  </SortableContext>
+                </DndContext>
+              </div>
+            );
+          })}
+        </div>
       ) : (
         /* 空状态 */
         <Card className="shadow-sm border border-gray-200 dark:border-gray-700 bg-default-50/50">
