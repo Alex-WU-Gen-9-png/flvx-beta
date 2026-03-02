@@ -63,6 +63,7 @@ import {
   resumeForwardService,
   diagnoseForward,
   updateForwardOrder,
+  getConfigByName,
 } from "@/api";
 import {
   type ForwardAddressItem,
@@ -145,6 +146,8 @@ interface ForwardTunnelGroup {
 
 const UNKNOWN_FORWARD_USER_NAME = "未知用户";
 const UNCATEGORIZED_FORWARD_TUNNEL_NAME = "未分类";
+const FORWARD_COMPACT_MODE_CONFIG_KEY = "forward_compact_mode";
+const FORWARD_COMPACT_MODE_EVENT = "forwardCompactModeChanged";
 const FORWARD_GROUPED_TABLE_MIN_WIDTH_CLASS = "min-w-[1320px]";
 const FORWARD_GROUPED_TABLE_COLUMN_CLASS = {
   select: "w-14",
@@ -205,6 +208,7 @@ export default function ForwardPage() {
     "",
   );
   const [isSearchVisible, setIsSearchVisible] = useState(false);
+  const [compactMode, setCompactMode] = useState(false);
 
   // 显示模式状态 - 从localStorage读取，默认为平铺显示
   const [viewMode, setViewMode] = useState<"grouped" | "direct">(() => {
@@ -305,6 +309,43 @@ export default function ForwardPage() {
     return () => {
       diagnosisAbortRef.current?.abort();
       diagnosisAbortRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const loadForwardCompactMode = async () => {
+      try {
+        const response = await getConfigByName(FORWARD_COMPACT_MODE_CONFIG_KEY);
+        const enabled =
+          response.code === 0 &&
+          typeof response.data?.value === "string" &&
+          response.data.value === "true";
+
+        setCompactMode(enabled);
+      } catch {
+        setCompactMode(false);
+      }
+    };
+
+    const handleCompactModeChanged = (event: Event) => {
+      const customEvent = event as CustomEvent<{ enabled?: boolean }>;
+
+      if (typeof customEvent.detail?.enabled === "boolean") {
+        setCompactMode(customEvent.detail.enabled);
+      }
+    };
+
+    loadForwardCompactMode();
+    window.addEventListener(
+      FORWARD_COMPACT_MODE_EVENT,
+      handleCompactModeChanged,
+    );
+
+    return () => {
+      window.removeEventListener(
+        FORWARD_COMPACT_MODE_EVENT,
+        handleCompactModeChanged,
+      );
     };
   }, []);
 
@@ -1372,9 +1413,14 @@ export default function ForwardPage() {
     );
     const overTunnelGroupKey = buildForwardTunnelGroupKey(overForward?.tunnelName);
 
-    // 仅允许在同一用户+隧道分组内拖拽，避免混排
-    if (activeUserId !== overUserId || activeTunnelGroupKey !== overTunnelGroupKey) {
-      return;
+    // 非精简模式仅允许在同一用户+隧道分组内拖拽，避免混排
+    if (!compactMode) {
+      if (
+        activeUserId !== overUserId ||
+        activeTunnelGroupKey !== overTunnelGroupKey
+      ) {
+        return;
+      }
     }
 
     const oldIndex = forwardOrder.indexOf(activeId);
@@ -1773,12 +1819,19 @@ export default function ForwardPage() {
     return groups;
   }, [orderedForwards, isAdmin, tokenUserId]);
 
-  const sortedForwards = useMemo(
-    () =>
-      groupedForwards.flatMap((group) =>
-        group.tunnels.flatMap((tunnel) => tunnel.items),
-      ),
-    [groupedForwards],
+  const sortedForwards = useMemo(() => {
+    if (compactMode) {
+      return orderedForwards;
+    }
+
+    return groupedForwards.flatMap((group) =>
+      group.tunnels.flatMap((tunnel) => tunnel.items),
+    );
+  }, [compactMode, orderedForwards, groupedForwards]);
+
+  const sortableForwardIds = useMemo(
+    () => sortedForwards.map((f) => f.id).filter((id) => id > 0),
+    [sortedForwards],
   );
 
   // 可拖拽的转发卡片组件
@@ -1996,6 +2049,221 @@ export default function ForwardPage() {
           </div>
         </TableCell>
         <TableCell className={FORWARD_GROUPED_TABLE_COLUMN_CLASS.actions}>
+          <div className="flex justify-end gap-2">
+            <Button
+              isIconOnly
+              className="bg-primary/10 text-primary hover:bg-primary/20"
+              size="sm"
+              title="编辑"
+              onPress={() => handleEdit(forward)}
+            >
+              <svg
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                />
+              </svg>
+            </Button>
+            <Button
+              isIconOnly
+              className="bg-warning/10 text-warning hover:bg-warning/20"
+              size="sm"
+              title="诊断"
+              onPress={() => handleDiagnose(forward)}
+            >
+              <svg
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                />
+              </svg>
+            </Button>
+            <Button
+              isIconOnly
+              className="bg-danger/10 text-danger hover:bg-danger/20"
+              size="sm"
+              title="删除"
+              onPress={() => handleDelete(forward)}
+            >
+              <svg
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                />
+              </svg>
+            </Button>
+          </div>
+        </TableCell>
+      </TableRow>
+    );
+  };
+
+  const SortableCompactTableRow = ({
+    forward,
+    selectMode,
+    selectedIds,
+    toggleSelect,
+    getStrategyDisplay,
+    formatInAddress,
+    formatRemoteAddress,
+    handleServiceToggle,
+    handleEdit,
+    handleDelete,
+    handleDiagnose,
+    showAddressModal,
+    hasMultipleAddresses,
+    formatFlow,
+  }: any) => {
+    const {
+      attributes,
+      listeners,
+      setNodeRef,
+      transform,
+      transition,
+      isDragging,
+    } = useSortable({ id: forward.id });
+
+    const style = {
+      transform: transform
+        ? CSS.Transform.toString({
+            ...transform,
+            x: Math.round(transform.x),
+            y: Math.round(transform.y),
+          })
+        : undefined,
+      transition: isDragging ? undefined : transition || undefined,
+      opacity: isDragging ? 0.5 : 1,
+      backgroundColor: isDragging ? "var(--nextui-default-100)" : undefined,
+    };
+
+    const strategyDisplay = getStrategyDisplay(forward.strategy);
+
+    return (
+      <TableRow key={forward.id} ref={setNodeRef} style={style}>
+        {selectMode && (
+          <TableCell>
+            <Checkbox
+              isSelected={selectedIds.has(forward.id)}
+              onValueChange={() => toggleSelect(forward.id)}
+            />
+          </TableCell>
+        )}
+        <TableCell>
+          <div
+            className="cursor-grab active:cursor-grabbing p-1 text-default-400 hover:text-default-600 transition-colors"
+            {...attributes}
+            {...listeners}
+            title="拖拽排序"
+          >
+            <svg
+              aria-hidden="true"
+              className="w-4 h-4"
+              fill="currentColor"
+              viewBox="0 0 20 20"
+            >
+              <path d="M7 2a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 2zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 8zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 14zm6-8a2 2 0 1 1-.001-4.001A2 2 0 0 1 13 6zm0 2a2 2 0 1 1 .001 4.001A2 2 0 0 1 13 8zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 13 14z" />
+            </svg>
+          </div>
+        </TableCell>
+        <TableCell className="whitespace-nowrap">
+          <span className="text-sm font-medium text-default-700">
+            {forward.userName || "未知用户"}
+          </span>
+        </TableCell>
+        <TableCell className="whitespace-nowrap font-semibold text-foreground">
+          {forward.name}
+        </TableCell>
+        <TableCell className="whitespace-nowrap">
+          <Chip
+            className="border-none bg-secondary/10 px-2"
+            color="secondary"
+            size="sm"
+          >
+            <span className="font-medium text-secondary-700">
+              {forward.tunnelName}
+            </span>
+          </Chip>
+        </TableCell>
+        <TableCell className="max-w-[220px]">
+          <button
+            className={`w-full truncate rounded-md bg-default-100/50 px-2.5 py-1.5 text-left font-mono text-xs font-medium text-default-700 transition-all ${
+              hasMultipleAddresses(forward.inIp)
+                ? "hover:bg-default-200 hover:shadow-sm"
+                : ""
+            }`}
+            title={formatInAddress(forward.inIp, forward.inPort)}
+            type="button"
+            onClick={() =>
+              showAddressModal(forward.inIp, forward.inPort, "入口端口")
+            }
+          >
+            {formatInAddress(forward.inIp, forward.inPort)}
+          </button>
+        </TableCell>
+        <TableCell className="max-w-[240px]">
+          <button
+            className={`w-full truncate rounded-md bg-default-100/50 px-2.5 py-1.5 text-left font-mono text-xs font-medium text-default-700 transition-all ${
+              hasMultipleAddresses(forward.remoteAddr)
+                ? "hover:bg-default-200 hover:shadow-sm"
+                : ""
+            }`}
+            title={formatRemoteAddress(forward.remoteAddr)}
+            type="button"
+            onClick={() =>
+              showAddressModal(forward.remoteAddr, null, "目标地址")
+            }
+          >
+            {formatRemoteAddress(forward.remoteAddr)}
+          </button>
+        </TableCell>
+        <TableCell>
+          <Chip
+            className="text-xs font-medium"
+            color={strategyDisplay.color as any}
+            size="sm"
+            variant="flat"
+          >
+            {strategyDisplay.text}
+          </Chip>
+        </TableCell>
+        <TableCell className="whitespace-nowrap">
+          <span className="text-sm font-medium text-default-600 font-mono">
+            {formatFlow(getForwardDisplayFlow(forward))}
+          </span>
+        </TableCell>
+        <TableCell>
+          <div className="flex items-center gap-2.5 whitespace-nowrap">
+            <Switch
+              color="success"
+              isDisabled={forward.status !== 1 && forward.status !== 0}
+              isSelected={forward.serviceRunning}
+              size="sm"
+              onValueChange={() => handleServiceToggle(forward)}
+            />
+          </div>
+        </TableCell>
+        <TableCell>
           <div className="flex justify-end gap-2">
             <Button
               isIconOnly
@@ -2571,7 +2839,107 @@ export default function ForwardPage() {
       </div>
 
       {/* 根据显示模式渲染不同内容 */}
-      {viewMode === "grouped" ? (
+      {compactMode ? (
+        viewMode === "grouped" ? (
+          sortedForwards.length > 0 ? (
+            <div className="overflow-hidden rounded-xl border border-divider bg-content1 shadow-md">
+              <DndContext
+                collisionDetection={closestCenter}
+                sensors={sensors}
+                onDragEnd={handleDragEnd}
+              >
+                <Table
+                  aria-label="全部转发列表"
+                  classNames={{
+                    th: "bg-default-100/50 text-default-600 font-semibold text-sm border-b border-divider py-3 uppercase tracking-wider",
+                    td: "py-3 border-b border-divider/50 group-data-[last=true]:border-b-0",
+                    tr: "hover:bg-default-50/50 transition-colors",
+                  }}
+                >
+                  <TableHeader>
+                    {selectMode && <TableColumn className="w-14">选择</TableColumn>}
+                    <TableColumn className="w-10 pl-4" />
+                    <TableColumn>用户</TableColumn>
+                    <TableColumn>名称</TableColumn>
+                    <TableColumn>隧道</TableColumn>
+                    <TableColumn>入口</TableColumn>
+                    <TableColumn>目标</TableColumn>
+                    <TableColumn>策略</TableColumn>
+                    <TableColumn>总流量</TableColumn>
+                    <TableColumn>状态</TableColumn>
+                    <TableColumn className="text-right">操作</TableColumn>
+                  </TableHeader>
+                  <TableBody emptyContent="暂无转发配置" items={sortedForwards}>
+                    {(forward) => (
+                      <SortableContext
+                        key={forward.id}
+                        items={sortableForwardIds}
+                        strategy={verticalListSortingStrategy}
+                      >
+                        <SortableCompactTableRow
+                          formatFlow={formatFlow}
+                          formatInAddress={formatInAddress}
+                          formatRemoteAddress={formatRemoteAddress}
+                          forward={forward}
+                          getStrategyDisplay={getStrategyDisplay}
+                          handleDelete={handleDelete}
+                          handleDiagnose={handleDiagnose}
+                          handleEdit={handleEdit}
+                          handleServiceToggle={handleServiceToggle}
+                          hasMultipleAddresses={hasMultipleAddresses}
+                          selectMode={selectMode}
+                          selectedIds={selectedIds}
+                          showAddressModal={showAddressModal}
+                          toggleSelect={toggleSelect}
+                        />
+                      </SortableContext>
+                    )}
+                  </TableBody>
+                </Table>
+              </DndContext>
+            </div>
+          ) : (
+            <Card className="shadow-sm border border-gray-200 dark:border-gray-700 bg-default-50/50">
+              <CardBody className="text-center py-20 flex flex-col items-center justify-center min-h-[240px]">
+                <h3 className="text-xl font-medium text-foreground tracking-tight mb-2">
+                  暂无转发配置
+                </h3>
+                <p className="text-default-500 text-sm max-w-xs mx-auto leading-relaxed">
+                  还没有创建任何转发配置，点击上方按钮开始创建
+                </p>
+              </CardBody>
+            </Card>
+          )
+        ) : sortedForwards.length > 0 ? (
+          <DndContext
+            collisionDetection={closestCenter}
+            sensors={sensors}
+            onDragEnd={handleDragEnd}
+            onDragStart={() => {}}
+          >
+            <SortableContext items={sortableForwardIds} strategy={rectSortingStrategy}>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
+                {sortedForwards.map((forward) =>
+                  forward && forward.id ? (
+                    <SortableForwardCard key={forward.id} forward={forward} />
+                  ) : null,
+                )}
+              </div>
+            </SortableContext>
+          </DndContext>
+        ) : (
+          <Card className="shadow-sm border border-gray-200 dark:border-gray-700 bg-default-50/50">
+            <CardBody className="text-center py-20 flex flex-col items-center justify-center min-h-[240px]">
+              <h3 className="text-xl font-medium text-foreground tracking-tight mb-2">
+                暂无转发配置
+              </h3>
+              <p className="text-default-500 text-sm max-w-xs mx-auto leading-relaxed">
+                还没有创建任何转发配置，点击上方按钮开始创建
+              </p>
+            </CardBody>
+          </Card>
+        )
+      ) : viewMode === "grouped" ? (
         sortedForwards.length > 0 ? (
           <div className="space-y-4">
             {groupedForwards.map((group) => {
@@ -2734,7 +3102,6 @@ export default function ForwardPage() {
             })}
           </div>
         ) : (
-          /* 空状态 */
           <Card className="shadow-sm border border-gray-200 dark:border-gray-700 bg-default-50/50">
             <CardBody className="text-center py-20 flex flex-col items-center justify-center min-h-[240px]">
               <h3 className="text-xl font-medium text-foreground tracking-tight mb-2">
@@ -2746,8 +3113,7 @@ export default function ForwardPage() {
             </CardBody>
           </Card>
         )
-      ) : /* 直接显示模式 */
-      sortedForwards.length > 0 ? (
+      ) : sortedForwards.length > 0 ? (
         <div className="space-y-5">
           {groupedForwards.map((group) => {
             const isSelfGroup =
@@ -2771,7 +3137,7 @@ export default function ForwardPage() {
                       <Chip color="primary" size="sm" variant="flat">
                         管理员本人
                       </Chip>
-                      )}
+                    )}
                   </div>
                   <span className="text-xs text-default-600">
                     {groupForwardCount} 条转发
@@ -2802,7 +3168,7 @@ export default function ForwardPage() {
                           collisionDetection={closestCenter}
                           sensors={sensors}
                           onDragEnd={handleDragEnd}
-                          onDragStart={() => {}} // 添加空的 onDragStart 处理器
+                          onDragStart={() => {}}
                         >
                           <SortableContext
                             items={tunnelSortableForwardIds}
@@ -2829,7 +3195,6 @@ export default function ForwardPage() {
           })}
         </div>
       ) : (
-        /* 空状态 */
         <Card className="shadow-sm border border-gray-200 dark:border-gray-700 bg-default-50/50">
           <CardBody className="text-center py-20 flex flex-col items-center justify-center min-h-[240px]">
             <h3 className="text-xl font-medium text-foreground tracking-tight mb-2">
