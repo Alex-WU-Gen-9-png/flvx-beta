@@ -127,6 +127,7 @@ interface ForwardForm {
   name: string;
   tunnelId: number | null;
   inPort: number | null;
+  inIp: string;
   remoteAddr: string;
   interfaceName?: string;
   strategy: string;
@@ -546,6 +547,7 @@ export default function ForwardPage() {
     name: "",
     tunnelId: null,
     inPort: null,
+    inIp: "",
     remoteAddr: "",
     interfaceName: "",
     strategy: "fifo",
@@ -1164,6 +1166,7 @@ export default function ForwardPage() {
       name: "",
       tunnelId: null,
       inPort: null,
+      inIp: "",
       remoteAddr: "",
       interfaceName: "",
       strategy: "fifo",
@@ -1182,6 +1185,7 @@ export default function ForwardPage() {
       name: forward.name,
       tunnelId: forward.tunnelId,
       inPort: forward.inPort,
+      inIp: forward.inIp || "",
       remoteAddr: forward.remoteAddr.split(",").join("\n"),
       interfaceName: forward.interfaceName || "",
       strategy: forward.strategy || "fifo",
@@ -1263,6 +1267,7 @@ export default function ForwardPage() {
           name: form.name,
           tunnelId: form.tunnelId,
           inPort: form.inPort,
+          inIp: form.inIp || null,
           remoteAddr: processedRemoteAddr,
           strategy: addressCount > 1 ? form.strategy : "fifo",
           speedId: normalizeSpeedId(form.speedId),
@@ -1270,11 +1275,11 @@ export default function ForwardPage() {
 
         res = await updateForward(updateData);
       } else {
-        // 创建时不需要id和userId（后端会自动设置）
         const createData = {
           name: form.name,
           tunnelId: form.tunnelId,
           inPort: form.inPort,
+          inIp: form.inIp || null,
           remoteAddr: processedRemoteAddr,
           strategy: addressCount > 1 ? form.strategy : "fifo",
           speedId: normalizeSpeedId(form.speedId),
@@ -4021,6 +4026,17 @@ export default function ForwardPage() {
                         inPort: value ? parseInt(value) : null,
                       }));
                     }}
+                  />
+
+                  <Input
+                    description="留空使用默认入口IP，多IP节点可指定监听地址"
+                    label="监听IP"
+                    placeholder="留空使用默认"
+                    value={form.inIp}
+                    variant="bordered"
+                    onChange={(e) =>
+                      setForm((prev) => ({ ...prev, inIp: e.target.value }))
+                    }
                   />
 
                   <Textarea

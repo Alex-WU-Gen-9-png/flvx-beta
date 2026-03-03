@@ -70,6 +70,7 @@ interface ChainTunnel {
   strategy?: string; // 'fifo' | 'round' | 'rand' - 仅转发链需要
   chainType?: number; // 1: 入口, 2: 转发链, 3: 出口
   inx?: number; // 转发链序号
+  connectIp?: string; // 连接IP（多IP节点指定连接地址）
 }
 
 interface Tunnel {
@@ -337,6 +338,20 @@ export default function TunnelPage() {
       chainNodes[groupIndex] = (chainNodes[groupIndex] || []).map((node) => ({
         ...node,
         strategy,
+      }));
+
+      return { ...prev, chainNodes };
+    });
+  };
+
+  // 更新某一跳的所有节点的连接IP
+  const updateChainConnectIp = (groupIndex: number, connectIp: string) => {
+    setForm((prev) => {
+      const chainNodes = [...(prev.chainNodes || [])];
+
+      chainNodes[groupIndex] = (chainNodes[groupIndex] || []).map((node) => ({
+        ...node,
+        connectIp,
       }));
 
       return { ...prev, chainNodes };
@@ -1741,6 +1756,29 @@ export default function TunnelPage() {
                                     <SelectItem key="rand">随机</SelectItem>
                                   </Select>
                                 </div>
+
+                                {/* 连接IP - 转发链节点 */}
+                                <Input
+                                  classNames={{
+                                    label: "text-xs",
+                                  }}
+                                  description="多IP节点可指定连接地址，留空使用默认"
+                                  label="连接IP"
+                                  placeholder="留空使用默认"
+                                  size="sm"
+                                  value={
+                                    groupNodes.length > 0
+                                      ? groupNodes[0].connectIp || ""
+                                      : ""
+                                  }
+                                  variant="bordered"
+                                  onChange={(e) => {
+                                    updateChainConnectIp(
+                                      groupIndex,
+                                      e.target.value,
+                                    );
+                                  }}
+                                />
                               </div>
                             );
                           })}
@@ -2002,6 +2040,50 @@ export default function TunnelPage() {
                           <SelectItem key="rand">随机</SelectItem>
                         </Select>
                       </div>
+
+                      {/* 连接IP - 出口节点 */}
+                      <Input
+                        classNames={{
+                          label: "text-xs",
+                        }}
+                        description="多IP节点可指定连接地址，留空使用默认"
+                        label="连接IP"
+                        placeholder="留空使用默认"
+                        size="sm"
+                        value={
+                          form.outNodeId && form.outNodeId.length > 0
+                            ? form.outNodeId[0].connectIp || ""
+                            : ""
+                        }
+                        variant="bordered"
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          setForm((prev) => {
+                            const currentOutNodes = prev.outNodeId || [];
+                            if (currentOutNodes.length === 0) {
+                              return {
+                                ...prev,
+                                outNodeId: [
+                                  {
+                                    nodeId: -1,
+                                    chainType: 3,
+                                    protocol: "tls",
+                                    strategy: "round",
+                                    connectIp: value,
+                                  },
+                                ],
+                              };
+                            }
+                            return {
+                              ...prev,
+                              outNodeId: currentOutNodes.map((ct) => ({
+                                ...ct,
+                                connectIp: value,
+                              })),
+                            };
+                          });
+                        }}
+                      />
                     </>
                   )}
                 </div>
