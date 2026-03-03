@@ -720,6 +720,18 @@ func (r *Repository) ReplaceForwardPorts(forwardID int64, entries []struct {
 	})
 }
 
+func (r *Repository) UpdateForwardPortBindIP(forwardID, nodeID int64, port int, inIP string) error {
+	if r == nil || r.db == nil {
+		return errors.New("repository not initialized")
+	}
+	if forwardID <= 0 || nodeID <= 0 || port <= 0 {
+		return nil
+	}
+	return r.db.Model(&model.ForwardPort{}).
+		Where("forward_id = ? AND node_id = ? AND port = ?", forwardID, nodeID, port).
+		Update("in_ip", sql.NullString{String: inIP, Valid: strings.TrimSpace(inIP) != ""}).Error
+}
+
 func (r *Repository) RollbackForwardFields(id, userID int64, userName, name string, tunnelID int64, remoteAddr, strategy string, status int, speedID interface{}, now int64) {
 	if r == nil || r.db == nil {
 		return

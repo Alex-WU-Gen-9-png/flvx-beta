@@ -82,6 +82,24 @@ func TestIsBindAddressInUseError(t *testing.T) {
 	}
 }
 
+func TestIsAddressAlreadyInUseError(t *testing.T) {
+	if !isAddressAlreadyInUseError(errors.New("listen tcp [::]:10001: bind: address already in use")) {
+		t.Fatalf("address already in use should be detected")
+	}
+	if isAddressAlreadyInUseError(errors.New("listen tcp4 13.228.170.187:16765: bind: cannot assign requested address")) {
+		t.Fatalf("cannot assign requested address should not be treated as address-in-use")
+	}
+}
+
+func TestIsCannotAssignRequestedAddressError(t *testing.T) {
+	if !isCannotAssignRequestedAddressError(errors.New("listen tcp4 13.228.170.187:16765: bind: cannot assign requested address")) {
+		t.Fatalf("cannot assign requested address should be detected")
+	}
+	if isCannotAssignRequestedAddressError(errors.New("listen tcp [::]:10001: bind: address already in use")) {
+		t.Fatalf("address already in use should not be treated as cannot-assign")
+	}
+}
+
 func TestBuildForwardServiceConfigs_UsesBindIPForListen(t *testing.T) {
 	forward := &forwardRecord{RemoteAddr: "1.2.3.4:80", Strategy: "fifo", TunnelID: 7}
 	node := &nodeRecord{TCPListenAddr: "[::]", UDPListenAddr: "[::]"}
