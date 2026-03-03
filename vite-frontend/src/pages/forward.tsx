@@ -563,11 +563,6 @@ export default function ForwardPage() {
   const [importData, setImportData] = useState("");
   const [importLoading, setImportLoading] = useState(false);
   const [importFormat, setImportFormat] = useState<ImportFormat>("flvx");
-  const [selectedEntryNode, setSelectedEntryNode] = useState<number | null>(
-    null,
-  );
-  const [matchedTunnels, setMatchedTunnels] = useState<Tunnel[]>([]);
-  const [tunnelSelectModalOpen, setTunnelSelectModalOpen] = useState(false);
   const [selectedTunnelForImport, setSelectedTunnelForImport] = useState<
     number | null
   >(null);
@@ -4625,10 +4620,10 @@ export default function ForwardPage() {
             ) : (
               <>
                 <p className="text-small text-default-500">
-                  ny格式：JSON对象，支持多个目标地址（负载均衡）
+                  ny格式：JSON对象，支持多个目标地址（负载均衡），按所选隧道导入
                 </p>
                 <p className="text-small text-default-400">
-                  格式：&#123;&quot;dest&quot;:[&quot;地址:端口&quot;],&quot;listen_port&quot;:端口,&quot;name&quot;:&quot;名称&quot;&#125;
+                  格式：&#123;&quot;dest&quot;:[&quot;地址:端口&quot;],&quot;listen_port&quot;:端口,&quot;name&quot;:&quot;名称&quot;&#125;（listen_port可省略，自动分配端口）
                 </p>
               </>
             )}
@@ -4648,8 +4643,6 @@ export default function ForwardPage() {
                   if (selectedKey) {
                     setImportFormat(selectedKey);
                     setSelectedTunnelForImport(null);
-                    setSelectedEntryNode(null);
-                    setMatchedTunnels([]);
                     setImportData("");
                     setImportResults([]);
                   }
@@ -4663,114 +4656,34 @@ export default function ForwardPage() {
                 </SelectItem>
               </Select>
 
-              {/* flvx格式：隧道选择 */}
-              {importFormat === "flvx" && (
-                <Select
-                  isRequired
-                  label="选择导入隧道"
-                  placeholder="请选择要导入的隧道"
-                  selectedKeys={
-                    selectedTunnelForImport
-                      ? [selectedTunnelForImport.toString()]
-                      : []
-                  }
-                  variant="bordered"
-                  onSelectionChange={(keys) => {
-                    const selectedKey = Array.from(keys)[0] as string;
+              {/* 隧道选择 - 两种格式都需要 */}
+              <Select
+                isRequired
+                label="选择导入隧道"
+                placeholder="请选择要导入的隧道"
+                selectedKeys={
+                  selectedTunnelForImport
+                    ? [selectedTunnelForImport.toString()]
+                    : []
+                }
+                variant="bordered"
+                onSelectionChange={(keys) => {
+                  const selectedKey = Array.from(keys)[0] as string;
 
-                    setSelectedTunnelForImport(
-                      selectedKey ? parseInt(selectedKey) : null,
-                    );
-                  }}
-                >
-                  {tunnels.map((tunnel) => (
-                    <SelectItem
-                      key={tunnel.id.toString()}
-                      textValue={tunnel.name}
-                    >
-                      {tunnel.name}
-                    </SelectItem>
-                  ))}
-                </Select>
-              )}
-
-              {/* ny格式：入口节点选择 */}
-              {importFormat === "ny" && (
-                <Select
-                  isRequired
-                  label="选择入口节点"
-                  placeholder="请选择入口节点"
-                  selectedKeys={
-                    selectedEntryNode ? [selectedEntryNode.toString()] : []
-                  }
-                  variant="bordered"
-                  onSelectionChange={(keys) => {
-                    const selectedKey = Array.from(keys)[0] as string;
-                    const nodeId = selectedKey ? parseInt(selectedKey) : null;
-
-                    setSelectedEntryNode(nodeId);
-                    setSelectedTunnelForImport(null);
-
-                    if (nodeId) {
-                      const matched = allTunnels.filter(
-                        (t) =>
-                          t.type === 1 &&
-                          t.inNodeId?.some((n) => n.nodeId === nodeId),
-                      );
-
-                      setMatchedTunnels(matched);
-
-                      if (matched.length === 0) {
-                        toast.error(
-                          "该入口节点没有匹配的隧道，请先创建端口转发类型的隧道",
-                        );
-                      } else if (matched.length === 1) {
-                        setSelectedTunnelForImport(matched[0].id);
-                      } else {
-                        setTunnelSelectModalOpen(true);
-                      }
-                    } else {
-                      setMatchedTunnels([]);
-                    }
-                  }}
-                >
-                  {nodes.map((node) => (
-                    <SelectItem key={node.id.toString()} textValue={node.name}>
-                      {node.name}
-                    </SelectItem>
-                  ))}
-                </Select>
-              )}
-
-              {/* ny格式：显示匹配的隧道 */}
-              {importFormat === "ny" && matchedTunnels.length > 0 && (
-                <div className="text-xs text-default-500">
-                  {matchedTunnels.length === 1 ? (
-                    <span>
-                      已匹配隧道：<strong>{matchedTunnels[0].name}</strong>
-                    </span>
-                  ) : (
-                    <span>
-                      找到 {matchedTunnels.length}{" "}
-                      个匹配隧道，请点击下方按钮选择
-                    </span>
-                  )}
-                </div>
-              )}
-
-              {/* ny格式：多隧道选择按钮 */}
-              {importFormat === "ny" &&
-                matchedTunnels.length > 1 &&
-                !selectedTunnelForImport && (
-                  <Button
-                    color="primary"
-                    size="sm"
-                    variant="flat"
-                    onPress={() => setTunnelSelectModalOpen(true)}
+                  setSelectedTunnelForImport(
+                    selectedKey ? parseInt(selectedKey) : null,
+                  );
+                }}
+              >
+                {tunnels.map((tunnel) => (
+                  <SelectItem
+                    key={tunnel.id.toString()}
+                    textValue={tunnel.name}
                   >
-                    选择隧道（{matchedTunnels.length}个可选）
-                  </Button>
-                )}
+                    {tunnel.name}
+                  </SelectItem>
+                ))}
+              </Select>
 
               {/* 输入区域 */}
               <Textarea
@@ -4783,7 +4696,7 @@ export default function ForwardPage() {
                 placeholder={
                   importFormat === "flvx"
                     ? "请输入要导入的转发数据，格式：目标地址|转发名称|入口端口"
-                    : '请输入ny格式数据，每行一个JSON对象，如：{"dest":["1.2.3.4:80"],"listen_port":8080,"name":"转发1"}'
+                    : '请输入ny格式数据，每行一个JSON对象，如：{"dest":["1.2.3.4:80"],"listen_port":8080,"name":"转发1"}；listen_port可省略自动分配'
                 }
                 value={importData}
                 variant="flat"
@@ -4887,63 +4800,11 @@ export default function ForwardPage() {
             </Button>
             <Button
               color="warning"
-              isDisabled={
-                !importData.trim() ||
-                !selectedTunnelForImport ||
-                (importFormat === "ny" && !selectedEntryNode)
-              }
+              isDisabled={!importData.trim() || !selectedTunnelForImport}
               isLoading={importLoading}
               onPress={executeImport}
             >
               开始导入
-            </Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
-
-      {/* 隧道选择模态框（ny格式多隧道匹配时使用） */}
-      <Modal
-        backdrop="blur"
-        isOpen={tunnelSelectModalOpen}
-        placement="center"
-        size="md"
-        onClose={() => setTunnelSelectModalOpen(false)}
-      >
-        <ModalContent>
-          <ModalHeader>选择隧道</ModalHeader>
-          <ModalBody>
-            <p className="text-sm text-default-500 mb-3">
-              找到多个使用该入口节点的隧道，请选择一个：
-            </p>
-            <div className="space-y-2">
-              {matchedTunnels.map((tunnel) => (
-                <Button
-                  key={tunnel.id}
-                  className="w-full justify-start"
-                  color={
-                    selectedTunnelForImport === tunnel.id
-                      ? "primary"
-                      : "default"
-                  }
-                  variant={
-                    selectedTunnelForImport === tunnel.id ? "solid" : "bordered"
-                  }
-                  onPress={() => {
-                    setSelectedTunnelForImport(tunnel.id);
-                    setTunnelSelectModalOpen(false);
-                  }}
-                >
-                  {tunnel.name}
-                </Button>
-              ))}
-            </div>
-          </ModalBody>
-          <ModalFooter>
-            <Button
-              variant="light"
-              onPress={() => setTunnelSelectModalOpen(false)}
-            >
-              取消
             </Button>
           </ModalFooter>
         </ModalContent>
