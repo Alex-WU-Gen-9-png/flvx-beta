@@ -1325,9 +1325,14 @@ func (h *Handler) forwardUpdate(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	if err := h.syncForwardServices(updatedForward, "UpdateService", true); err != nil {
+	warnings, err := h.syncForwardServicesWithWarnings(updatedForward, "UpdateService", true)
+	if err != nil {
 		h.rollbackForwardMutation(forward, oldPorts)
 		response.WriteJSON(w, response.ErrDefault(err.Error()))
+		return
+	}
+	if len(warnings) > 0 {
+		response.WriteJSON(w, response.OK(map[string]interface{}{"warnings": warnings}))
 		return
 	}
 	response.WriteJSON(w, response.OKEmpty())

@@ -223,21 +223,27 @@ func (h *Handler) listUserTunnelIDsByUser(userID int64) ([]int64, error) {
 }
 
 func (h *Handler) syncForwardServices(forward *forwardRecord, method string, allowFallbackAdd bool) error {
+	_, err := h.syncForwardServicesWithWarnings(forward, method, allowFallbackAdd)
+	return err
+}
+
+func (h *Handler) syncForwardServicesWithWarnings(forward *forwardRecord, method string, allowFallbackAdd bool) ([]string, error) {
 	if h == nil || forward == nil {
-		return errors.New("invalid forward sync context")
+		return nil, errors.New("invalid forward sync context")
 	}
 
 	tunnel, err := h.getTunnelRecord(forward.TunnelID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	ports, err := h.listForwardPorts(forward.ID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(ports) == 0 {
-		return errors.New("转发入口端口不存在")
+		return nil, errors.New("转发入口端口不存在")
 	}
+	warnings := make([]string, 0)
 
 	// Determine limiter from forward's SpeedID first, fallback to UserTunnel's limiter
 	var limiterID *int64
@@ -258,7 +264,7 @@ func (h *Handler) syncForwardServices(forward *forwardRecord, method string, all
 		var utSpeed *int
 		_, utLimiterID, utSpeed, err = h.resolveUserTunnelAndLimiter(forward.UserID, forward.TunnelID)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		limiterID = utLimiterID
 		speed = utSpeed
@@ -267,33 +273,69 @@ func (h *Handler) syncForwardServices(forward *forwardRecord, method string, all
 	serviceBase := buildForwardServiceBase(forward.ID, forward.UserID, 0)
 	tunnelTLSProtocol, err := h.isTunnelSelectedTLSProtocol(forward.TunnelID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	for _, fp := range ports {
 		if limiterID != nil && speed != nil {
 			if err := h.ensureLimiterOnNode(fp.NodeID, *limiterID, *speed); err != nil {
-				return err
+				return nil, err
 			}
 		}
 
 		node, err := h.getNodeRecord(fp.NodeID)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		services := buildForwardServiceConfigs(serviceBase, forward, tunnel, node, fp.Port, strings.TrimSpace(fp.InIP), limiterID, tunnelTLSProtocol)
 		_, err = h.sendNodeCommand(node.ID, method, services, true, false)
 		if err != nil && allowFallbackAdd && method == "UpdateService" {
 			_, err = h.sendNodeCommand(node.ID, "AddService", services, true, false)
 		}
-		if err != nil && strings.EqualFold(strings.TrimSpace(method), "UpdateService") && isBindAddressInUseError(err) {
+		if err != nil && strings.EqualFold(strings.TrimSpace(method), "UpdateService") && isAddressAlreadyInUseError(err) {
 			err = h.rebindForwardServiceOnSelfOccupiedPort(forward, node, fp.Port, services)
 		}
+		if err != nil && strings.EqualFold(strings.TrimSpace(method), "UpdateService") && isCannotAssignRequestedAddressError(err) {
+			var warning string
+			warning, err = h.fallbackForwardPortToDefaultBind(forward, tunnel, node, fp, serviceBase, limiterID, tunnelTLSProtocol)
+			if err == nil && warning != "" {
+				warnings = append(warnings, warning)
+			}
+		}
 		if err != nil {
-			return fmt.Errorf("节点 %s 下发失败: %w", node.Name, err)
+			return warnings, fmt.Errorf("节点 %s 下发失败: %w", node.Name, err)
 		}
 	}
-	return nil
+	return warnings, nil
+}
+
+func (h *Handler) fallbackForwardPortToDefaultBind(forward *forwardRecord, tunnel *tunnelRecord, node *nodeRecord, fp forwardPortRecord, serviceBase string, limiterID *int64, tunnelTLSProtocol bool) (string, error) {
+	if h == nil || forward == nil || tunnel == nil || node == nil {
+		return "", errors.New("invalid bind fallback context")
+	}
+	if fp.Port <= 0 {
+		return "", errors.New("invalid forward port")
+	}
+	explicitBindIP := strings.TrimSpace(fp.InIP)
+	if explicitBindIP == "" {
+		return "", errors.New("default bind address cannot be assigned")
+	}
+
+	if err := h.deleteForwardServicesOnNode(forward, node.ID); err != nil {
+		return "", err
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	defaultServices := buildForwardServiceConfigs(serviceBase, forward, tunnel, node, fp.Port, "", limiterID, tunnelTLSProtocol)
+	if _, err := h.sendNodeCommand(node.ID, "AddService", defaultServices, true, false); err != nil {
+		return "", err
+	}
+	if err := h.repo.UpdateForwardPortBindIP(forward.ID, node.ID, fp.Port, ""); err != nil {
+		return "", err
+	}
+
+	warning := fmt.Sprintf("节点 %s 监听IP %s 不在主机网卡地址中，已自动回退为默认监听IP", strings.TrimSpace(node.Name), explicitBindIP)
+	return warning, nil
 }
 
 func (h *Handler) rebindForwardServiceOnSelfOccupiedPort(forward *forwardRecord, node *nodeRecord, port int, services []map[string]interface{}) error {
@@ -1385,8 +1427,30 @@ func isBindAddressInUseError(err error) bool {
 	if msg == "" {
 		return false
 	}
-	if strings.Contains(msg, "address already in use") {
-		return true
+	return isAddressAlreadyInUseMessage(msg) || strings.Contains(msg, "cannot assign requested address")
+}
+
+func isAddressAlreadyInUseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isAddressAlreadyInUseMessage(strings.ToLower(strings.TrimSpace(err.Error())))
+}
+
+func isAddressAlreadyInUseMessage(msg string) bool {
+	if msg == "" {
+		return false
+	}
+	return strings.Contains(msg, "address already in use")
+}
+
+func isCannotAssignRequestedAddressError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	if msg == "" {
+		return false
 	}
 	return strings.Contains(msg, "cannot assign requested address")
 }

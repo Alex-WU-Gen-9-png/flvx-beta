@@ -1419,6 +1419,18 @@ export default function ForwardPage() {
       }
 
       if (res.code === 0) {
+        const warningItems = Array.isArray((res as any).data?.warnings)
+          ? (res as any).data.warnings
+              .map((item: unknown) => (typeof item === "string" ? item.trim() : ""))
+              .filter((item: string) => item)
+          : [];
+
+        warningItems.forEach((warning: string) => {
+          toast(warning, {
+            icon: "⚠️",
+            duration: 5000,
+          });
+        });
         toast.success(isEdit ? "修改成功" : "创建成功");
         setModalOpen(false);
         loadData();
