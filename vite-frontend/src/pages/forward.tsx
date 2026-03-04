@@ -1426,9 +1426,8 @@ export default function ForwardPage() {
       const speedLimitAutoCleared = isMissingSpeedLimit(form.speedId);
 
       if (isEdit) {
-        const updateData: ForwardMutationPayload = {
+        const updateData = {
           id: form.id,
-          userId: form.userId,
           name: form.name,
           tunnelId: form.tunnelId,
           ...(isAdmin ? { inPort: form.inPort } : {}),
@@ -1440,7 +1439,7 @@ export default function ForwardPage() {
 
         res = await updateForward(updateData);
       } else {
-        const createData: ForwardMutationPayload = {
+        const createData = {
           name: form.name,
           tunnelId: form.tunnelId,
           ...(isAdmin ? { inPort: form.inPort } : {}),
