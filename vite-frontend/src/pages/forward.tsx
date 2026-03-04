@@ -3789,36 +3789,35 @@ export default function ForwardPage() {
                 sensors={sensors}
                 onDragEnd={handleDragEnd}
               >
-                <Table
-                  aria-label="全部转发列表"
-                  classNames={{
-                    th: "bg-default-100/50 text-default-600 font-semibold text-sm border-b border-divider py-3 uppercase tracking-wider",
-                    td: "py-3 border-b border-divider/50 group-data-[last=true]:border-b-0",
-                    tr: "hover:bg-default-50/50 transition-colors",
-                  }}
+                <SortableContext
+                  items={sortableForwardIds}
+                  strategy={verticalListSortingStrategy}
                 >
-                  <TableHeader>
-                    {selectMode && (
-                      <TableColumn className="w-14">选择</TableColumn>
-                    )}
-                    <TableColumn className="w-10 pl-4" />
-                    <TableColumn>用户</TableColumn>
-                    <TableColumn>名称</TableColumn>
-                    <TableColumn>隧道</TableColumn>
-                    <TableColumn>入口</TableColumn>
-                    <TableColumn>目标</TableColumn>
-                    <TableColumn>策略</TableColumn>
-                    <TableColumn>总流量</TableColumn>
-                    <TableColumn>状态</TableColumn>
-                    <TableColumn className="text-right">操作</TableColumn>
-                  </TableHeader>
-                  <TableBody emptyContent="暂无转发配置" items={sortedForwards}>
-                    {(forward) => (
-                      <SortableContext
-                        key={forward.id}
-                        items={sortableForwardIds}
-                        strategy={verticalListSortingStrategy}
-                      >
+                  <Table
+                    aria-label="全部转发列表"
+                    classNames={{
+                      th: "bg-default-100/50 text-default-600 font-semibold text-sm border-b border-divider py-3 uppercase tracking-wider",
+                      td: "py-3 border-b border-divider/50 group-data-[last=true]:border-b-0",
+                      tr: "hover:bg-default-50/50 transition-colors",
+                    }}
+                  >
+                    <TableHeader>
+                      {selectMode && (
+                        <TableColumn className="w-14">选择</TableColumn>
+                      )}
+                      <TableColumn className="w-10 pl-4" />
+                      <TableColumn>用户</TableColumn>
+                      <TableColumn>名称</TableColumn>
+                      <TableColumn>隧道</TableColumn>
+                      <TableColumn>入口</TableColumn>
+                      <TableColumn>目标</TableColumn>
+                      <TableColumn>策略</TableColumn>
+                      <TableColumn>总流量</TableColumn>
+                      <TableColumn>状态</TableColumn>
+                      <TableColumn className="text-right">操作</TableColumn>
+                    </TableHeader>
+                    <TableBody emptyContent="暂无转发配置" items={sortedForwards}>
+                      {(forward) => (
                         <SortableCompactTableRow
                           formatFlow={formatFlow}
                           formatInAddress={formatInAddress}
@@ -3835,10 +3834,10 @@ export default function ForwardPage() {
                           showAddressModal={showAddressModal}
                           toggleSelect={toggleSelect}
                         />
-                      </SortableContext>
-                    )}
-                  </TableBody>
-                </Table>
+                      )}
+                    </TableBody>
+                  </Table>
+                </SortableContext>
               </DndContext>
             </div>
           ) : (
