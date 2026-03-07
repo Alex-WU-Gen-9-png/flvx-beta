@@ -43,6 +43,19 @@ func TestBuildTunnelChainServiceConfig_UsesConnectIPForListen(t *testing.T) {
 	}
 }
 
+func TestBuildTunnelChainServiceConfig_FallsBackToNodeListenAddr(t *testing.T) {
+	node := &nodeRecord{TCPListenAddr: "10.8.0.5"}
+	chain := tunnelRuntimeNode{Protocol: "tls", Port: 21002}
+	services := buildTunnelChainServiceConfig(99, chain, node)
+	if len(services) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(services))
+	}
+	addr, _ := services[0]["addr"].(string)
+	if addr != "10.8.0.5:21002" {
+		t.Fatalf("expected node listen addr 10.8.0.5:21002, got %q", addr)
+	}
+}
+
 func TestBuildTunnelChainServiceConfig_DefaultListenAddrWhenConnectIPEmpty(t *testing.T) {
 	node := &nodeRecord{TCPListenAddr: "[::]"}
 	chain := tunnelRuntimeNode{Protocol: "tls", Port: 21001}
