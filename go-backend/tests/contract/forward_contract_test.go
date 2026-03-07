@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -911,6 +913,164 @@ func TestForwardCreateThenPauseResumeContract(t *testing.T) {
 	resumedStatus := mustQueryInt(t, repo, `SELECT status FROM forward WHERE id = ?`, forwardID)
 	if resumedStatus != 1 {
 		t.Fatalf("expected status=1 after resume, got %d", resumedStatus)
+	}
+}
+
+func TestForwardUpdateRecoversFromAddressInUseContract(t *testing.T) {
+	secret := "contract-jwt-secret"
+	router, repo := setupContractRouter(t, secret)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	adminToken, err := auth.GenerateToken(1, "admin_user", 0, secret)
+	if err != nil {
+		t.Fatalf("generate admin token: %v", err)
+	}
+
+	now := time.Now().UnixMilli()
+	if err := repo.DB().Exec(`
+		INSERT INTO user(id, user, pwd, role_id, exp_time, flow, in_flow, out_flow, flow_reset_time, num, created_time, updated_time, status)
+		VALUES(202, 'forward_bind_retry_user', 'pwd', 1, 2727251700000, 99999, 0, 0, 1, 99999, ?, ?, 1)
+	`, now, now).Error; err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	if err := repo.DB().Exec(`
+		INSERT INTO tunnel(name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "forward-bind-retry-tunnel", 1.0, 1, "tls", 99999, now, now, 1, nil, 0).Error; err != nil {
+		t.Fatalf("insert tunnel: %v", err)
+	}
+	tunnelID := mustLastInsertID(t, repo, "forward-bind-retry-tunnel")
+
+	if err := repo.DB().Exec(`
+		INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "forward-bind-retry-node", "forward-bind-retry-secret", "10.42.0.1", "10.42.0.1", "", "44000-44010", "", "v1", 1, 1, 1, now, now, 1, "10.42.0.9", "[::]", 0).Error; err != nil {
+		t.Fatalf("insert node: %v", err)
+	}
+	nodeID := mustLastInsertID(t, repo, "forward-bind-retry-node")
+
+	if err := repo.DB().Exec(`
+		INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol)
+		VALUES(?, 1, ?, 44001, 'round', 1, 'tls')
+	`, tunnelID, nodeID).Error; err != nil {
+		t.Fatalf("insert chain_tunnel: %v", err)
+	}
+
+	if err := repo.DB().Exec(`
+		INSERT INTO user_tunnel(id, user_id, tunnel_id, speed_id, num, flow, in_flow, out_flow, flow_reset_time, exp_time, status)
+		VALUES(41, 202, ?, NULL, 999, 99999, 0, 0, 1, 2727251700000, 1)
+	`, tunnelID).Error; err != nil {
+		t.Fatalf("insert user_tunnel: %v", err)
+	}
+
+	createPayload := map[string]interface{}{
+		"name":       "forward-bind-retry-target",
+		"tunnelId":   tunnelID,
+		"remoteAddr": "1.1.1.1:443",
+		"strategy":   "fifo",
+	}
+	createBody, err := json.Marshal(createPayload)
+	if err != nil {
+		t.Fatalf("marshal create payload: %v", err)
+	}
+
+	var mu sync.Mutex
+	counts := map[string]int{}
+	var addServiceAddrs []string
+	triggerConflict := false
+	stopNode := startMockNodeSessionWithCommandRecorder(t, server.URL, "forward-bind-retry-secret", func(cmdType string, data json.RawMessage) (bool, string) {
+		key := strings.ToLower(strings.TrimSpace(cmdType))
+		mu.Lock()
+		counts[key]++
+		attempt := counts[key]
+		if strings.EqualFold(strings.TrimSpace(cmdType), "AddService") || strings.EqualFold(strings.TrimSpace(cmdType), "UpdateService") {
+			var services []map[string]interface{}
+			if err := json.Unmarshal(data, &services); err == nil {
+				for _, svc := range services {
+					if addr, _ := svc["addr"].(string); strings.TrimSpace(addr) != "" {
+						addServiceAddrs = append(addServiceAddrs, addr)
+					}
+				}
+			}
+		}
+		shouldFail := false
+		if triggerConflict {
+			if strings.EqualFold(strings.TrimSpace(cmdType), "UpdateService") && attempt == 1 {
+				shouldFail = true
+			}
+			if strings.EqualFold(strings.TrimSpace(cmdType), "AddService") && attempt == 1 {
+				shouldFail = true
+			}
+		}
+		mu.Unlock()
+		if shouldFail {
+			return true, "listen tcp 10.42.0.9:44001: bind: address already in use"
+		}
+		return false, ""
+	})
+	defer stopNode()
+	waitNodeStatus(t, repo, nodeID, 1)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/forward/create", bytes.NewReader(createBody))
+	createReq.Header.Set("Authorization", adminToken)
+	createReq.Header.Set("Content-Type", "application/json")
+	createRes := httptest.NewRecorder()
+	router.ServeHTTP(createRes, createReq)
+	assertCode(t, createRes, 0)
+	mu.Lock()
+	counts = map[string]int{}
+	addServiceAddrs = nil
+	triggerConflict = true
+	mu.Unlock()
+
+	forwardID := mustLastInsertID(t, repo, "forward-bind-retry-target")
+
+	updatePayload := map[string]interface{}{
+		"id":         forwardID,
+		"name":       "forward-bind-retry-target-updated",
+		"tunnelId":   tunnelID,
+		"remoteAddr": "9.9.9.9:8443",
+		"strategy":   "fifo",
+	}
+	updateBody, err := json.Marshal(updatePayload)
+	if err != nil {
+		t.Fatalf("marshal update payload: %v", err)
+	}
+	updateReq := httptest.NewRequest(http.MethodPost, "/api/v1/forward/update", bytes.NewReader(updateBody))
+	updateReq.Header.Set("Authorization", adminToken)
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateRes := httptest.NewRecorder()
+	router.ServeHTTP(updateRes, updateReq)
+	assertCode(t, updateRes, 0)
+
+	mu.Lock()
+	defer mu.Unlock()
+	boundPort := mustQueryInt(t, repo, `SELECT port FROM forward_port WHERE forward_id = ? LIMIT 1`, forwardID)
+	if counts["updateservice"] != 1 {
+		t.Fatalf("expected one UpdateService attempt, got %d (%v)", counts["updateservice"], counts)
+	}
+	if counts["deleteservice"] == 0 {
+		t.Fatalf("expected DeleteService cleanup after address-in-use (%v)", counts)
+	}
+	if counts["addservice"] < 2 {
+		t.Fatalf("expected AddService retry path to run at least twice total, got %d (%v)", counts["addservice"], counts)
+	}
+	foundBindAddr := false
+	for _, addr := range addServiceAddrs {
+		if addr == "10.42.0.9:"+strconv.Itoa(boundPort) {
+			foundBindAddr = true
+			break
+		}
+	}
+	if !foundBindAddr {
+		t.Fatalf("expected forward runtime to keep node listen addr 10.42.0.9:%d, got %v", boundPort, addServiceAddrs)
+	}
+
+	storedRemoteAddr := mustQueryString(t, repo, `SELECT remote_addr FROM forward WHERE id = ?`, forwardID)
+	if storedRemoteAddr != "9.9.9.9:8443" {
+		t.Fatalf("expected remote_addr update to persist, got %q", storedRemoteAddr)
 	}
 }
 

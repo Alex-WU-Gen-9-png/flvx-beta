@@ -273,6 +273,75 @@ func TestIsCannotAssignRequestedAddressError(t *testing.T) {
 	}
 }
 
+func TestRetryTunnelServiceAddWithCleanupRetriesOnAddressInUse(t *testing.T) {
+	addCalls := 0
+	cleanupCalls := 0
+	err := retryTunnelServiceAddWithCleanup(
+		func() error {
+			addCalls++
+			if addCalls == 1 {
+				return errors.New("listen tcp 10.0.0.1:32000: bind: address already in use")
+			}
+			return nil
+		},
+		func() error {
+			cleanupCalls++
+			return nil
+		},
+		0,
+	)
+	if err != nil {
+		t.Fatalf("expected retry to succeed, got %v", err)
+	}
+	if addCalls != 2 {
+		t.Fatalf("expected 2 add attempts, got %d", addCalls)
+	}
+	if cleanupCalls != 1 {
+		t.Fatalf("expected 1 cleanup attempt, got %d", cleanupCalls)
+	}
+}
+
+func TestRetryTunnelServiceAddWithCleanupSkipsCleanupOnNonBindError(t *testing.T) {
+	addCalls := 0
+	cleanupCalls := 0
+	err := retryTunnelServiceAddWithCleanup(
+		func() error {
+			addCalls++
+			return errors.New("network timeout")
+		},
+		func() error {
+			cleanupCalls++
+			return nil
+		},
+		0,
+	)
+	if err == nil {
+		t.Fatalf("expected hard error")
+	}
+	if addCalls != 1 {
+		t.Fatalf("expected 1 add attempt, got %d", addCalls)
+	}
+	if cleanupCalls != 0 {
+		t.Fatalf("expected 0 cleanup attempts, got %d", cleanupCalls)
+	}
+}
+
+func TestRetryTunnelServiceAddWithCleanupReturnsCleanupError(t *testing.T) {
+	cleanupErr := errors.New("delete failed")
+	err := retryTunnelServiceAddWithCleanup(
+		func() error {
+			return errors.New("listen tcp 10.0.0.1:32000: bind: address already in use")
+		},
+		func() error {
+			return cleanupErr
+		},
+		0,
+	)
+	if !errors.Is(err, cleanupErr) {
+		t.Fatalf("expected cleanup error %v, got %v", cleanupErr, err)
+	}
+}
+
 func TestBuildForwardServiceConfigs_UsesBindIPForListen(t *testing.T) {
 	forward := &forwardRecord{RemoteAddr: "1.2.3.4:80", Strategy: "fifo", TunnelID: 7}
 	node := &nodeRecord{TCPListenAddr: "[::]", UDPListenAddr: "[::]"}
