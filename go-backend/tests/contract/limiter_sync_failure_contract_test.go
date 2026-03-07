@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -538,6 +539,134 @@ func TestBatchAssignInsertRollbackWhenLimiterDispatchFailsContract(t *testing.T)
 	}
 }
 
+func TestTunnelUpdateRecoversFromAddressInUseContract(t *testing.T) {
+	secret := "contract-jwt-secret"
+	router, r := setupContractRouter(t, secret)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	adminToken, err := auth.GenerateToken(1, "admin_user", 0, secret)
+	if err != nil {
+		t.Fatalf("generate admin token: %v", err)
+	}
+
+	now := time.Now().UnixMilli()
+	if err := r.DB().Exec(`
+		INSERT INTO tunnel(name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "tunnel-bind-retry", 1.0, 1, "tls", 99999, now, now, 1, nil, 0).Error; err != nil {
+		t.Fatalf("insert tunnel: %v", err)
+	}
+	tunnelID := mustLastInsertID(t, r, "tunnel-bind-retry")
+
+	if err := r.DB().Exec(`
+		INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "tunnel-bind-entry", "tunnel-bind-entry-secret", "10.41.0.1", "10.41.0.1", "", "43000-43010", "", "v1", 1, 1, 1, now, now, 1, "10.41.0.1", "[::]", 0).Error; err != nil {
+		t.Fatalf("insert entry node: %v", err)
+	}
+	entryNodeID := mustLastInsertID(t, r, "tunnel-bind-entry")
+
+	if err := r.DB().Exec(`
+		INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "tunnel-bind-exit", "tunnel-bind-exit-secret", "10.41.0.2", "10.41.0.2", "", "43100-43110", "eth0", "v1", 1, 1, 1, now, now, 1, "10.41.0.9", "[::]", 0).Error; err != nil {
+		t.Fatalf("insert exit node: %v", err)
+	}
+	exitNodeID := mustLastInsertID(t, r, "tunnel-bind-exit")
+
+	if err := r.DB().Exec(`
+		INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol)
+		VALUES(?, 1, ?, 43001, 'round', 1, 'tls')
+	`, tunnelID, entryNodeID).Error; err != nil {
+		t.Fatalf("insert entry chain_tunnel: %v", err)
+	}
+	if err := r.DB().Exec(`
+		INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol, connect_ip)
+		VALUES(?, 3, ?, 43101, 'round', 1, 'tls', ?)
+	`, tunnelID, exitNodeID, "10.41.0.99").Error; err != nil {
+		t.Fatalf("insert exit chain_tunnel: %v", err)
+	}
+
+	var commandMu sync.Mutex
+	commandCounts := map[string]int{}
+	var addServiceAddrs []string
+	stopEntry := startMockNodeSessionWithCommandRecorder(t, server.URL, "tunnel-bind-entry-secret", func(cmdType string, data json.RawMessage) (bool, string) {
+		commandMu.Lock()
+		defer commandMu.Unlock()
+		commandCounts["entry:"+strings.ToLower(strings.TrimSpace(cmdType))]++
+		return false, ""
+	})
+	defer stopEntry()
+	stopExit := startMockNodeSessionWithCommandRecorder(t, server.URL, "tunnel-bind-exit-secret", func(cmdType string, data json.RawMessage) (bool, string) {
+		key := "exit:" + strings.ToLower(strings.TrimSpace(cmdType))
+		commandMu.Lock()
+		commandCounts[key]++
+		attempt := commandCounts[key]
+		if strings.EqualFold(strings.TrimSpace(cmdType), "AddService") {
+			var services []map[string]interface{}
+			if err := json.Unmarshal(data, &services); err == nil {
+				for _, svc := range services {
+					if addr, _ := svc["addr"].(string); strings.TrimSpace(addr) != "" {
+						addServiceAddrs = append(addServiceAddrs, addr)
+					}
+				}
+			}
+		}
+		commandMu.Unlock()
+		if strings.EqualFold(strings.TrimSpace(cmdType), "AddService") && attempt == 1 {
+			return true, "listen tcp 10.41.0.99:43101: bind: address already in use"
+		}
+		return false, ""
+	})
+	defer stopExit()
+	waitNodeStatus(t, r, entryNodeID, 1)
+	waitNodeStatus(t, r, exitNodeID, 1)
+
+	payload := map[string]interface{}{
+		"id":           tunnelID,
+		"name":         "tunnel-bind-retry",
+		"type":         2,
+		"flow":         99999,
+		"trafficRatio": 1.0,
+		"status":       1,
+		"inNodeId": []map[string]interface{}{
+			{"nodeId": entryNodeID, "protocol": "tls", "strategy": "round"},
+		},
+		"chainNodes": []interface{}{},
+		"outNodeId": []map[string]interface{}{
+			{"nodeId": exitNodeID, "protocol": "tls", "strategy": "round", "port": 43101, "connectIp": "10.41.0.99"},
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tunnel/update", bytes.NewReader(body))
+	req.Header.Set("Authorization", adminToken)
+	req.Header.Set("Content-Type", "application/json")
+	res := httptest.NewRecorder()
+	router.ServeHTTP(res, req)
+	assertCode(t, res, 0)
+
+	commandMu.Lock()
+	defer commandMu.Unlock()
+	if commandCounts["exit:addservice"] != 2 {
+		t.Fatalf("expected exit AddService twice, got %d (%v)", commandCounts["exit:addservice"], sortedCommandCounts(commandCounts))
+	}
+	if commandCounts["exit:deleteservice"] == 0 {
+		t.Fatalf("expected exit DeleteService retry cleanup to run (%v)", sortedCommandCounts(commandCounts))
+	}
+	if len(addServiceAddrs) < 2 {
+		t.Fatalf("expected recorded AddService addresses, got %v", addServiceAddrs)
+	}
+	for _, addr := range addServiceAddrs {
+		if addr != "10.41.0.99:43101" {
+			t.Fatalf("expected connectIp to stay preferred in AddService addr, got %q", addr)
+		}
+	}
+}
+
 func startMockNodeSessionWithCommandFailures(t *testing.T, baseURL string, nodeSecret string, failCommands map[string]string) func() {
 	t.Helper()
 
@@ -632,4 +761,113 @@ func startMockNodeSessionWithCommandFailures(t *testing.T, baseURL string, nodeS
 			wg.Wait()
 		})
 	}
+}
+
+func startMockNodeSessionWithCommandRecorder(t *testing.T, baseURL string, nodeSecret string, onCommand func(cmdType string, data json.RawMessage) (bool, string)) func() {
+	t.Helper()
+
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		t.Fatalf("parse provider url: %v", err)
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		u.Scheme = "wss"
+	} else {
+		u.Scheme = "ws"
+	}
+	u.Path = "/system-info"
+	q := u.Query()
+	q.Set("type", "1")
+	q.Set("secret", nodeSecret)
+	q.Set("version", "v1")
+	q.Set("http", "1")
+	q.Set("tls", "1")
+	q.Set("socks", "1")
+	u.RawQuery = q.Encode()
+
+	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	if err != nil {
+		t.Fatalf("dial mock node websocket: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			_, raw, readErr := conn.ReadMessage()
+			if readErr != nil {
+				return
+			}
+
+			plain := raw
+			var wrap struct {
+				Encrypted bool   `json:"encrypted"`
+				Data      string `json:"data"`
+			}
+			if err := json.Unmarshal(raw, &wrap); err == nil && wrap.Encrypted && strings.TrimSpace(wrap.Data) != "" {
+				crypto, cryptoErr := security.NewAESCrypto(nodeSecret)
+				if cryptoErr == nil {
+					if dec, decErr := crypto.Decrypt(wrap.Data); decErr == nil {
+						plain = []byte(dec)
+					}
+				}
+			}
+
+			var cmd struct {
+				Type      string          `json:"type"`
+				RequestID string          `json:"requestId"`
+				Data      json.RawMessage `json:"data"`
+			}
+			if err := json.Unmarshal(plain, &cmd); err != nil {
+				continue
+			}
+			if strings.TrimSpace(cmd.RequestID) == "" {
+				continue
+			}
+
+			shouldFail := false
+			failMsg := ""
+			if onCommand != nil {
+				shouldFail, failMsg = onCommand(strings.TrimSpace(cmd.Type), cmd.Data)
+			}
+
+			respType := fmt.Sprintf("%sResponse", cmd.Type)
+			respPayload := map[string]interface{}{
+				"type":      respType,
+				"success":   !shouldFail,
+				"message":   "OK",
+				"requestId": cmd.RequestID,
+			}
+			if shouldFail {
+				if strings.TrimSpace(failMsg) == "" {
+					failMsg = "mock command failed"
+				}
+				respPayload["message"] = failMsg
+			}
+
+			respBytes, err := json.Marshal(respPayload)
+			if err != nil {
+				continue
+			}
+			_ = conn.WriteMessage(websocket.TextMessage, respBytes)
+		}
+	}()
+
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() {
+			_ = conn.Close()
+			wg.Wait()
+		})
+	}
+}
+
+func sortedCommandCounts(counts map[string]int) []string {
+	items := make([]string, 0, len(counts))
+	for key, value := range counts {
+		items = append(items, fmt.Sprintf("%s=%d", key, value))
+	}
+	sort.Strings(items)
+	return items
 }

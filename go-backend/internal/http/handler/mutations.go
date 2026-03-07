@@ -25,6 +25,8 @@ import (
 	"gorm.io/gorm"
 )
 
+const tunnelServiceBindRetryDelay = 150 * time.Millisecond
+
 func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		response.WriteJSON(w, response.ErrDefault("请求失败"))
@@ -2584,7 +2586,7 @@ func (h *Handler) applyTunnelRuntime(state *tunnelCreateState) ([]int64, []int64
 			createdChains = append(createdChains, chainNode.NodeID)
 
 			serviceData := buildTunnelChainServiceConfig(state.TunnelID, chainNode, state.Nodes[chainNode.NodeID])
-			if _, err := h.sendNodeCommand(chainNode.NodeID, "AddService", serviceData, true, false); err != nil {
+			if err := h.addTunnelServiceOnNode(chainNode.NodeID, state.TunnelID, serviceData); err != nil {
 				return createdChains, createdServices, fmt.Errorf("转发链节点 %s 下发服务失败: %w", nodeDisplayName(state.Nodes[chainNode.NodeID]), err)
 			}
 			createdServices = append(createdServices, chainNode.NodeID)
@@ -2596,13 +2598,51 @@ func (h *Handler) applyTunnelRuntime(state *tunnelCreateState) ([]int64, []int64
 			continue
 		}
 		serviceData := buildTunnelChainServiceConfig(state.TunnelID, outNode, state.Nodes[outNode.NodeID])
-		if _, err := h.sendNodeCommand(outNode.NodeID, "AddService", serviceData, true, false); err != nil {
+		if err := h.addTunnelServiceOnNode(outNode.NodeID, state.TunnelID, serviceData); err != nil {
 			return createdChains, createdServices, fmt.Errorf("出口节点 %s 下发服务失败: %w", nodeDisplayName(state.Nodes[outNode.NodeID]), err)
 		}
 		createdServices = append(createdServices, outNode.NodeID)
 	}
 
 	return createdChains, createdServices, nil
+}
+
+func retryTunnelServiceAddWithCleanup(add func() error, cleanup func() error, wait time.Duration) error {
+	if add == nil {
+		return errors.New("invalid tunnel service add callback")
+	}
+	err := add()
+	if err == nil || !isAddressAlreadyInUseError(err) {
+		return err
+	}
+	if cleanup == nil {
+		return err
+	}
+	if cleanupErr := cleanup(); cleanupErr != nil {
+		return cleanupErr
+	}
+	if wait > 0 {
+		time.Sleep(wait)
+	}
+	return add()
+}
+
+func (h *Handler) addTunnelServiceOnNode(nodeID, tunnelID int64, serviceData []map[string]interface{}) error {
+	if h == nil {
+		return errors.New("invalid tunnel service context")
+	}
+	serviceName := fmt.Sprintf("%d_tls", tunnelID)
+	return retryTunnelServiceAddWithCleanup(
+		func() error {
+			_, err := h.sendNodeCommand(nodeID, "AddService", serviceData, true, false)
+			return err
+		},
+		func() error {
+			_, err := h.sendNodeCommand(nodeID, "DeleteService", map[string]interface{}{"services": []string{serviceName}}, false, true)
+			return err
+		},
+		tunnelServiceBindRetryDelay,
+	)
 }
 
 func (h *Handler) rollbackTunnelRuntime(chainNodeIDs, serviceNodeIDs []int64, tunnelID int64) {
