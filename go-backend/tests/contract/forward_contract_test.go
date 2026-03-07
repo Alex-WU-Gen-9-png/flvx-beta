@@ -1310,6 +1310,30 @@ func TestNonAdminCannotSetSpeedIdOrPort(t *testing.T) {
 		assertCode(t, res, 0)
 	})
 
+	t.Run("non-admin can update when request keeps existing speedId", func(t *testing.T) {
+		if err := repo.DB().Exec(`UPDATE forward SET speed_id = ? WHERE id = ?`, speedID, forwardID).Error; err != nil {
+			t.Fatalf("assign forward speed limit: %v", err)
+		}
+
+		updatePayload := map[string]interface{}{
+			"id":         forwardID,
+			"name":       "perm-forward-keep-speed",
+			"tunnelId":   tunnelID,
+			"remoteAddr": "9.10.11.12:443",
+			"speedId":    speedID,
+		}
+		updateBody, err := json.Marshal(updatePayload)
+		if err != nil {
+			t.Fatalf("marshal update payload: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/forward/update", bytes.NewReader(updateBody))
+		req.Header.Set("Authorization", userToken)
+		req.Header.Set("Content-Type", "application/json")
+		res := httptest.NewRecorder()
+		router.ServeHTTP(res, req)
+		assertCode(t, res, 0)
+	})
+
 	t.Run("non-admin can create with speedId null and inPort 0", func(t *testing.T) {
 		createPayload := map[string]interface{}{
 			"name":       "perm-forward-null-values",

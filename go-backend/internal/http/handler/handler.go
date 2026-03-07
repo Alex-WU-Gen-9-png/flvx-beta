@@ -571,7 +571,7 @@ func (h *Handler) userTunnelList(w http.ResponseWriter, r *http.Request) {
 			"userId":         t.UserID,
 			"tunnelId":       t.TunnelID,
 			"tunnelName":     t.TunnelName,
-			"status":         1,
+			"status":         t.Status,
 			"flow":           t.Flow,
 			"num":            t.Num,
 			"expTime":        t.ExpTime,

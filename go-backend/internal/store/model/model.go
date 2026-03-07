@@ -573,6 +573,7 @@ type UserTunnelDetail struct {
 	UserID        int64
 	TunnelID      int64
 	TunnelName    string
+	Status        int
 	TunnelFlow    int
 	Flow          int64
 	InFlow        int64

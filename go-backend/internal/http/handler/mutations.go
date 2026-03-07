@@ -1279,13 +1279,13 @@ func (h *Handler) forwardUpdate(w http.ResponseWriter, r *http.Request) {
 	if strategy == "" {
 		strategy = forward.Strategy
 	}
-	if actorRole != 0 {
-		if speedIDVal, ok := req["speedId"]; ok && speedIDVal != nil {
-			response.WriteJSON(w, response.Err(-1, "普通用户无法修改限速规则"))
-			return
-		}
+	rawSpeedID, hasSpeedID := req["speedId"]
+	requestedSpeedID := asAnyToInt64Ptr(rawSpeedID)
+	if actorRole != 0 && hasSpeedID && requestedSpeedID != nil && !sameSpeedLimitSelection(forward.SpeedID, requestedSpeedID) {
+		response.WriteJSON(w, response.Err(-1, "普通用户无法修改限速规则"))
+		return
 	}
-	speedID := asAnyToInt64Ptr(req["speedId"])
+	speedID := requestedSpeedID
 	speedID, err = h.normalizeSpeedLimitReference(speedID)
 	if err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
@@ -3378,6 +3378,14 @@ func (h *Handler) normalizeSpeedLimitReference(speedID *int64) (*int64, error) {
 	}
 
 	return speedID, nil
+}
+
+func sameSpeedLimitSelection(current sql.NullInt64, requested *int64) bool {
+	if requested == nil {
+		return !current.Valid
+	}
+
+	return current.Valid && current.Int64 == *requested
 }
 
 func asAnySlice(v interface{}) []interface{} {
