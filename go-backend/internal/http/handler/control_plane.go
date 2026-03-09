@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -1612,13 +1613,14 @@ func buildForwarderNodes(targets []string) []map[string]interface{} {
 }
 
 func processServerAddress(serverAddr string) string {
-	serverAddr = strings.TrimSpace(serverAddr)
+	serverAddr = normalizeServerAddressInput(serverAddr)
 	if serverAddr == "" {
 		return serverAddr
 	}
 	if strings.HasPrefix(serverAddr, "[") {
 		return serverAddr
 	}
+
 	idx := strings.LastIndex(serverAddr, ":")
 	if idx < 0 {
 		if looksLikeIPv6(serverAddr) {
@@ -1635,6 +1637,27 @@ func processServerAddress(serverAddr string) string {
 		return "[" + host + "]:" + port
 	}
 	return serverAddr
+}
+
+func normalizeServerAddressInput(serverAddr string) string {
+	serverAddr = strings.TrimSpace(serverAddr)
+	if serverAddr == "" {
+		return serverAddr
+	}
+
+	if idx := strings.Index(serverAddr, "://"); idx > 0 {
+		if parsed, err := url.Parse(serverAddr); err == nil {
+			if host := strings.TrimSpace(parsed.Host); host != "" {
+				return host
+			}
+		}
+		serverAddr = serverAddr[idx+3:]
+	}
+
+	if idx := strings.IndexAny(serverAddr, "/?#"); idx >= 0 {
+		serverAddr = serverAddr[:idx]
+	}
+	return strings.TrimSpace(serverAddr)
 }
 
 func looksLikeIPv6(address string) bool {

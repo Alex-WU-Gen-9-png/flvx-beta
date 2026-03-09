@@ -97,20 +97,25 @@ const (
 )
 
 type WebSocketReporter struct {
-	url            string
-	addr           string // 保存服务器地址
-	secret         string // 保存密钥
-	version        string // 保存版本号
-	conn           *websocket.Conn
-	reconnectTime  time.Duration
-	pingInterval   time.Duration
-	configInterval time.Duration
-	ctx            context.Context
-	cancel         context.CancelFunc
-	connected      bool
-	connecting     bool              // 新增：正在连接状态
-	connMutex      sync.Mutex        // 新增：连接状态锁
-	aesCrypto      *crypto.AESCrypto // 新增：AES加密器
+	url               string
+	addr              string // 保存服务器地址
+	secret            string // 保存密钥
+	version           string // 保存版本号
+	preferredWSScheme string
+	conn              *websocket.Conn
+	reconnectTime     time.Duration
+	pingInterval      time.Duration
+	configInterval    time.Duration
+	ctx               context.Context
+	cancel            context.CancelFunc
+	connected         bool
+	connecting        bool              // 新增：正在连接状态
+	connMutex         sync.Mutex        // 新增：连接状态锁
+	aesCrypto         *crypto.AESCrypto // 新增：AES加密器
+}
+
+var wsDial = func(dialer *websocket.Dialer, rawURL string) (*websocket.Conn, *http.Response, error) {
+	return dialer.Dial(rawURL, nil)
 }
 
 // NewWebSocketReporter 创建一个新的WebSocket报告器
@@ -223,21 +228,14 @@ func (w *WebSocketReporter) connect() error {
 		json.Unmarshal(b, &cfg)
 	}
 
-	// 使用最新的配置重新构建 URL
-	currentURL := "ws://" + w.addr + "/system-info?type=1&secret=" + w.secret + "&version=" + w.version +
-		"&http=" + strconv.Itoa(cfg.Http) + "&tls=" + strconv.Itoa(cfg.Tls) + "&socks=" + strconv.Itoa(cfg.Socks)
-
-	u, err := url.Parse(currentURL)
-	if err != nil {
-		return fmt.Errorf("解析URL失败: %v", err)
-	}
+	candidates := buildWebSocketCandidates(w.addr, w.secret, w.version, cfg.Http, cfg.Tls, cfg.Socks, w.preferredWSScheme)
 
 	dialer := websocket.DefaultDialer
 	dialer.HandshakeTimeout = 10 * time.Second
 
-	conn, _, err := dialer.Dial(u.String(), nil)
+	conn, usedURL, err := dialWebSocketWithFallback(dialer, candidates)
 	if err != nil {
-		return fmt.Errorf("连接WebSocket失败: %v", err)
+		return err
 	}
 
 	// 如果在连接过程中已经有连接了，关闭新连接
@@ -248,6 +246,9 @@ func (w *WebSocketReporter) connect() error {
 
 	w.conn = conn
 	w.connected = true
+	if scheme := detectWebSocketScheme(usedURL); scheme != "" {
+		w.preferredWSScheme = scheme
+	}
 	_ = conn.SetReadDeadline(time.Now().Add(reporterReadWait))
 	conn.SetPingHandler(func(appData string) error {
 		_ = conn.SetReadDeadline(time.Now().Add(reporterReadWait))
@@ -265,8 +266,143 @@ func (w *WebSocketReporter) connect() error {
 		return nil
 	})
 
-	fmt.Printf("✅ WebSocket连接建立成功 (http=%d, tls=%d, socks=%d)\n", cfg.Http, cfg.Tls, cfg.Socks)
+	fmt.Printf("✅ WebSocket连接建立成功 (%s, http=%d, tls=%d, socks=%d)\n", sanitizeWebSocketURL(usedURL), cfg.Http, cfg.Tls, cfg.Socks)
 	return nil
+}
+
+func buildWebSocketCandidates(addr string, secret string, version string, http int, tls int, socks int, preferredScheme string) []string {
+	normalizedAddr, explicitScheme := normalizeReporterAddress(addr)
+	if normalizedAddr == "" {
+		normalizedAddr = strings.TrimSpace(addr)
+	}
+
+	query := "/system-info?type=1&secret=" + secret + "&version=" + version +
+		"&http=" + strconv.Itoa(http) + "&tls=" + strconv.Itoa(tls) + "&socks=" + strconv.Itoa(socks)
+
+	schemes := []string{"wss", "ws"}
+	if mappedScheme := mapToWebSocketScheme(explicitScheme); mappedScheme != "" {
+		if mappedScheme == "ws" {
+			schemes = []string{"ws", "wss"}
+		}
+	} else if preferredScheme == "ws" {
+		schemes = []string{"ws", "wss"}
+	}
+
+	return []string{
+		schemes[0] + "://" + normalizedAddr + query,
+		schemes[1] + "://" + normalizedAddr + query,
+	}
+}
+
+func normalizeReporterAddress(addr string) (string, string) {
+	raw := strings.TrimSpace(addr)
+	if raw == "" {
+		return "", ""
+	}
+
+	scheme := ""
+	if idx := strings.Index(raw, "://"); idx > 0 {
+		scheme = strings.ToLower(strings.TrimSpace(raw[:idx]))
+		if parsed, err := url.Parse(raw); err == nil {
+			if host := strings.TrimSpace(parsed.Host); host != "" {
+				return host, scheme
+			}
+		}
+		raw = raw[idx+3:]
+	}
+
+	if idx := strings.IndexAny(raw, "/?#"); idx >= 0 {
+		raw = raw[:idx]
+	}
+	return strings.TrimSpace(raw), scheme
+}
+
+func mapToWebSocketScheme(scheme string) string {
+	switch strings.ToLower(strings.TrimSpace(scheme)) {
+	case "wss", "https":
+		return "wss"
+	case "ws", "http":
+		return "ws"
+	default:
+		return ""
+	}
+}
+
+func detectWebSocketScheme(rawURL string) string {
+	if strings.HasPrefix(rawURL, "wss://") {
+		return "wss"
+	}
+	if strings.HasPrefix(rawURL, "ws://") {
+		return "ws"
+	}
+	return ""
+}
+
+func dialWebSocketWithFallback(dialer *websocket.Dialer, candidates []string) (*websocket.Conn, string, error) {
+	if len(candidates) == 0 {
+		return nil, "", fmt.Errorf("WebSocket候选地址为空")
+	}
+
+	var errs []string
+	for i, targetURL := range candidates {
+		conn, resp, err := wsDial(dialer, targetURL)
+		if err == nil {
+			if i > 0 {
+				fmt.Printf("↪️ WebSocket已自动回退成功: %s\n", sanitizeWebSocketURL(targetURL))
+			}
+			return conn, targetURL, nil
+		}
+		errMsg := formatWebSocketDialError(err, resp)
+		errs = append(errs, fmt.Sprintf("%s => %s", sanitizeWebSocketURL(targetURL), errMsg))
+		if i < len(candidates)-1 {
+			fmt.Printf(
+				"⚠️ WebSocket连接失败，准备从 %s 回退到 %s: %s\n",
+				strings.ToUpper(detectWebSocketScheme(targetURL)),
+				strings.ToUpper(detectWebSocketScheme(candidates[i+1])),
+				errMsg,
+			)
+		}
+	}
+
+	return nil, "", fmt.Errorf("连接WebSocket失败（已尝试%d种协议）: %s", len(candidates), strings.Join(errs, " | "))
+}
+
+func sanitizeWebSocketURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+
+	q := u.Query()
+	if q.Get("secret") != "" {
+		q.Set("secret", "***")
+		u.RawQuery = q.Encode()
+	}
+	return u.String()
+}
+
+func formatWebSocketDialError(err error, resp *http.Response) string {
+	if err == nil {
+		return ""
+	}
+	if resp == nil {
+		return err.Error()
+	}
+
+	msg := fmt.Sprintf("%s (HTTP %s)", err, resp.Status)
+	if resp.Body == nil {
+		return msg
+	}
+
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 256))
+	if readErr != nil {
+		return msg
+	}
+	bodyText := strings.TrimSpace(string(body))
+	if bodyText == "" {
+		return msg
+	}
+	return fmt.Sprintf("%s, body=%q", msg, bodyText)
 }
 
 // handleConnection 处理WebSocket连接
@@ -1290,7 +1426,8 @@ func getMemoryInfo() MemoryInfo {
 func StartWebSocketReporterWithConfig(addr string, secret string, http int, tls int, socks int, version string) *WebSocketReporter {
 
 	// 构建初始 WebSocket URL
-	fullURL := "ws://" + addr + "/system-info?type=1&secret=" + secret + "&version=" + version + "&http=" + strconv.Itoa(http) + "&tls=" + strconv.Itoa(tls) + "&socks=" + strconv.Itoa(socks)
+	candidates := buildWebSocketCandidates(addr, secret, version, http, tls, socks, "")
+	fullURL := candidates[0]
 
 	fmt.Printf("🔗 WebSocket连接URL: %s\n", fullURL)
 
