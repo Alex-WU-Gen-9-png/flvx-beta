@@ -193,8 +193,12 @@ export default function NodePage() {
   const [nodeList, setNodeList] = useState<Node[]>([]);
   const [nodeOrder, setNodeOrder] = useState<number[]>([]);
   const [loading, setLoading] = useState(false);
-  const [searchKeyword, setSearchKeyword] = useLocalStorageState(
-    "node-search-keyword",
+  const [localSearchKeyword, setLocalSearchKeyword] = useLocalStorageState(
+    "node-search-keyword-local",
+    "",
+  );
+  const [remoteSearchKeyword, setRemoteSearchKeyword] = useLocalStorageState(
+    "node-search-keyword-remote",
     "",
   );
   const [activeTab, setActiveTab] = useLocalStorageState<NodeTab>(
@@ -436,6 +440,10 @@ export default function NodePage() {
     loadNodes();
     loadRemoteUsage();
   }, [loadNodes, loadRemoteUsage]);
+
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [activeTab]);
 
   // 格式化速度
   const formatSpeed = (bytesPerSecond: number): string => {
@@ -849,17 +857,30 @@ export default function NodePage() {
         );
       }
     } else if (upgradeTarget === "batch") {
+      const selectedLocalIds = Array.from(selectedIds).filter((id) => {
+        const matchedNode = nodeList.find((node) => node.id === id);
+
+        return matchedNode?.isRemote !== 1;
+      });
+
+      if (selectedLocalIds.length === 0) {
+        toast.error("请选择本地节点进行升级");
+        setUpgradeModalOpen(false);
+
+        return;
+      }
+
       setBatchUpgradeLoading(true);
       setUpgradeModalOpen(false);
       try {
         const res = await batchUpgradeNodes(
-          Array.from(selectedIds),
+          selectedLocalIds,
           version,
           releaseChannel,
         );
 
         if (res.code === 0) {
-          toast.success(`批量升级命令已发送到 ${selectedIds.size} 个节点`);
+          toast.success(`批量升级命令已发送到 ${selectedLocalIds.length} 个节点`);
         } else {
           toast.error(res.msg || "批量升级失败");
         }
@@ -990,12 +1011,26 @@ export default function NodePage() {
 
     if (isNaN(activeId) || isNaN(overId)) return;
 
-    const oldIndex = nodeOrder.indexOf(activeId);
-    const newIndex = nodeOrder.indexOf(overId);
+    const displayNodeIds = displayNodes.map((node) => node.id);
+    const oldIndex = displayNodeIds.indexOf(activeId);
+    const newIndex = displayNodeIds.indexOf(overId);
 
     if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) return;
 
-    const newOrder = arrayMove(nodeOrder, oldIndex, newIndex);
+    const reorderedDisplayIds = arrayMove(displayNodeIds, oldIndex, newIndex);
+    const displayIdSet = new Set(displayNodeIds);
+    let reorderedDisplayIndex = 0;
+
+    const newOrder = nodeOrder.map((id) => {
+      if (!displayIdSet.has(id)) {
+        return id;
+      }
+
+      const nextId = reorderedDisplayIds[reorderedDisplayIndex];
+      reorderedDisplayIndex += 1;
+
+      return nextId;
+    });
 
     setNodeOrder(newOrder);
 
@@ -1099,21 +1134,7 @@ export default function NodePage() {
   const sortedNodes = useMemo((): Node[] => {
     if (!nodeList || nodeList.length === 0) return [];
 
-    let filteredNodes = nodeList;
-
-    if (searchKeyword.trim()) {
-      const lowerKeyword = searchKeyword.toLowerCase();
-
-      filteredNodes = filteredNodes.filter(
-        (n) =>
-          (n.name && n.name.toLowerCase().includes(lowerKeyword)) ||
-          (n.serverIp && n.serverIp.toLowerCase().includes(lowerKeyword)) ||
-          (n.serverIpV4 && n.serverIpV4.toLowerCase().includes(lowerKeyword)) ||
-          (n.serverIpV6 && n.serverIpV6.toLowerCase().includes(lowerKeyword)),
-      );
-    }
-
-    const sortedByDb = [...filteredNodes].sort((a, b) => {
+    const sortedByDb = [...nodeList].sort((a, b) => {
       const aInx = a.inx ?? 0;
       const bInx = b.inx ?? 0;
 
@@ -1126,7 +1147,7 @@ export default function NodePage() {
       nodeOrder.length > 0 &&
       sortedByDb.every((n) => n.inx === undefined || n.inx === 0)
     ) {
-      const nodeMap = new Map(filteredNodes.map((n) => [n.id, n] as const));
+      const nodeMap = new Map(nodeList.map((n) => [n.id, n] as const));
       const localSorted: Node[] = [];
 
       nodeOrder.forEach((id) => {
@@ -1135,7 +1156,7 @@ export default function NodePage() {
         if (node) localSorted.push(node);
       });
 
-      filteredNodes.forEach((node) => {
+      nodeList.forEach((node) => {
         if (!nodeOrder.includes(node.id)) {
           localSorted.push(node);
         }
@@ -1145,7 +1166,26 @@ export default function NodePage() {
     }
 
     return sortedByDb;
-  }, [nodeList, nodeOrder, searchKeyword]);
+  }, [nodeList, nodeOrder]);
+
+  const filterNodesByKeyword = useCallback((nodes: Node[], keyword: string) => {
+    const normalizedKeyword = keyword.trim().toLowerCase();
+
+    if (!normalizedKeyword) {
+      return nodes;
+    }
+
+    return nodes.filter(
+      (node) =>
+        (node.name && node.name.toLowerCase().includes(normalizedKeyword)) ||
+        (node.serverIp &&
+          node.serverIp.toLowerCase().includes(normalizedKeyword)) ||
+        (node.serverIpV4 &&
+          node.serverIpV4.toLowerCase().includes(normalizedKeyword)) ||
+        (node.serverIpV6 &&
+          node.serverIpV6.toLowerCase().includes(normalizedKeyword)),
+    );
+  }, []);
 
   const localNodes = useMemo(
     () => sortedNodes.filter((node) => node.isRemote !== 1),
@@ -1157,10 +1197,29 @@ export default function NodePage() {
     [sortedNodes],
   );
 
-  const displayNodes = useMemo(
-    () => (activeTab === "remote" ? remoteNodes : localNodes),
-    [activeTab, localNodes, remoteNodes],
+  const filteredLocalNodes = useMemo(
+    () => filterNodesByKeyword(localNodes, localSearchKeyword),
+    [filterNodesByKeyword, localNodes, localSearchKeyword],
   );
+
+  const filteredRemoteNodes = useMemo(
+    () => filterNodesByKeyword(remoteNodes, remoteSearchKeyword),
+    [filterNodesByKeyword, remoteNodes, remoteSearchKeyword],
+  );
+
+  const currentSearchKeyword =
+    activeTab === "remote" ? remoteSearchKeyword : localSearchKeyword;
+
+  const setCurrentSearchKeyword =
+    activeTab === "remote" ? setRemoteSearchKeyword : setLocalSearchKeyword;
+
+  const displayNodes = useMemo(
+    () => (activeTab === "remote" ? filteredRemoteNodes : filteredLocalNodes),
+    [activeTab, filteredLocalNodes, filteredRemoteNodes],
+  );
+
+  const canBatchUpgrade = activeTab === "local";
+  const isSearchFiltered = currentSearchKeyword.trim().length > 0;
 
   const sortableNodeIds = useMemo(
     () => displayNodes.map((n) => n.id),
@@ -1210,8 +1269,8 @@ export default function NodePage() {
                   ? "搜索远程节点名称或IP"
                   : "搜索本地节点名称或IP"
               }
-              value={searchKeyword}
-              onChange={setSearchKeyword}
+              value={currentSearchKeyword}
+              onChange={setCurrentSearchKeyword}
               onClose={() => setIsSearchVisible(false)}
               onOpen={() => setIsSearchVisible(true)}
             />
@@ -1241,7 +1300,7 @@ export default function NodePage() {
                 </Button>
                 <Button
                   color="warning"
-                  isDisabled={selectedIds.size === 0}
+                  isDisabled={selectedIds.size === 0 || !canBatchUpgrade}
                   isLoading={batchUpgradeLoading}
                   size="sm"
                   variant="flat"
@@ -1315,9 +1374,13 @@ export default function NodePage() {
         <PageEmptyState
           className="h-64"
           message={
-            activeTab === "remote"
-              ? "暂无远程节点"
-              : "暂无本地节点，点击上方按钮开始创建"
+            isSearchFiltered
+              ? activeTab === "remote"
+                ? "未找到匹配的远程节点"
+                : "未找到匹配的本地节点"
+              : activeTab === "remote"
+                ? "暂无远程节点"
+                : "暂无本地节点，点击上方按钮开始创建"
           }
         />
       ) : (
