@@ -136,7 +136,7 @@ func (h *Handler) runResetAndExpiryJob(now time.Time) {
 	}
 
 	h.resetMonthlyFlow(now)
-	h.resetTunnelQuotaWindows(now)
+	h.resetUserQuotaWindows(now)
 	h.disableExpiredUsers(now.UnixMilli())
 	h.disableExpiredUserTunnels(now.UnixMilli())
 }

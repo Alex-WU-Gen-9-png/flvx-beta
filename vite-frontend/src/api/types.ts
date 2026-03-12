@@ -21,6 +21,12 @@ export interface UserApiItem {
   flowResetTime?: number;
   inFlow?: number;
   outFlow?: number;
+  dailyQuotaGB?: number;
+  monthlyQuotaGB?: number;
+  dailyUsedBytes?: number;
+  monthlyUsedBytes?: number;
+  disabledByQuota?: number;
+  quotaDisabledAt?: number;
   [key: string]: unknown;
 }
 
@@ -43,12 +49,6 @@ export interface TunnelApiItem {
   inNodeId?: TunnelChainNodePayload[];
   outNodeId?: TunnelChainNodePayload[];
   chainNodes?: TunnelChainNodePayload[][];
-  dailyQuotaGB?: number;
-  monthlyQuotaGB?: number;
-  dailyUsedBytes?: number;
-  monthlyUsedBytes?: number;
-  disabledByQuota?: number;
-  quotaDisabledAt?: number;
   entryNodeId: number;
   exitNodeId: number;
   inx?: number;
@@ -223,6 +223,8 @@ export interface UserMutationPayload {
   num?: number;
   expTime?: number | string;
   flowResetTime?: number;
+  dailyQuotaGB?: number;
+  monthlyQuotaGB?: number;
   tunnelFlow?: number;
 }
 
@@ -263,8 +265,6 @@ export interface TunnelMutationPayload {
   status?: number;
   flow?: number;
   trafficRatio?: number;
-  dailyQuotaGB?: number;
-  monthlyQuotaGB?: number;
   inIp?: string;
   ipPreference?: string;
   inNodeId?: TunnelChainNodePayload[];
@@ -272,8 +272,8 @@ export interface TunnelMutationPayload {
   chainNodes?: TunnelChainNodePayload[][];
 }
 
-export interface TunnelQuotaResetPayload {
-  tunnelId: number;
+export interface UserQuotaResetPayload {
+  userId: number;
   scope?: "daily" | "monthly" | "all";
 }
 

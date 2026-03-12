@@ -60,6 +60,12 @@ func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 	num := asInt(req["num"], 10)
 	expTime := asInt64(req["expTime"], time.Now().Add(365*24*time.Hour).UnixMilli())
 	flowResetTime := asInt64(req["flowResetTime"], 1)
+	dailyQuotaGB := asInt64(req["dailyQuotaGB"], 0)
+	monthlyQuotaGB := asInt64(req["monthlyQuotaGB"], 0)
+	if dailyQuotaGB < 0 || monthlyQuotaGB < 0 {
+		response.WriteJSON(w, response.ErrDefault("配额不能小于0"))
+		return
+	}
 	roleID := 1
 	now := time.Now().UnixMilli()
 
@@ -67,6 +73,22 @@ func (h *Handler) userCreate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
+	}
+	if dailyQuotaGB > 0 || monthlyQuotaGB > 0 {
+		tx := h.repo.BeginTx()
+		if tx == nil || tx.Error != nil {
+			response.WriteJSON(w, response.Err(-2, "database unavailable"))
+			return
+		}
+		defer func() { tx.Rollback() }()
+		if err := h.repo.SaveUserQuotaConfigTx(tx, userID, dailyQuotaGB, monthlyQuotaGB, now); err != nil {
+			response.WriteJSON(w, response.Err(-2, err.Error()))
+			return
+		}
+		if err := tx.Commit().Error; err != nil {
+			response.WriteJSON(w, response.Err(-2, err.Error()))
+			return
+		}
 	}
 
 	groupIDs := asInt64Slice(req["groupIds"])
@@ -131,6 +153,8 @@ func (h *Handler) userUpdate(w http.ResponseWriter, r *http.Request) {
 	expTime := asInt64(req["expTime"], time.Now().Add(365*24*time.Hour).UnixMilli())
 	flowResetTime := asInt64(req["flowResetTime"], 1)
 	status := asInt(req["status"], 1)
+	_, hasDailyQuota := req["dailyQuotaGB"]
+	_, hasMonthlyQuota := req["monthlyQuotaGB"]
 	now := time.Now().UnixMilli()
 
 	pwd := asString(req["pwd"])
@@ -147,6 +171,34 @@ func (h *Handler) userUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.repo.PropagateUserFlowToTunnels(id, flow, num, expTime, flowResetTime)
+	if hasDailyQuota || hasMonthlyQuota {
+		dailyQuotaGB := asInt64(req["dailyQuotaGB"], 0)
+		monthlyQuotaGB := asInt64(req["monthlyQuotaGB"], 0)
+		if !(hasDailyQuota && hasMonthlyQuota) {
+			if currentQuota, err := h.repo.GetUserQuotaView(id, time.Now()); err == nil && currentQuota != nil {
+				if !hasDailyQuota {
+					dailyQuotaGB = currentQuota.DailyLimitGB
+				}
+				if !hasMonthlyQuota {
+					monthlyQuotaGB = currentQuota.MonthlyLimitGB
+				}
+			}
+		}
+		tx := h.repo.BeginTx()
+		if tx == nil || tx.Error != nil {
+			response.WriteJSON(w, response.Err(-2, "database unavailable"))
+			return
+		}
+		defer func() { tx.Rollback() }()
+		if err := h.repo.SaveUserQuotaConfigTx(tx, id, dailyQuotaGB, monthlyQuotaGB, now); err != nil {
+			response.WriteJSON(w, response.Err(-2, err.Error()))
+			return
+		}
+		if err := tx.Commit().Error; err != nil {
+			response.WriteJSON(w, response.Err(-2, err.Error()))
+			return
+		}
+	}
 
 	if groupIDsRaw, ok := req["groupIds"]; ok {
 		newGroupIDs := asInt64Slice(groupIDsRaw)
@@ -485,8 +537,6 @@ func (h *Handler) tunnelCreate(w http.ResponseWriter, r *http.Request) {
 
 	typeVal := asInt(req["type"], 1)
 	flow := asInt64(req["flow"], 1)
-	dailyQuotaGB := asInt64(req["dailyQuotaGB"], 0)
-	monthlyQuotaGB := asInt64(req["monthlyQuotaGB"], 0)
 	status := asInt(req["status"], 1)
 	trafficRatio := asFloat(req["trafficRatio"], 1.0)
 	inIP := asString(req["inIp"])
@@ -582,10 +632,6 @@ func (h *Handler) tunnelCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tunnelID := tunnel.ID
-	if err := h.repo.SaveTunnelQuotaConfigTx(tx, tunnelID, dailyQuotaGB, monthlyQuotaGB, now); err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
-		return
-	}
 	runtimeState.TunnelID = tunnelID
 	var federationBindings []repo.FederationTunnelBinding
 	var federationReleaseRefs []federationRuntimeReleaseRef
@@ -697,8 +743,6 @@ func (h *Handler) tunnelUpdate(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().UnixMilli()
 	typeVal := asInt(req["type"], 1)
-	dailyQuotaGB := asInt64(req["dailyQuotaGB"], 0)
-	monthlyQuotaGB := asInt64(req["monthlyQuotaGB"], 0)
 	ipPreference := asString(req["ipPreference"])
 	localDomain := h.federationLocalDomain()
 
@@ -740,10 +784,6 @@ func (h *Handler) tunnelUpdate(w http.ResponseWriter, r *http.Request) {
 		ipPreference,
 		now,
 	); err != nil {
-		response.WriteJSON(w, response.Err(-2, err.Error()))
-		return
-	}
-	if err := h.repo.SaveTunnelQuotaConfigTx(tx, id, dailyQuotaGB, monthlyQuotaGB, now); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
@@ -1360,10 +1400,6 @@ func (h *Handler) forwardCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if tunnel.Status != 1 {
-		if reason, quotaErr := h.tunnelQuotaBlockReason(tunnelID, time.Now().UnixMilli()); quotaErr == nil && reason != "" {
-			response.WriteJSON(w, response.ErrDefault(reason))
-			return
-		}
 		response.WriteJSON(w, response.ErrDefault("隧道已禁用，无法创建转发"))
 		return
 	}
@@ -1485,10 +1521,6 @@ func (h *Handler) forwardUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if tunnel.Status != 1 {
-		if reason, quotaErr := h.tunnelQuotaBlockReason(tunnelID, time.Now().UnixMilli()); quotaErr == nil && reason != "" {
-			response.WriteJSON(w, response.ErrDefault(reason))
-			return
-		}
 		response.WriteJSON(w, response.ErrDefault("隧道已禁用，无法更新转发"))
 		return
 	}

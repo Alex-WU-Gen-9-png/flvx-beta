@@ -44,10 +44,8 @@ func (h *Handler) processFlowItem(nodeID int64, item flowItem) {
 	if ok {
 		inFlow, outFlow := h.scaleFlowByTunnel(forwardID, item.D, item.U)
 		_ = h.repo.AddFlow(forwardID, userID, userTunnelID, inFlow, outFlow)
-		if forward, err := h.getForwardRecord(forwardID); err == nil && forward != nil {
-			if quota, quotaErr := h.repo.AddTunnelQuotaUsage(forward.TunnelID, inFlow+outFlow, time.Now()); quotaErr == nil {
-				h.enforceTunnelQuotaIfNeeded(forward.TunnelID, quota)
-			}
+		if quota, quotaErr := h.repo.AddUserQuotaUsage(userID, inFlow+outFlow, time.Now()); quotaErr == nil {
+			h.enforceUserQuotaIfNeeded(userID, quota)
 		}
 		h.processPeerShareFlowFromForward(forwardID, nodeID, serviceName, item)
 
@@ -361,7 +359,7 @@ func (h *Handler) ensureUserTunnelForwardAllowed(userID int64, tunnelID int64, n
 	if flowLimit < current {
 		return errors.New("流量已超额，禁止开启转发")
 	}
-	if err := h.ensureTunnelForwardAllowedByQuota(tunnelID, now); err != nil {
+	if err := h.ensureUserForwardAllowedByQuota(userID, now); err != nil {
 		return err
 	}
 
