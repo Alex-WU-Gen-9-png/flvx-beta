@@ -129,8 +129,8 @@ type Tunnel struct {
 
 func (Tunnel) TableName() string { return "tunnel" }
 
-type TunnelQuota struct {
-	TunnelID         int64  `gorm:"column:tunnel_id;primaryKey"`
+type UserQuota struct {
+	UserID           int64  `gorm:"column:user_id;primaryKey"`
 	DailyLimitGB     int64  `gorm:"column:daily_limit_gb;not null;default:0"`
 	MonthlyLimitGB   int64  `gorm:"column:monthly_limit_gb;not null;default:0"`
 	DailyUsedBytes   int64  `gorm:"column:daily_used_bytes;not null;default:0"`
@@ -144,7 +144,7 @@ type TunnelQuota struct {
 	UpdatedTime      int64  `gorm:"column:updated_time;not null"`
 }
 
-func (TunnelQuota) TableName() string { return "tunnel_quota" }
+func (UserQuota) TableName() string { return "user_quota" }
 
 type ChainTunnel struct {
 	ID        int64          `gorm:"primaryKey;autoIncrement"`
@@ -338,19 +338,23 @@ type BackupData struct {
 }
 
 type UserBackup struct {
-	ID            int64  `json:"id"`
-	User          string `json:"user"`
-	Pwd           string `json:"pwd"`
-	RoleID        int    `json:"roleId"`
-	ExpTime       int64  `json:"expTime"`
-	Flow          int64  `json:"flow"`
-	InFlow        int64  `json:"inFlow"`
-	OutFlow       int64  `json:"outFlow"`
-	FlowResetTime int64  `json:"flowResetTime"`
-	Num           int    `json:"num"`
-	CreatedTime   int64  `json:"createdTime"`
-	UpdatedTime   int64  `json:"updatedTime,omitempty"`
-	Status        int    `json:"status"`
+	ID              int64  `json:"id"`
+	User            string `json:"user"`
+	Pwd             string `json:"pwd"`
+	RoleID          int    `json:"roleId"`
+	ExpTime         int64  `json:"expTime"`
+	Flow            int64  `json:"flow"`
+	InFlow          int64  `json:"inFlow"`
+	OutFlow         int64  `json:"outFlow"`
+	FlowResetTime   int64  `json:"flowResetTime"`
+	DailyQuotaGB    int64  `json:"dailyQuotaGB,omitempty"`
+	MonthlyQuotaGB  int64  `json:"monthlyQuotaGB,omitempty"`
+	DisabledByQuota int    `json:"disabledByQuota,omitempty"`
+	QuotaDisabledAt int64  `json:"quotaDisabledAt,omitempty"`
+	Num             int    `json:"num"`
+	CreatedTime     int64  `json:"createdTime"`
+	UpdatedTime     int64  `json:"updatedTime,omitempty"`
+	Status          int    `json:"status"`
 }
 
 type NodeBackup struct {
@@ -383,23 +387,19 @@ type NodeBackup struct {
 }
 
 type TunnelBackup struct {
-	ID              int64               `json:"id"`
-	Name            string              `json:"name"`
-	TrafficRatio    float64             `json:"trafficRatio"`
-	Type            int                 `json:"type"`
-	Protocol        string              `json:"protocol"`
-	Flow            int64               `json:"flow"`
-	CreatedTime     int64               `json:"createdTime"`
-	UpdatedTime     int64               `json:"updatedTime"`
-	Status          int                 `json:"status"`
-	InIP            string              `json:"inIp,omitempty"`
-	Inx             int                 `json:"inx"`
-	IPPreference    string              `json:"ipPreference,omitempty"`
-	DailyQuotaGB    int64               `json:"dailyQuotaGB,omitempty"`
-	MonthlyQuotaGB  int64               `json:"monthlyQuotaGB,omitempty"`
-	DisabledByQuota int                 `json:"disabledByQuota,omitempty"`
-	QuotaDisabledAt int64               `json:"quotaDisabledAt,omitempty"`
-	ChainTunnels    []ChainTunnelBackup `json:"chainTunnels,omitempty"`
+	ID           int64               `json:"id"`
+	Name         string              `json:"name"`
+	TrafficRatio float64             `json:"trafficRatio"`
+	Type         int                 `json:"type"`
+	Protocol     string              `json:"protocol"`
+	Flow         int64               `json:"flow"`
+	CreatedTime  int64               `json:"createdTime"`
+	UpdatedTime  int64               `json:"updatedTime"`
+	Status       int                 `json:"status"`
+	InIP         string              `json:"inIp,omitempty"`
+	Inx          int                 `json:"inx"`
+	IPPreference string              `json:"ipPreference,omitempty"`
+	ChainTunnels []ChainTunnelBackup `json:"chainTunnels,omitempty"`
 }
 
 type ChainTunnelBackup struct {
@@ -537,8 +537,8 @@ type TunnelRecord struct {
 	TrafficRatio float64
 }
 
-type TunnelQuotaView struct {
-	TunnelID         int64
+type UserQuotaView struct {
+	UserID           int64
 	DailyLimitGB     int64
 	MonthlyLimitGB   int64
 	DailyUsedBytes   int64

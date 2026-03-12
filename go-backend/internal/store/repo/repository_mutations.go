@@ -145,6 +145,9 @@ func (r *Repository) DeleteUserCascade(userID int64) error {
 		if err := tx.Where("user_id = ?", userID).Delete(&model.StatisticsFlow{}).Error; err != nil {
 			return err
 		}
+		if err := tx.Where("user_id = ?", userID).Delete(&model.UserQuota{}).Error; err != nil {
+			return err
+		}
 		return tx.Where("id = ?", userID).Delete(&model.User{}).Error
 	})
 }

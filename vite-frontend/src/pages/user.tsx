@@ -55,6 +55,7 @@ import {
   updateUserTunnel,
   getSpeedLimitList,
   resetUserFlow,
+  resetUserQuota,
   getUserGroupList,
   getUserGroups,
 } from "@/api";
@@ -81,6 +82,16 @@ const formatFlow = (value: number, unit: string = "bytes"): string => {
 
     return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
   }
+};
+
+const formatQuotaLimit = (value?: number): string => {
+  const limit = Number(value ?? 0);
+
+  if (!Number.isFinite(limit) || limit <= 0) {
+    return "不限";
+  }
+
+  return `${limit} GB`;
 };
 
 const formatDate = (timestamp: number): string => {
@@ -138,6 +149,12 @@ const normalizeUserItem = (item: Partial<User>): User => {
     createdTime: item.createdTime,
     inFlow: Number(item.inFlow ?? 0),
     outFlow: Number(item.outFlow ?? 0),
+    dailyQuotaGB: Number(item.dailyQuotaGB ?? 0),
+    monthlyQuotaGB: Number(item.monthlyQuotaGB ?? 0),
+    dailyUsedBytes: Number(item.dailyUsedBytes ?? 0),
+    monthlyUsedBytes: Number(item.monthlyUsedBytes ?? 0),
+    disabledByQuota: Number(item.disabledByQuota ?? 0),
+    quotaDisabledAt: Number(item.quotaDisabledAt ?? 0),
   };
 };
 
@@ -188,11 +205,22 @@ export default function UserPage() {
     pwd: "",
     status: 1,
     flow: 100,
+    dailyQuotaGB: 0,
+    monthlyQuotaGB: 0,
     num: 10,
     expTime: null,
     flowResetTime: 0,
   });
   const [userFormLoading, setUserFormLoading] = useState(false);
+  const [quotaResetLoading, setQuotaResetLoading] = useState(false);
+
+  const editingUser = useMemo(
+    () =>
+      userForm.id
+        ? users.find((item) => item.id === userForm.id) || null
+        : null,
+    [userForm.id, users],
+  );
 
   // 隧道权限管理相关状态
   const {
@@ -442,6 +470,8 @@ export default function UserPage() {
       pwd: "",
       status: 1,
       flow: 100,
+      dailyQuotaGB: 0,
+      monthlyQuotaGB: 0,
       num: 10,
       expTime: null,
       flowResetTime: 0,
@@ -469,6 +499,8 @@ export default function UserPage() {
       pwd: "",
       status: user.status,
       flow: user.flow,
+      dailyQuotaGB: user.dailyQuotaGB ?? 0,
+      monthlyQuotaGB: user.monthlyQuotaGB ?? 0,
       num: user.num,
       expTime: user.expTime ? new Date(user.expTime) : null,
       flowResetTime: user.flowResetTime ?? 0,
@@ -748,6 +780,29 @@ export default function UserPage() {
     }
   };
 
+  const handleQuotaReset = async (scope: "daily" | "monthly" | "all") => {
+    const userId = userForm.id;
+    if (!userId) {
+      return;
+    }
+
+    setQuotaResetLoading(true);
+    try {
+      const response = await resetUserQuota({ userId, scope });
+
+      if (response.code === 0) {
+        toast.success("用户配额已重置");
+        await loadUsers(searchKeyword);
+      } else {
+        toast.error(response.msg || "重置用户配额失败");
+      }
+    } catch {
+      toast.error("重置用户配额失败");
+    } finally {
+      setQuotaResetLoading(false);
+    }
+  };
+
   // 隧道流量重置相关函数
   const handleResetTunnelFlow = (userTunnel: UserTunnel) => {
     setTunnelToReset(userTunnel);
@@ -946,6 +1001,16 @@ export default function UserPage() {
                         >
                           {userStatus.text}
                         </Chip>
+                        {user.disabledByQuota ? (
+                          <Chip
+                            className="text-xs"
+                            color="danger"
+                            size="sm"
+                            variant="flat"
+                          >
+                            配额超额
+                          </Chip>
+                        ) : null}
                       </div>
                     </div>
                   </CardHeader>
@@ -983,6 +1048,28 @@ export default function UserPage() {
 
                       {/* 其他信息 */}
                       <div className="space-y-1.5 pt-2 border-t border-divider">
+                        {(user.dailyQuotaGB ?? 0) > 0 ||
+                        (user.monthlyQuotaGB ?? 0) > 0 ||
+                        (user.disabledByQuota ?? 0) > 0 ? (
+                          <>
+                            <div className="flex justify-between text-sm">
+                              <span className="text-default-600">每日配额</span>
+                              <span className="font-medium text-xs">
+                                {formatFlow(Number(user.dailyUsedBytes ?? 0))} /
+                                {" "}
+                                {formatQuotaLimit(user.dailyQuotaGB)}
+                              </span>
+                            </div>
+                            <div className="flex justify-between text-sm">
+                              <span className="text-default-600">每月配额</span>
+                              <span className="font-medium text-xs">
+                                {formatFlow(Number(user.monthlyUsedBytes ?? 0))} /
+                                {" "}
+                                {formatQuotaLimit(user.monthlyQuotaGB)}
+                              </span>
+                            </div>
+                          </>
+                        ) : null}
                         <div className="flex justify-between text-sm">
                           <span className="text-default-600">规则数量</span>
                           <span className="font-medium text-xs">
@@ -1139,6 +1226,38 @@ export default function UserPage() {
                 }}
               />
               <Input
+                label="每日配额(GB)"
+                max="99999"
+                min="0"
+                placeholder="0 表示不限"
+                type="number"
+                value={userForm.dailyQuotaGB.toString()}
+                onChange={(e) => {
+                  const value = Math.min(
+                    Math.max(Number(e.target.value) || 0, 0),
+                    99999,
+                  );
+
+                  setUserForm((prev) => ({ ...prev, dailyQuotaGB: value }));
+                }}
+              />
+              <Input
+                label="每月配额(GB)"
+                max="99999"
+                min="0"
+                placeholder="0 表示不限"
+                type="number"
+                value={userForm.monthlyQuotaGB.toString()}
+                onChange={(e) => {
+                  const value = Math.min(
+                    Math.max(Number(e.target.value) || 0, 0),
+                    99999,
+                  );
+
+                  setUserForm((prev) => ({ ...prev, monthlyQuotaGB: value }));
+                }}
+              />
+              <Input
                 isRequired
                 label="规则数量"
                 max="99999"
@@ -1209,6 +1328,81 @@ export default function UserPage() {
                 }}
               />
             </div>
+
+            {isEdit &&
+              editingUser &&
+              ((editingUser.dailyQuotaGB ?? 0) > 0 ||
+                (editingUser.monthlyQuotaGB ?? 0) > 0 ||
+                (editingUser.disabledByQuota ?? 0) > 0) && (
+                <div className="space-y-3 rounded-xl border border-default-200 bg-default-50/60 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold text-foreground">
+                        当前配额状态
+                      </h3>
+                      <p className="text-xs text-default-500">
+                        配额超额后会自动暂停该用户的转发，重置后可恢复
+                      </p>
+                    </div>
+                    {editingUser.disabledByQuota ? (
+                      <Chip color="danger" size="sm" variant="flat">
+                        配额已触发禁用
+                      </Chip>
+                    ) : (
+                      <Chip color="success" size="sm" variant="flat">
+                        配额正常
+                      </Chip>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                    <div className="rounded-lg bg-background p-3">
+                      <div className="text-xs text-default-500">每日用量</div>
+                      <div className="mt-1 text-sm font-semibold text-foreground">
+                        {formatFlow(Number(editingUser.dailyUsedBytes ?? 0))} /{" "}
+                        {formatQuotaLimit(editingUser.dailyQuotaGB)}
+                      </div>
+                    </div>
+                    <div className="rounded-lg bg-background p-3">
+                      <div className="text-xs text-default-500">每月用量</div>
+                      <div className="mt-1 text-sm font-semibold text-foreground">
+                        {formatFlow(Number(editingUser.monthlyUsedBytes ?? 0))} /{" "}
+                        {formatQuotaLimit(editingUser.monthlyQuotaGB)}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      color="warning"
+                      isLoading={quotaResetLoading}
+                      size="sm"
+                      variant="flat"
+                      onPress={() => handleQuotaReset("daily")}
+                    >
+                      重置每日配额
+                    </Button>
+                    <Button
+                      color="warning"
+                      isLoading={quotaResetLoading}
+                      size="sm"
+                      variant="flat"
+                      onPress={() => handleQuotaReset("monthly")}
+                    >
+                      重置每月配额
+                    </Button>
+                    <Button
+                      color="primary"
+                      isLoading={quotaResetLoading}
+                      size="sm"
+                      variant="flat"
+                      onPress={() => handleQuotaReset("all")}
+                    >
+                      全部重置并恢复
+                    </Button>
+                  </div>
+                </div>
+              )}
 
             <RadioGroup
               label="状态"

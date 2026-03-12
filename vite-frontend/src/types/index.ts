@@ -18,6 +18,12 @@ export interface User {
   createdTime?: number; // 创建时间戳
   inFlow?: number; // 下载流量(字节)
   outFlow?: number; // 上传流量(字节)
+  dailyQuotaGB?: number;
+  monthlyQuotaGB?: number;
+  dailyUsedBytes?: number;
+  monthlyUsedBytes?: number;
+  disabledByQuota?: number;
+  quotaDisabledAt?: number;
 }
 
 export interface UserGroup {
@@ -33,6 +39,8 @@ export interface UserForm {
   pwd?: string;
   status: number;
   flow: number;
+  dailyQuotaGB: number;
+  monthlyQuotaGB: number;
   num: number;
   expTime: Date | null;
   flowResetTime: number;
@@ -83,11 +91,6 @@ export interface Tunnel {
   exitNodeName?: string;
   status?: number;
   flow?: number; // 流量计算类型
-  dailyQuotaGB?: number;
-  monthlyQuotaGB?: number;
-  dailyUsedBytes?: number;
-  monthlyUsedBytes?: number;
-  disabledByQuota?: number;
 }
 
 export interface SpeedLimit {

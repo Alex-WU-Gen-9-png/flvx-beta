@@ -13,21 +13,24 @@ import (
 	"go-backend/internal/http/response"
 )
 
-func TestForwardCreateBlockedWhenTunnelQuotaExceeded(t *testing.T) {
+func TestForwardCreateBlockedWhenUserQuotaExceeded(t *testing.T) {
 	secret := "contract-jwt-secret"
 	router, repo := setupContractRouter(t, secret)
-	now := time.Now().UnixMilli()
+	now := time.Now()
+	nowMs := now.UnixMilli()
+	dayKey := int64(now.Year()*10000 + int(now.Month())*100 + now.Day())
+	monthKey := int64(now.Year()*100 + int(now.Month()))
 
 	if err := repo.DB().Exec(`
 		INSERT INTO user(id, user, pwd, role_id, exp_time, flow, in_flow, out_flow, flow_reset_time, num, created_time, updated_time, status)
 		VALUES(2, 'quota_user', 'pwd', 1, 2727251700000, 99999, 0, 0, 1, 99999, ?, ?, 1)
-	`, now, now).Error; err != nil {
+	`, nowMs, nowMs).Error; err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
 	if err := repo.DB().Exec(`
 		INSERT INTO tunnel(id, name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
-		VALUES(1, 'quota_tunnel', 1.0, 1, 'tls', 1, ?, ?, 0, NULL, 0)
-	`, now, now).Error; err != nil {
+		VALUES(1, 'quota_tunnel', 1.0, 1, 'tls', 1, ?, ?, 1, NULL, 0)
+	`, nowMs, nowMs).Error; err != nil {
 		t.Fatalf("insert tunnel: %v", err)
 	}
 	if err := repo.DB().Exec(`
@@ -37,10 +40,10 @@ func TestForwardCreateBlockedWhenTunnelQuotaExceeded(t *testing.T) {
 		t.Fatalf("insert user_tunnel: %v", err)
 	}
 	if err := repo.DB().Exec(`
-		INSERT INTO tunnel_quota(tunnel_id, daily_limit_gb, monthly_limit_gb, daily_used_bytes, monthly_used_bytes, day_key, month_key, disabled_by_quota, disabled_at, paused_forward_ids, created_time, updated_time)
-		VALUES(1, 10, 0, ?, ?, 20260311, 202603, 1, ?, '', ?, ?)
-	`, 11*contractBytesPerGB, 11*contractBytesPerGB, now, now, now).Error; err != nil {
-		t.Fatalf("insert tunnel_quota: %v", err)
+		INSERT INTO user_quota(user_id, daily_limit_gb, monthly_limit_gb, daily_used_bytes, monthly_used_bytes, day_key, month_key, disabled_by_quota, disabled_at, paused_forward_ids, created_time, updated_time)
+		VALUES(2, 10, 0, ?, ?, ?, ?, 1, ?, '', ?, ?)
+	`, 11*contractBytesPerGB, 11*contractBytesPerGB, dayKey, monthKey, nowMs, nowMs, nowMs).Error; err != nil {
+		t.Fatalf("insert user_quota: %v", err)
 	}
 
 	token, err := auth.GenerateToken(2, "quota_user", 1, secret)
@@ -59,28 +62,31 @@ func TestForwardCreateBlockedWhenTunnelQuotaExceeded(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	if out.Code == 0 {
-		t.Fatalf("expected non-zero code when tunnel quota exceeded")
+		t.Fatalf("expected non-zero code when user quota exceeded")
 	}
 	if !strings.Contains(out.Msg, "配额") {
 		t.Fatalf("expected quota error, got %q", out.Msg)
 	}
 }
 
-func TestForwardResumeBlockedWhenTunnelQuotaExceeded(t *testing.T) {
+func TestForwardResumeBlockedWhenUserQuotaExceeded(t *testing.T) {
 	secret := "contract-jwt-secret"
 	router, repo := setupContractRouter(t, secret)
-	now := time.Now().UnixMilli()
+	now := time.Now()
+	nowMs := now.UnixMilli()
+	dayKey := int64(now.Year()*10000 + int(now.Month())*100 + now.Day())
+	monthKey := int64(now.Year()*100 + int(now.Month()))
 
 	if err := repo.DB().Exec(`
 		INSERT INTO user(id, user, pwd, role_id, exp_time, flow, in_flow, out_flow, flow_reset_time, num, created_time, updated_time, status)
 		VALUES(2, 'quota_resume_user', 'pwd', 1, 2727251700000, 99999, 0, 0, 1, 99999, ?, ?, 1)
-	`, now, now).Error; err != nil {
+	`, nowMs, nowMs).Error; err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
 	if err := repo.DB().Exec(`
 		INSERT INTO tunnel(id, name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
-		VALUES(1, 'quota_resume_tunnel', 1.0, 1, 'tls', 1, ?, ?, 0, NULL, 0)
-	`, now, now).Error; err != nil {
+		VALUES(1, 'quota_resume_tunnel', 1.0, 1, 'tls', 1, ?, ?, 1, NULL, 0)
+	`, nowMs, nowMs).Error; err != nil {
 		t.Fatalf("insert tunnel: %v", err)
 	}
 	if err := repo.DB().Exec(`
@@ -92,14 +98,14 @@ func TestForwardResumeBlockedWhenTunnelQuotaExceeded(t *testing.T) {
 	if err := repo.DB().Exec(`
 		INSERT INTO forward(id, user_id, user_name, name, tunnel_id, remote_addr, strategy, in_flow, out_flow, created_time, updated_time, status, inx)
 		VALUES(1, 2, 'quota_resume_user', 'quota_resume_forward', 1, '1.1.1.1:53', 'fifo', 0, 0, ?, ?, 0, 0)
-	`, now, now).Error; err != nil {
+	`, nowMs, nowMs).Error; err != nil {
 		t.Fatalf("insert forward: %v", err)
 	}
 	if err := repo.DB().Exec(`
-		INSERT INTO tunnel_quota(tunnel_id, daily_limit_gb, monthly_limit_gb, daily_used_bytes, monthly_used_bytes, day_key, month_key, disabled_by_quota, disabled_at, paused_forward_ids, created_time, updated_time)
-		VALUES(1, 10, 0, ?, ?, 20260311, 202603, 1, ?, '1', ?, ?)
-	`, 11*contractBytesPerGB, 11*contractBytesPerGB, now, now, now).Error; err != nil {
-		t.Fatalf("insert tunnel_quota: %v", err)
+		INSERT INTO user_quota(user_id, daily_limit_gb, monthly_limit_gb, daily_used_bytes, monthly_used_bytes, day_key, month_key, disabled_by_quota, disabled_at, paused_forward_ids, created_time, updated_time)
+		VALUES(2, 10, 0, ?, ?, ?, ?, 1, ?, '1', ?, ?)
+	`, 11*contractBytesPerGB, 11*contractBytesPerGB, dayKey, monthKey, nowMs, nowMs, nowMs).Error; err != nil {
+		t.Fatalf("insert user_quota: %v", err)
 	}
 
 	token, err := auth.GenerateToken(2, "quota_resume_user", 1, secret)
@@ -118,7 +124,7 @@ func TestForwardResumeBlockedWhenTunnelQuotaExceeded(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	if out.Code == 0 {
-		t.Fatalf("expected non-zero code when tunnel quota exceeded")
+		t.Fatalf("expected non-zero code when user quota exceeded")
 	}
 	if !strings.Contains(out.Msg, "配额") {
 		t.Fatalf("expected quota error, got %q", out.Msg)
@@ -129,29 +135,32 @@ func TestForwardResumeBlockedWhenTunnelQuotaExceeded(t *testing.T) {
 	}
 }
 
-func TestTunnelQuotaResetReEnablesTunnel(t *testing.T) {
+func TestUserQuotaResetClearsDisableFlag(t *testing.T) {
 	secret := "contract-jwt-secret"
 	router, repo := setupContractRouter(t, secret)
-	now := time.Now().UnixMilli()
+	now := time.Now()
+	nowMs := now.UnixMilli()
+	dayKey := int64(now.Year()*10000 + int(now.Month())*100 + now.Day())
+	monthKey := int64(now.Year()*100 + int(now.Month()))
 
 	if err := repo.DB().Exec(`
-		INSERT INTO tunnel(id, name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
-		VALUES(1, 'quota_reset_tunnel', 1.0, 1, 'tls', 1, ?, ?, 0, NULL, 0)
-	`, now, now).Error; err != nil {
-		t.Fatalf("insert tunnel: %v", err)
+		INSERT INTO user(id, user, pwd, role_id, exp_time, flow, in_flow, out_flow, flow_reset_time, num, created_time, updated_time, status)
+		VALUES(2, 'quota_reset_user', 'pwd', 1, 2727251700000, 99999, 0, 0, 1, 99999, ?, ?, 1)
+	`, nowMs, nowMs).Error; err != nil {
+		t.Fatalf("insert user: %v", err)
 	}
 	if err := repo.DB().Exec(`
-		INSERT INTO tunnel_quota(tunnel_id, daily_limit_gb, monthly_limit_gb, daily_used_bytes, monthly_used_bytes, day_key, month_key, disabled_by_quota, disabled_at, paused_forward_ids, created_time, updated_time)
-		VALUES(1, 10, 0, ?, ?, 20260311, 202603, 1, ?, '', ?, ?)
-	`, 11*contractBytesPerGB, 11*contractBytesPerGB, now, now, now).Error; err != nil {
-		t.Fatalf("insert tunnel_quota: %v", err)
+		INSERT INTO user_quota(user_id, daily_limit_gb, monthly_limit_gb, daily_used_bytes, monthly_used_bytes, day_key, month_key, disabled_by_quota, disabled_at, paused_forward_ids, created_time, updated_time)
+		VALUES(2, 10, 0, ?, ?, ?, ?, 1, ?, '', ?, ?)
+	`, 11*contractBytesPerGB, 11*contractBytesPerGB, dayKey, monthKey, nowMs, nowMs, nowMs).Error; err != nil {
+		t.Fatalf("insert user_quota: %v", err)
 	}
 
 	token, err := auth.GenerateToken(1, "admin", 0, secret)
 	if err != nil {
 		t.Fatalf("generate token: %v", err)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/tunnel/quota/reset", bytes.NewBufferString(`{"tunnelId":1,"scope":"all"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/user/quota/reset", bytes.NewBufferString(`{"userId":2,"scope":"all"}`))
 	req.Header.Set("Authorization", token)
 	req.Header.Set("Content-Type", "application/json")
 	res := httptest.NewRecorder()
@@ -165,11 +174,7 @@ func TestTunnelQuotaResetReEnablesTunnel(t *testing.T) {
 	if out.Code != 0 {
 		t.Fatalf("expected reset success, got code=%d msg=%q", out.Code, out.Msg)
 	}
-	tunnelStatus := mustQueryInt(t, repo, `SELECT status FROM tunnel WHERE id = 1`)
-	if tunnelStatus != 1 {
-		t.Fatalf("expected tunnel to be re-enabled, got %d", tunnelStatus)
-	}
-	quotaDisabled := mustQueryInt(t, repo, `SELECT disabled_by_quota FROM tunnel_quota WHERE tunnel_id = 1`)
+	quotaDisabled := mustQueryInt(t, repo, `SELECT disabled_by_quota FROM user_quota WHERE user_id = 2`)
 	if quotaDisabled != 0 {
 		t.Fatalf("expected quota disable flag cleared, got %d", quotaDisabled)
 	}

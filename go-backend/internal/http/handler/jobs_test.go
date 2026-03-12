@@ -144,7 +144,7 @@ func TestRunResetAndExpiryJobResetsFlowAndDisablesExpiredRecords(t *testing.T) {
 	}
 }
 
-func TestRunResetAndExpiryJobResetsTunnelQuotaAndReEnablesTunnel(t *testing.T) {
+func TestRunResetAndExpiryJobResetsUserQuotaAndUnblocksUser(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "jobs-quota-reset.db")
 	r, err := repo.Open(dbPath)
 	if err != nil {
@@ -157,29 +157,25 @@ func TestRunResetAndExpiryJobResetsTunnelQuotaAndReEnablesTunnel(t *testing.T) {
 	nowMs := now.UnixMilli()
 
 	if err := r.DB().Exec(`
-		INSERT INTO tunnel(id, name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
-		VALUES(1, 'quota-reset-tunnel', 1.0, 1, 'tls', 1, ?, ?, 0, NULL, 0)
+		INSERT INTO user(id, user, pwd, role_id, exp_time, flow, in_flow, out_flow, flow_reset_time, num, created_time, updated_time, status)
+		VALUES(2, 'quota-reset-user', 'x', 1, 0, 99999, 0, 0, 1, 99999, ?, ?, 1)
 	`, nowMs, nowMs).Error; err != nil {
-		t.Fatalf("insert tunnel: %v", err)
+		t.Fatalf("insert user: %v", err)
 	}
 	if err := r.DB().Exec(`
-		INSERT INTO tunnel_quota(tunnel_id, daily_limit_gb, monthly_limit_gb, daily_used_bytes, monthly_used_bytes, day_key, month_key, disabled_by_quota, disabled_at, paused_forward_ids, created_time, updated_time)
-		VALUES(1, 10, 0, ?, ?, 20260311, 202603, 1, ?, '', ?, ?)
+		INSERT INTO user_quota(user_id, daily_limit_gb, monthly_limit_gb, daily_used_bytes, monthly_used_bytes, day_key, month_key, disabled_by_quota, disabled_at, paused_forward_ids, created_time, updated_time)
+		VALUES(2, 10, 0, ?, ?, 20260311, 202603, 1, ?, '', ?, ?)
 	`, 11*int64(1024*1024*1024), 11*int64(1024*1024*1024), nowMs, nowMs, nowMs).Error; err != nil {
-		t.Fatalf("insert tunnel quota: %v", err)
+		t.Fatalf("insert user quota: %v", err)
 	}
 
 	h.runResetAndExpiryJob(now)
 
-	tunnelStatus := mustQueryInt(t, r, `SELECT status FROM tunnel WHERE id = 1`)
-	if tunnelStatus != 1 {
-		t.Fatalf("expected tunnel re-enabled after quota reset, got %d", tunnelStatus)
-	}
-	dailyUsed := mustQueryInt(t, r, `SELECT daily_used_bytes FROM tunnel_quota WHERE tunnel_id = 1`)
+	dailyUsed := mustQueryInt(t, r, `SELECT daily_used_bytes FROM user_quota WHERE user_id = 2`)
 	if dailyUsed != 0 {
 		t.Fatalf("expected daily quota usage reset, got %d", dailyUsed)
 	}
-	quotaDisabled := mustQueryInt(t, r, `SELECT disabled_by_quota FROM tunnel_quota WHERE tunnel_id = 1`)
+	quotaDisabled := mustQueryInt(t, r, `SELECT disabled_by_quota FROM user_quota WHERE user_id = 2`)
 	if quotaDisabled != 0 {
 		t.Fatalf("expected quota disabled flag cleared, got %d", quotaDisabled)
 	}

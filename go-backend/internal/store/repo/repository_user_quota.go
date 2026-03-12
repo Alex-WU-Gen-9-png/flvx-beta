@@ -13,21 +13,21 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const tunnelQuotaBytesPerGB int64 = 1024 * 1024 * 1024
+const userQuotaBytesPerGB int64 = 1024 * 1024 * 1024
 
-type TunnelQuotaRelease struct {
-	TunnelID     int64
-	ForwardIDs   []int64
-	EnableTunnel bool
+type UserQuotaRelease struct {
+	UserID      int64
+	ForwardIDs  []int64
+	UnblockUser bool
 }
 
-func tunnelQuotaWindowKeys(now time.Time) (int64, int64) {
+func userQuotaWindowKeys(now time.Time) (int64, int64) {
 	return int64(now.Year()*10000 + int(now.Month())*100 + now.Day()), int64(now.Year()*100 + int(now.Month()))
 }
 
-func cloneTunnelQuotaView(q model.TunnelQuota) *model.TunnelQuotaView {
-	return &model.TunnelQuotaView{
-		TunnelID:         q.TunnelID,
+func cloneUserQuotaView(q model.UserQuota) *model.UserQuotaView {
+	return &model.UserQuotaView{
+		UserID:           q.UserID,
 		DailyLimitGB:     q.DailyLimitGB,
 		MonthlyLimitGB:   q.MonthlyLimitGB,
 		DailyUsedBytes:   q.DailyUsedBytes,
@@ -40,11 +40,11 @@ func cloneTunnelQuotaView(q model.TunnelQuota) *model.TunnelQuotaView {
 	}
 }
 
-func normalizeTunnelQuotaView(view *model.TunnelQuotaView, now time.Time) *model.TunnelQuotaView {
+func normalizeUserQuotaView(view *model.UserQuotaView, now time.Time) *model.UserQuotaView {
 	if view == nil {
 		return nil
 	}
-	dayKey, monthKey := tunnelQuotaWindowKeys(now)
+	dayKey, monthKey := userQuotaWindowKeys(now)
 	out := *view
 	if out.DayKey != dayKey {
 		out.DayKey = dayKey
@@ -57,14 +57,14 @@ func normalizeTunnelQuotaView(view *model.TunnelQuotaView, now time.Time) *model
 	return &out
 }
 
-func tunnelQuotaExceeded(view *model.TunnelQuotaView) bool {
+func userQuotaExceeded(view *model.UserQuotaView) bool {
 	if view == nil {
 		return false
 	}
-	if view.DailyLimitGB > 0 && view.DailyUsedBytes >= view.DailyLimitGB*tunnelQuotaBytesPerGB {
+	if view.DailyLimitGB > 0 && view.DailyUsedBytes >= view.DailyLimitGB*userQuotaBytesPerGB {
 		return true
 	}
-	if view.MonthlyLimitGB > 0 && view.MonthlyUsedBytes >= view.MonthlyLimitGB*tunnelQuotaBytesPerGB {
+	if view.MonthlyLimitGB > 0 && view.MonthlyUsedBytes >= view.MonthlyLimitGB*userQuotaBytesPerGB {
 		return true
 	}
 	return false
@@ -107,13 +107,13 @@ func joinPausedForwardIDs(ids []int64) string {
 	return strings.Join(parts, ",")
 }
 
-func (r *Repository) loadOrCreateTunnelQuotaTx(tx *gorm.DB, tunnelID int64, now time.Time) (*model.TunnelQuota, error) {
+func (r *Repository) loadOrCreateUserQuotaTx(tx *gorm.DB, userID int64, now time.Time) (*model.UserQuota, error) {
 	if tx == nil {
 		return nil, errors.New("database unavailable")
 	}
-	dayKey, monthKey := tunnelQuotaWindowKeys(now)
-	q := &model.TunnelQuota{}
-	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("tunnel_id = ?", tunnelID).First(q).Error
+	dayKey, monthKey := userQuotaWindowKeys(now)
+	q := &model.UserQuota{}
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("user_id = ?", userID).First(q).Error
 	if err == nil {
 		return q, nil
 	}
@@ -121,8 +121,8 @@ func (r *Repository) loadOrCreateTunnelQuotaTx(tx *gorm.DB, tunnelID int64, now 
 		return nil, err
 	}
 	nowMs := now.UnixMilli()
-	q = &model.TunnelQuota{
-		TunnelID:         tunnelID,
+	q = &model.UserQuota{
+		UserID:           userID,
 		DayKey:           dayKey,
 		MonthKey:         monthKey,
 		CreatedTime:      nowMs,
@@ -135,12 +135,12 @@ func (r *Repository) loadOrCreateTunnelQuotaTx(tx *gorm.DB, tunnelID int64, now 
 	return q, nil
 }
 
-func applyTunnelQuotaWindowRoll(q *model.TunnelQuota, now time.Time) bool {
+func applyUserQuotaWindowRoll(q *model.UserQuota, now time.Time) bool {
 	if q == nil {
 		return false
 	}
 	changed := false
-	dayKey, monthKey := tunnelQuotaWindowKeys(now)
+	dayKey, monthKey := userQuotaWindowKeys(now)
 	if q.DayKey != dayKey {
 		q.DayKey = dayKey
 		q.DailyUsedBytes = 0
@@ -154,18 +154,18 @@ func applyTunnelQuotaWindowRoll(q *model.TunnelQuota, now time.Time) bool {
 	return changed
 }
 
-func (r *Repository) SaveTunnelQuotaConfigTx(tx *gorm.DB, tunnelID, dailyLimitGB, monthlyLimitGB int64, now int64) error {
+func (r *Repository) SaveUserQuotaConfigTx(tx *gorm.DB, userID, dailyLimitGB, monthlyLimitGB int64, now int64) error {
 	if tx == nil {
 		return errors.New("database unavailable")
 	}
-	if tunnelID <= 0 {
-		return errors.New("tunnel id is required")
+	if userID <= 0 {
+		return errors.New("user id is required")
 	}
 	if dailyLimitGB < 0 || monthlyLimitGB < 0 {
 		return errors.New("quota limit cannot be negative")
 	}
 	current := time.UnixMilli(now)
-	q, err := r.loadOrCreateTunnelQuotaTx(tx, tunnelID, current)
+	q, err := r.loadOrCreateUserQuotaTx(tx, userID, current)
 	if err != nil {
 		return err
 	}
@@ -175,69 +175,69 @@ func (r *Repository) SaveTunnelQuotaConfigTx(tx *gorm.DB, tunnelID, dailyLimitGB
 		"updated_time":     now,
 	}
 	if q.DayKey == 0 || q.MonthKey == 0 {
-		dayKey, monthKey := tunnelQuotaWindowKeys(current)
+		dayKey, monthKey := userQuotaWindowKeys(current)
 		updates["day_key"] = dayKey
 		updates["month_key"] = monthKey
 	}
-	return tx.Model(&model.TunnelQuota{}).Where("tunnel_id = ?", tunnelID).Updates(updates).Error
+	return tx.Model(&model.UserQuota{}).Where("user_id = ?", userID).Updates(updates).Error
 }
 
-func (r *Repository) ListTunnelQuotaViewsByTunnelIDs(tunnelIDs []int64, now time.Time) (map[int64]*model.TunnelQuotaView, error) {
+func (r *Repository) ListUserQuotaViewsByUserIDs(userIDs []int64, now time.Time) (map[int64]*model.UserQuotaView, error) {
 	if r == nil || r.db == nil {
 		return nil, errors.New("repository not initialized")
 	}
-	out := make(map[int64]*model.TunnelQuotaView)
-	if len(tunnelIDs) == 0 {
+	out := make(map[int64]*model.UserQuotaView)
+	if len(userIDs) == 0 {
 		return out, nil
 	}
-	var rows []model.TunnelQuota
-	if err := r.db.Where("tunnel_id IN ?", tunnelIDs).Find(&rows).Error; err != nil {
+	var rows []model.UserQuota
+	if err := r.db.Where("user_id IN ?", userIDs).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	for _, row := range rows {
-		out[row.TunnelID] = normalizeTunnelQuotaView(cloneTunnelQuotaView(row), now)
+		out[row.UserID] = normalizeUserQuotaView(cloneUserQuotaView(row), now)
 	}
 	return out, nil
 }
 
-func (r *Repository) GetTunnelQuotaView(tunnelID int64, now time.Time) (*model.TunnelQuotaView, error) {
+func (r *Repository) GetUserQuotaView(userID int64, now time.Time) (*model.UserQuotaView, error) {
 	if r == nil || r.db == nil {
 		return nil, errors.New("repository not initialized")
 	}
-	if tunnelID <= 0 {
+	if userID <= 0 {
 		return nil, nil
 	}
-	var row model.TunnelQuota
-	err := r.db.Where("tunnel_id = ?", tunnelID).First(&row).Error
+	var row model.UserQuota
+	err := r.db.Where("user_id = ?", userID).First(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	return normalizeTunnelQuotaView(cloneTunnelQuotaView(row), now), nil
+	return normalizeUserQuotaView(cloneUserQuotaView(row), now), nil
 }
 
-func (r *Repository) AddTunnelQuotaUsage(tunnelID int64, usedBytes int64, now time.Time) (*model.TunnelQuotaView, error) {
+func (r *Repository) AddUserQuotaUsage(userID int64, usedBytes int64, now time.Time) (*model.UserQuotaView, error) {
 	if r == nil || r.db == nil {
 		return nil, errors.New("repository not initialized")
 	}
-	if tunnelID <= 0 {
+	if userID <= 0 {
 		return nil, nil
 	}
-	result := &model.TunnelQuotaView{}
+	result := &model.UserQuotaView{}
 	err := r.db.Transaction(func(tx *gorm.DB) error {
-		q, err := r.loadOrCreateTunnelQuotaTx(tx, tunnelID, now)
+		q, err := r.loadOrCreateUserQuotaTx(tx, userID, now)
 		if err != nil {
 			return err
 		}
-		applyTunnelQuotaWindowRoll(q, now)
+		applyUserQuotaWindowRoll(q, now)
 		if usedBytes > 0 {
 			q.DailyUsedBytes += usedBytes
 			q.MonthlyUsedBytes += usedBytes
 		}
 		q.UpdatedTime = now.UnixMilli()
-		if err := tx.Model(&model.TunnelQuota{}).Where("tunnel_id = ?", tunnelID).Updates(map[string]interface{}{
+		if err := tx.Model(&model.UserQuota{}).Where("user_id = ?", userID).Updates(map[string]interface{}{
 			"daily_used_bytes":   q.DailyUsedBytes,
 			"monthly_used_bytes": q.MonthlyUsedBytes,
 			"day_key":            q.DayKey,
@@ -246,23 +246,23 @@ func (r *Repository) AddTunnelQuotaUsage(tunnelID int64, usedBytes int64, now ti
 		}).Error; err != nil {
 			return err
 		}
-		*result = *cloneTunnelQuotaView(*q)
+		*result = *cloneUserQuotaView(*q)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return normalizeTunnelQuotaView(result, now), nil
+	return normalizeUserQuotaView(result, now), nil
 }
 
-func (r *Repository) MarkTunnelQuotaDisabled(tunnelID int64, pausedForwardIDs []int64, now int64) error {
+func (r *Repository) MarkUserQuotaDisabled(userID int64, pausedForwardIDs []int64, now int64) error {
 	if r == nil || r.db == nil {
 		return errors.New("repository not initialized")
 	}
-	if tunnelID <= 0 {
-		return errors.New("tunnel id is required")
+	if userID <= 0 {
+		return errors.New("user id is required")
 	}
-	return r.db.Model(&model.TunnelQuota{}).Where("tunnel_id = ?", tunnelID).Updates(map[string]interface{}{
+	return r.db.Model(&model.UserQuota{}).Where("user_id = ?", userID).Updates(map[string]interface{}{
 		"disabled_by_quota":  1,
 		"disabled_at":        now,
 		"paused_forward_ids": joinPausedForwardIDs(pausedForwardIDs),
@@ -270,12 +270,12 @@ func (r *Repository) MarkTunnelQuotaDisabled(tunnelID int64, pausedForwardIDs []
 	}).Error
 }
 
-func (r *Repository) ResetTunnelQuotaUsage(tunnelID int64, scope string, now time.Time) (*TunnelQuotaRelease, error) {
+func (r *Repository) ResetUserQuotaUsage(userID int64, scope string, now time.Time) (*UserQuotaRelease, error) {
 	if r == nil || r.db == nil {
 		return nil, errors.New("repository not initialized")
 	}
-	if tunnelID <= 0 {
-		return nil, errors.New("tunnel id is required")
+	if userID <= 0 {
+		return nil, errors.New("user id is required")
 	}
 	scope = strings.TrimSpace(strings.ToLower(scope))
 	if scope == "" {
@@ -284,13 +284,13 @@ func (r *Repository) ResetTunnelQuotaUsage(tunnelID int64, scope string, now tim
 	if scope != "daily" && scope != "monthly" && scope != "all" {
 		return nil, fmt.Errorf("unsupported quota reset scope: %s", scope)
 	}
-	var release *TunnelQuotaRelease
+	var release *UserQuotaRelease
 	err := r.db.Transaction(func(tx *gorm.DB) error {
-		q, err := r.loadOrCreateTunnelQuotaTx(tx, tunnelID, now)
+		q, err := r.loadOrCreateUserQuotaTx(tx, userID, now)
 		if err != nil {
 			return err
 		}
-		applyTunnelQuotaWindowRoll(q, now)
+		applyUserQuotaWindowRoll(q, now)
 		switch scope {
 		case "daily":
 			q.DailyUsedBytes = 0
@@ -301,15 +301,15 @@ func (r *Repository) ResetTunnelQuotaUsage(tunnelID int64, scope string, now tim
 			q.MonthlyUsedBytes = 0
 		}
 		q.UpdatedTime = now.UnixMilli()
-		release = &TunnelQuotaRelease{TunnelID: tunnelID}
-		if q.DisabledByQuota == 1 && !tunnelQuotaExceeded(cloneTunnelQuotaView(*q)) {
-			release.EnableTunnel = true
+		release = &UserQuotaRelease{UserID: userID}
+		if q.DisabledByQuota == 1 && !userQuotaExceeded(cloneUserQuotaView(*q)) {
+			release.UnblockUser = true
 			release.ForwardIDs = parsePausedForwardIDs(q.PausedForwardIDs)
 			q.DisabledByQuota = 0
 			q.DisabledAt = 0
 			q.PausedForwardIDs = ""
 		}
-		return tx.Model(&model.TunnelQuota{}).Where("tunnel_id = ?", tunnelID).Updates(map[string]interface{}{
+		return tx.Model(&model.UserQuota{}).Where("user_id = ?", userID).Updates(map[string]interface{}{
 			"daily_used_bytes":   q.DailyUsedBytes,
 			"monthly_used_bytes": q.MonthlyUsedBytes,
 			"day_key":            q.DayKey,
@@ -326,23 +326,23 @@ func (r *Repository) ResetTunnelQuotaUsage(tunnelID int64, scope string, now tim
 	return release, nil
 }
 
-func (r *Repository) RollTunnelQuotaWindows(now time.Time) ([]TunnelQuotaRelease, error) {
+func (r *Repository) RollUserQuotaWindows(now time.Time) ([]UserQuotaRelease, error) {
 	if r == nil || r.db == nil {
 		return nil, errors.New("repository not initialized")
 	}
-	var releases []TunnelQuotaRelease
+	var releases []UserQuotaRelease
 	err := r.db.Transaction(func(tx *gorm.DB) error {
-		var rows []model.TunnelQuota
+		var rows []model.UserQuota
 		if err := tx.Find(&rows).Error; err != nil {
 			return err
 		}
 		nowMs := now.UnixMilli()
 		for _, row := range rows {
 			q := row
-			changed := applyTunnelQuotaWindowRoll(&q, now)
-			release := TunnelQuotaRelease{TunnelID: q.TunnelID}
-			if q.DisabledByQuota == 1 && !tunnelQuotaExceeded(cloneTunnelQuotaView(q)) {
-				release.EnableTunnel = true
+			changed := applyUserQuotaWindowRoll(&q, now)
+			release := UserQuotaRelease{UserID: q.UserID}
+			if q.DisabledByQuota == 1 && !userQuotaExceeded(cloneUserQuotaView(q)) {
+				release.UnblockUser = true
 				release.ForwardIDs = parsePausedForwardIDs(q.PausedForwardIDs)
 				q.DisabledByQuota = 0
 				q.DisabledAt = 0
@@ -353,7 +353,7 @@ func (r *Repository) RollTunnelQuotaWindows(now time.Time) ([]TunnelQuotaRelease
 				continue
 			}
 			q.UpdatedTime = nowMs
-			if err := tx.Model(&model.TunnelQuota{}).Where("tunnel_id = ?", q.TunnelID).Updates(map[string]interface{}{
+			if err := tx.Model(&model.UserQuota{}).Where("user_id = ?", q.UserID).Updates(map[string]interface{}{
 				"daily_used_bytes":   q.DailyUsedBytes,
 				"monthly_used_bytes": q.MonthlyUsedBytes,
 				"day_key":            q.DayKey,
@@ -365,7 +365,7 @@ func (r *Repository) RollTunnelQuotaWindows(now time.Time) ([]TunnelQuotaRelease
 			}).Error; err != nil {
 				return err
 			}
-			if release.EnableTunnel {
+			if release.UnblockUser {
 				releases = append(releases, release)
 			}
 		}
@@ -375,17 +375,4 @@ func (r *Repository) RollTunnelQuotaWindows(now time.Time) ([]TunnelQuotaRelease
 		return nil, err
 	}
 	return releases, nil
-}
-
-func (r *Repository) UpdateTunnelStatus(tunnelID int64, status int, now int64) error {
-	if r == nil || r.db == nil {
-		return errors.New("repository not initialized")
-	}
-	if tunnelID <= 0 {
-		return errors.New("tunnel id is required")
-	}
-	return r.db.Model(&model.Tunnel{}).Where("id = ?", tunnelID).Updates(map[string]interface{}{
-		"status":       status,
-		"updated_time": now,
-	}).Error
 }
