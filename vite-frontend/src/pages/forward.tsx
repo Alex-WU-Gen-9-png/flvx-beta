@@ -579,6 +579,16 @@ const mapForwardApiItems = (items: ForwardApiItem[]): Forward[] => {
   }));
 };
 
+const getForwardDisplayFlow = (forward: Forward): number => {
+  const directFlow = (forward.inFlow || 0) + (forward.outFlow || 0);
+
+  if (directFlow > 0) {
+    return directFlow;
+  }
+
+  return forward.federationShareFlow || 0;
+};
+
 export default function ForwardPage() {
   const [loading, setLoading] = useState(true);
   const [forwards, setForwards] = useState<Forward[]>([]);
@@ -1236,16 +1246,6 @@ export default function ForwardPage() {
     },
     [],
   );
-
-  const getForwardDisplayFlow = (forward: Forward): number => {
-    const directFlow = (forward.inFlow || 0) + (forward.outFlow || 0);
-
-    if (directFlow > 0) {
-      return directFlow;
-    }
-
-    return forward.federationShareFlow || 0;
-  };
 
   // 切换显示模式并保存到localStorage
   const handleViewModeChange = () => {
