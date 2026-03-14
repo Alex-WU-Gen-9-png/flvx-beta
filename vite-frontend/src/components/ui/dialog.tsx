@@ -62,9 +62,6 @@ function DialogContent({
           className,
         )}
         data-slot="dialog-content"
-        onOpenAutoFocus={(e) => {
-          e.preventDefault();
-        }}
         onCloseAutoFocus={(e) => {
           e.preventDefault();
         }}
