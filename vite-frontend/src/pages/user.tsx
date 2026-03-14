@@ -782,6 +782,7 @@ export default function UserPage() {
 
   const handleQuotaReset = async (scope: "daily" | "monthly" | "all") => {
     const userId = userForm.id;
+
     if (!userId) {
       return;
     }
@@ -1055,17 +1056,15 @@ export default function UserPage() {
                             <div className="flex justify-between text-sm">
                               <span className="text-default-600">每日配额</span>
                               <span className="font-medium text-xs">
-                                {formatFlow(Number(user.dailyUsedBytes ?? 0))} /
-                                {" "}
+                                {formatFlow(Number(user.dailyUsedBytes ?? 0))} /{" "}
                                 {formatQuotaLimit(user.dailyQuotaGB)}
                               </span>
                             </div>
                             <div className="flex justify-between text-sm">
                               <span className="text-default-600">每月配额</span>
                               <span className="font-medium text-xs">
-                                {formatFlow(Number(user.monthlyUsedBytes ?? 0))} /
-                                {" "}
-                                {formatQuotaLimit(user.monthlyQuotaGB)}
+                                {formatFlow(Number(user.monthlyUsedBytes ?? 0))}{" "}
+                                / {formatQuotaLimit(user.monthlyQuotaGB)}
                               </span>
                             </div>
                           </>
@@ -1366,8 +1365,8 @@ export default function UserPage() {
                     <div className="rounded-lg bg-background p-3">
                       <div className="text-xs text-default-500">每月用量</div>
                       <div className="mt-1 text-sm font-semibold text-foreground">
-                        {formatFlow(Number(editingUser.monthlyUsedBytes ?? 0))} /{" "}
-                        {formatQuotaLimit(editingUser.monthlyQuotaGB)}
+                        {formatFlow(Number(editingUser.monthlyUsedBytes ?? 0))}{" "}
+                        / {formatQuotaLimit(editingUser.monthlyQuotaGB)}
                       </div>
                     </div>
                   </div>
