@@ -1,6 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import toast from "react-hot-toast";
-
 import {
   DndContext,
   KeyboardSensor,
@@ -53,6 +52,7 @@ import {
   getNodeReleases,
   rollbackNode,
   getPeerRemoteUsageList,
+  dismissNodeExpiryReminder,
   type ReleaseChannel,
 } from "@/api";
 import { PageEmptyState, PageLoadingState } from "@/components/page-state";
@@ -82,6 +82,7 @@ interface Node {
   remark?: string;
   expiryTime?: number;
   renewalCycle?: NodeRenewalCycle;
+  expiryReminderDismissed?: number;
   ip: string;
   serverIp: string;
   serverIpV4?: string;
@@ -908,6 +909,24 @@ export default function NodePage() {
     }
   };
 
+  const handleDismissExpiryReminder = async (nodeId: number) => {
+    try {
+      const res = await dismissNodeExpiryReminder(nodeId);
+
+      if (res.code === 0) {
+        setNodeList((prev) =>
+          prev.map((n) =>
+            n.id === nodeId ? { ...n, expiryReminderDismissed: 1 } : n,
+          ),
+        );
+      } else {
+        toast.error(res.msg || "操作失败");
+      }
+    } catch {
+      toast.error("网络错误，请重试");
+    }
+  };
+
   const openInstallSelector = (node: Node) => {
     setInstallTargetNode(node);
     setInstallChannel("stable");
@@ -1060,7 +1079,9 @@ export default function NodePage() {
         );
 
         if (res.code === 0) {
-          toast.success(`批量升级命令已发送到 ${selectedLocalIds.length} 个节点`);
+          toast.success(
+            `批量升级命令已发送到 ${selectedLocalIds.length} 个节点`,
+          );
         } else {
           toast.error(res.msg || "批量升级失败");
         }
@@ -1216,6 +1237,7 @@ export default function NodePage() {
       }
 
       const nextId = reorderedDisplayIds[reorderedDisplayIndex];
+
       reorderedDisplayIndex += 1;
 
       return nextId;
@@ -1395,7 +1417,8 @@ export default function NodePage() {
     return nodes.filter(
       (node) =>
         (node.name && node.name.toLowerCase().includes(normalizedKeyword)) ||
-        (node.remark && node.remark.toLowerCase().includes(normalizedKeyword)) ||
+        (node.remark &&
+          node.remark.toLowerCase().includes(normalizedKeyword)) ||
         (node.serverIp &&
           node.serverIp.toLowerCase().includes(normalizedKeyword)) ||
         (node.serverIpV4 &&
@@ -1415,34 +1438,31 @@ export default function NodePage() {
     [sortedNodes],
   );
 
-  const filteredLocalNodes = useMemo(
-    () => {
-      const keywordFiltered = filterNodesByKeyword(localNodes, localSearchKeyword);
+  const filteredLocalNodes = useMemo(() => {
+    const keywordFiltered = filterNodesByKeyword(
+      localNodes,
+      localSearchKeyword,
+    );
 
-      if (nodeFilterMode === "all") {
-        return keywordFiltered;
+    if (nodeFilterMode === "all") {
+      return keywordFiltered;
+    }
+
+    return keywordFiltered.filter((node) => {
+      const expiryMeta = getNodeExpiryMeta(node.expiryTime, node.renewalCycle);
+
+      switch (nodeFilterMode) {
+        case "expiringSoon":
+          return expiryMeta.state === "expiringSoon";
+        case "expired":
+          return expiryMeta.state === "expired";
+        case "withExpiry":
+          return getNodeReminderEnabled(node);
+        default:
+          return true;
       }
-
-      return keywordFiltered.filter((node) => {
-        const expiryMeta = getNodeExpiryMeta(
-          node.expiryTime,
-          node.renewalCycle,
-        );
-
-        switch (nodeFilterMode) {
-          case "expiringSoon":
-            return expiryMeta.state === "expiringSoon";
-          case "expired":
-            return expiryMeta.state === "expired";
-          case "withExpiry":
-            return getNodeReminderEnabled(node);
-          default:
-            return true;
-        }
-      });
-    },
-    [filterNodesByKeyword, localNodes, localSearchKeyword, nodeFilterMode],
-  );
+    });
+  }, [filterNodesByKeyword, localNodes, localSearchKeyword, nodeFilterMode]);
 
   const filteredRemoteNodes = useMemo(
     () => filterNodesByKeyword(remoteNodes, remoteSearchKeyword),
@@ -1464,7 +1484,8 @@ export default function NodePage() {
   const canUseExpiryFilter = activeTab === "local";
   const hasKeywordSearch = currentSearchKeyword.trim().length > 0;
   const hasActiveFilters = nodeFilterMode !== "all";
-  const isDisplayFiltered = hasKeywordSearch || (canUseExpiryFilter && hasActiveFilters);
+  const isDisplayFiltered =
+    hasKeywordSearch || (canUseExpiryFilter && hasActiveFilters);
 
   const sortableNodeIds = useMemo(
     () => displayNodes.map((n) => n.id),
@@ -1577,7 +1598,6 @@ export default function NodePage() {
                 <Button
                   isIconOnly
                   aria-label="筛选条件"
-                  isDisabled={!canUseExpiryFilter}
                   className={
                     canUseExpiryFilter && nodeFilterMode !== "all"
                       ? "bg-primary/20 text-primary relative"
@@ -1588,8 +1608,11 @@ export default function NodePage() {
                       ? "primary"
                       : "default"
                   }
+                  isDisabled={!canUseExpiryFilter}
                   size="sm"
-                  title={canUseExpiryFilter ? "筛选条件" : "远程节点不支持到期筛选"}
+                  title={
+                    canUseExpiryFilter ? "筛选条件" : "远程节点不支持到期筛选"
+                  }
                   variant="flat"
                   onPress={() => setIsFilterModalOpen(true)}
                 >
@@ -1679,7 +1702,9 @@ export default function NodePage() {
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
               {displayNodes.map((node) => {
                 const isRemoteNode = node.isRemote === 1;
-                const remoteUsage = isRemoteNode ? remoteUsageMap[node.id] : null;
+                const remoteUsage = isRemoteNode
+                  ? remoteUsageMap[node.id]
+                  : null;
                 const expiryMeta = getNodeExpiryMeta(
                   node.expiryTime,
                   node.renewalCycle,
@@ -1689,7 +1714,10 @@ export default function NodePage() {
                 );
                 const hasRemark = Boolean(node.remark?.trim());
                 const hasExpiryInfo = Boolean(
-                  node.expiryTime && node.expiryTime > 0 && node.renewalCycle,
+                  node.expiryTime &&
+                    node.expiryTime > 0 &&
+                    node.renewalCycle &&
+                    !node.expiryReminderDismissed,
                 );
                 const hasInfoTrigger = hasRemark || hasExpiryInfo;
                 const infoCount = Number(hasExpiryInfo) + Number(hasRemark);
@@ -1699,9 +1727,9 @@ export default function NodePage() {
                   <SortableItem key={node.id} id={node.id}>
                     {(listeners) => (
                       <Card
-                        data-node-card="true"
                         key={node.id}
                         className={`group relative overflow-visible shadow-sm border border-divider hover:shadow-md transition-shadow duration-200 h-full flex flex-col ${expiryMeta.accentClassName}`}
+                        data-node-card="true"
                       >
                         <CardHeader className="pb-3 md:pb-3">
                           <div className="flex justify-between items-start w-full gap-3">
@@ -1746,6 +1774,7 @@ export default function NodePage() {
                                   <button
                                     aria-label={`查看节点信息，共 ${infoCount} 项`}
                                     className="relative flex h-7 w-7 items-center justify-center rounded-full border border-divider/80 bg-background/95 text-default-500 shadow-sm transition hover:border-default-300 hover:text-foreground focus-visible:border-default-300 focus-visible:text-foreground focus-visible:outline-none"
+                                    type="button"
                                     onFocus={(event) =>
                                       updateInfoPopoverPlacement(
                                         node.id,
@@ -1758,71 +1787,86 @@ export default function NodePage() {
                                         event.currentTarget,
                                       )
                                     }
-                                    type="button"
                                   >
-                                  <svg
-                                    aria-hidden="true"
-                                    className="h-3.5 w-3.5"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    viewBox="0 0 24 24"
-                                  >
-                                    <path
-                                      d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={1.8}
-                                    />
-                                  </svg>
-                                  {hasRemark && (
-                                    <span className="absolute -right-1 -top-1 flex h-2.5 w-2.5 rounded-full border border-background bg-default-300 shadow-sm dark:bg-default-500" />
-                                  )}
-                                </button>
-                                <div
-                                  className={`pointer-events-none invisible absolute z-[60] w-72 max-w-[min(18rem,calc(100vw-4rem))] rounded-xl border border-divider/80 bg-background/98 p-3 opacity-0 shadow-xl backdrop-blur transition-all duration-150 group-hover/info:visible group-hover/info:pointer-events-auto group-hover/info:opacity-100 group-focus-within/info:visible group-focus-within/info:pointer-events-auto group-focus-within/info:opacity-100 ${
-                                    infoPlacement === "bottom"
-                                      ? "right-0 top-[calc(100%+0.75rem)] translate-y-1 group-hover/info:translate-y-0 group-focus-within/info:translate-y-0"
-                                      : "right-[calc(100%+0.75rem)] top-1/2 -translate-y-1/2 translate-x-1 group-hover/info:translate-x-0 group-focus-within/info:translate-x-0"
-                                  }`}
-                                >
-                                  <div className="space-y-3">
-                                    {hasExpiryInfo && (
-                                      <div className="space-y-2">
-                                        <div className="text-[11px] font-medium text-default-500">
-                                          到期提醒
-                                        </div>
-                                        <div className="flex flex-wrap gap-1.5">
-                                          <Chip
-                                            className="text-[10px] h-5 px-1 flex-shrink-0"
-                                            color={expiryMeta.tone}
-                                            size="sm"
-                                            title={`${formatNodeRenewalTime(expiryMeta.nextDueTime)} (${getNodeRenewalCycleLabel(node.renewalCycle)})`}
-                                            variant="flat"
-                                          >
-                                            {expiryMeta.label}
-                                          </Chip>
-                                        </div>
-                                        <div className="rounded-lg border border-divider/80 bg-default-50/80 px-3 py-2 text-xs leading-5 text-default-700">
-                                          {formatNodeRenewalTime(expiryMeta.nextDueTime)}
-                                        </div>
-                                      </div>
-                                    )}
-
+                                    <svg
+                                      aria-hidden="true"
+                                      className="h-3.5 w-3.5"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      viewBox="0 0 24 24"
+                                    >
+                                      <path
+                                        d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                        strokeWidth={1.8}
+                                      />
+                                    </svg>
                                     {hasRemark && (
-                                      <div className="space-y-2">
-                                        <div className="text-[11px] font-medium text-default-500">
-                                          备注
-                                        </div>
-                                        <div
-                                          className="max-h-32 overflow-y-auto rounded-lg border border-divider/80 bg-default-50/80 px-3 py-2 text-xs leading-5 text-default-700 break-all [scrollbar-width:thin]"
-                                          title={node.remark?.trim()}
-                                        >
-                                          {node.remark?.trim()}
-                                        </div>
-                                      </div>
+                                      <span className="absolute -right-1 -top-1 flex h-2.5 w-2.5 rounded-full border border-background bg-default-300 shadow-sm dark:bg-default-500" />
                                     )}
+                                  </button>
+                                  <div
+                                    className={`pointer-events-none invisible absolute z-[60] w-72 max-w-[min(18rem,calc(100vw-4rem))] rounded-xl border border-divider/80 bg-background/98 p-3 opacity-0 shadow-xl backdrop-blur transition-all duration-150 group-hover/info:visible group-hover/info:pointer-events-auto group-hover/info:opacity-100 group-focus-within/info:visible group-focus-within/info:pointer-events-auto group-focus-within/info:opacity-100 ${
+                                      infoPlacement === "bottom"
+                                        ? "right-0 top-[calc(100%+0.75rem)] translate-y-1 group-hover/info:translate-y-0 group-focus-within/info:translate-y-0"
+                                        : "right-[calc(100%+0.75rem)] top-1/2 -translate-y-1/2 translate-x-1 group-hover/info:translate-x-0 group-focus-within/info:translate-x-0"
+                                    }`}
+                                  >
+                                    <div className="space-y-3">
+                                      {hasExpiryInfo && (
+                                        <div className="space-y-2">
+                                          <div className="flex items-center justify-between">
+                                            <div className="text-[11px] font-medium text-default-500">
+                                              到期提醒
+                                            </div>
+                                            <button
+                                              className="text-[10px] text-default-400 hover:text-default-600 transition-colors"
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleDismissExpiryReminder(
+                                                  node.id,
+                                                );
+                                              }}
+                                            >
+                                              关闭提醒
+                                            </button>
+                                          </div>
+                                          <div className="flex flex-wrap gap-1.5">
+                                            <Chip
+                                              className="text-[10px] h-5 px-1 flex-shrink-0"
+                                              color={expiryMeta.tone}
+                                              size="sm"
+                                              title={`${formatNodeRenewalTime(expiryMeta.nextDueTime)} (${getNodeRenewalCycleLabel(node.renewalCycle)})`}
+                                              variant="flat"
+                                            >
+                                              {expiryMeta.label}
+                                            </Chip>
+                                          </div>
+                                          <div className="rounded-lg border border-divider/80 bg-default-50/80 px-3 py-2 text-xs leading-5 text-default-700">
+                                            {formatNodeRenewalTime(
+                                              expiryMeta.nextDueTime,
+                                            )}
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {hasRemark && (
+                                        <div className="space-y-2">
+                                          <div className="text-[11px] font-medium text-default-500">
+                                            备注
+                                          </div>
+                                          <div
+                                            className="max-h-32 overflow-y-auto rounded-lg border border-divider/80 bg-default-50/80 px-3 py-2 text-xs leading-5 text-default-700 break-all [scrollbar-width:thin]"
+                                            title={node.remark?.trim()}
+                                          >
+                                            {node.remark?.trim()}
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
                                   </div>
-                                </div>
                                 </div>
                               )}
                             </div>
@@ -1917,29 +1961,47 @@ export default function NodePage() {
                                 <>
                                   <div className="text-xs rounded-md border border-default-200 dark:border-default-100/30 bg-default-50 dark:bg-default-100/20 p-2.5 space-y-2">
                                     <div className="flex justify-between gap-2">
-                                      <span className="text-default-500">远程地址</span>
+                                      <span className="text-default-500">
+                                        远程地址
+                                      </span>
                                       <span
                                         className="font-mono text-right truncate"
-                                        title={remoteUsage.remoteUrl || node.remoteUrl || "-"}
+                                        title={
+                                          remoteUsage.remoteUrl ||
+                                          node.remoteUrl ||
+                                          "-"
+                                        }
                                       >
-                                        {remoteUsage.remoteUrl || node.remoteUrl || "-"}
+                                        {remoteUsage.remoteUrl ||
+                                          node.remoteUrl ||
+                                          "-"}
                                       </span>
                                     </div>
                                     <div className="flex justify-between gap-2">
-                                      <span className="text-default-500">共享ID</span>
-                                      <span className="font-mono">#{remoteUsage.shareId}</span>
+                                      <span className="text-default-500">
+                                        共享ID
+                                      </span>
+                                      <span className="font-mono">
+                                        #{remoteUsage.shareId}
+                                      </span>
                                     </div>
                                     <div className="flex justify-between gap-2">
-                                      <span className="text-default-500">流量</span>
+                                      <span className="text-default-500">
+                                        流量
+                                      </span>
                                       <span className="font-mono">
                                         {formatFlow(remoteUsage.currentFlow)}
                                       </span>
                                     </div>
                                     <div className="flex justify-between gap-2">
-                                      <span className="text-default-500">带宽上限</span>
+                                      <span className="text-default-500">
+                                        带宽上限
+                                      </span>
                                       <span className="font-mono">
                                         {remoteUsage.maxBandwidth > 0
-                                          ? formatSpeed(remoteUsage.maxBandwidth)
+                                          ? formatSpeed(
+                                              remoteUsage.maxBandwidth,
+                                            )
                                           : "不限"}
                                       </span>
                                     </div>
@@ -1947,9 +2009,12 @@ export default function NodePage() {
 
                                   <div className="text-xs rounded-md border border-default-200 dark:border-default-100/30 bg-default-50 dark:bg-default-100/20 p-2.5">
                                     <div className="flex items-center justify-between mb-2">
-                                      <span className="text-default-500">占用端口</span>
+                                      <span className="text-default-500">
+                                        占用端口
+                                      </span>
                                       <span className="font-mono text-default-700 dark:text-default-300">
-                                        {remoteUsage.usedPorts.length}/{Math.max(
+                                        {remoteUsage.usedPorts.length}/
+                                        {Math.max(
                                           remoteUsage.portRangeEnd -
                                             remoteUsage.portRangeStart +
                                             1,
@@ -1972,14 +2037,18 @@ export default function NodePage() {
                                           ))}
                                         </div>
                                       ) : (
-                                        <div className="text-default-400">暂无占用端口</div>
+                                        <div className="text-default-400">
+                                          暂无占用端口
+                                        </div>
                                       )}
                                     </div>
                                   </div>
 
                                   <div className="text-xs rounded-md border border-default-200 dark:border-default-100/30 bg-default-50 dark:bg-default-100/20 p-2.5">
                                     <div className="flex items-center justify-between mb-2">
-                                      <span className="text-default-500">绑定明细</span>
+                                      <span className="text-default-500">
+                                        绑定明细
+                                      </span>
                                       <span className="font-mono text-default-700 dark:text-default-300">
                                         {remoteUsage.activeBindingNum}
                                       </span>
@@ -2003,13 +2072,22 @@ export default function NodePage() {
                                               </span>
                                             </div>
                                             <div className="mt-1 text-[11px] text-default-500 flex items-center justify-between gap-2">
-                                              <span>{formatChainType(binding.chainType, binding.hopInx)}</span>
-                                              <span className="font-mono">端口 {binding.allocatedPort}</span>
+                                              <span>
+                                                {formatChainType(
+                                                  binding.chainType,
+                                                  binding.hopInx,
+                                                )}
+                                              </span>
+                                              <span className="font-mono">
+                                                端口 {binding.allocatedPort}
+                                              </span>
                                             </div>
                                           </div>
                                         ))
                                       ) : (
-                                        <div className="text-default-400">暂无绑定明细</div>
+                                        <div className="text-default-400">
+                                          暂无绑定明细
+                                        </div>
                                       )}
                                     </div>
                                   </div>
