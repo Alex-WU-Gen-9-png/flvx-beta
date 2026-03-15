@@ -23,7 +23,8 @@ PR #322 (https://github.com/Sagit-chu/flvx/pull/322) 原本移除了三个功能
 - [x] 恢复 `use-dashboard-data.ts` 中的 `expiryReminderDismissed` 过滤逻辑
 - [x] 恢复 `batch-actions.ts` 中的 `BatchOperationFailure` 相关处理
 - [x] 恢复 `forward.tsx` 中的 `BatchActionResultModal` 使用
-- [x] 提交并推送修改
+- [x] 恢复 `tunnel.tsx` 中的 `BatchActionResultModal` 使用
+- [ ] 提交并推送修改
 
 ## 修改的文件
 
@@ -34,6 +35,7 @@ PR #322 (https://github.com/Sagit-chu/flvx/pull/322) 原本移除了三个功能
 - `vite-frontend/src/pages/dashboard/use-dashboard-data.ts` - 恢复 `expiryReminderDismissed` 过滤逻辑
 - `vite-frontend/src/pages/forward/batch-actions.ts` - 恢复批量操作失败处理
 - `vite-frontend/src/pages/forward.tsx` - 恢复 `BatchActionResultModal` 组件使用
+- `vite-frontend/src/pages/tunnel.tsx` - 恢复 `BatchActionResultModal` 组件使用
 
 ## 注意事项
 
