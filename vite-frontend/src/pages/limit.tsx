@@ -339,7 +339,7 @@ export default function LimitPage() {
       )}
 
       {/* 新增/编辑模态框 */}
-      <Modal
+      <Modal classNames={{ base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden" }}
         backdrop="blur"
         isOpen={modalOpen}
         placement="center"
@@ -414,7 +414,7 @@ export default function LimitPage() {
       </Modal>
 
       {/* 删除确认模态框 */}
-      <Modal
+      <Modal classNames={{ base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden" }}
         backdrop="blur"
         isOpen={deleteModalOpen}
         placement="center"

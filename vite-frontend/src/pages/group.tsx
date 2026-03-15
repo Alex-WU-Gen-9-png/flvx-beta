@@ -477,10 +477,15 @@ export default function GroupPage() {
       )}
 
       <Card>
-        <CardHeader className="flex items-center justify-between">
+        <CardHeader className="flex flex-row items-center gap-3 pb-2">
           <h3 className="text-lg font-semibold">隧道分组</h3>
-          <Button color="primary" size="sm" onPress={openCreateTunnelGroup}>
-            新建隧道分组
+          <Button 
+            color="primary" 
+            size="sm" 
+            className="h-7 px-3 text-xs font-medium min-w-0 shadow-sm" 
+            onPress={openCreateTunnelGroup}
+          >
+            新建
           </Button>
         </CardHeader>
         <CardBody>
@@ -544,10 +549,15 @@ export default function GroupPage() {
       </Card>
 
       <Card>
-        <CardHeader className="flex items-center justify-between">
+        <CardHeader className="flex flex-row items-center gap-3 pb-2">
           <h3 className="text-lg font-semibold">用户分组</h3>
-          <Button color="primary" size="sm" onPress={openCreateUserGroup}>
-            新建用户分组
+          <Button 
+            color="primary" 
+            size="sm" 
+            className="h-7 px-3 text-xs font-medium min-w-0 shadow-sm" 
+            onPress={openCreateUserGroup}
+          >
+            新建
           </Button>
         </CardHeader>
         <CardBody>
@@ -651,7 +661,7 @@ export default function GroupPage() {
               size="sm"
               onPress={handleAssignPermission}
             >
-              分配权限
+              分配
             </Button>
           </div>
 
@@ -691,7 +701,7 @@ export default function GroupPage() {
         </CardBody>
       </Card>
 
-      <Modal
+      <Modal backdrop="blur" classNames={{ base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden" }}
         isOpen={tunnelGroupModalOpen}
         onOpenChange={onTunnelGroupModalChange}
       >
@@ -735,7 +745,7 @@ export default function GroupPage() {
         </ModalContent>
       </Modal>
 
-      <Modal isOpen={userGroupModalOpen} onOpenChange={onUserGroupModalChange}>
+      <Modal backdrop="blur" classNames={{ base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden" }} isOpen={userGroupModalOpen} onOpenChange={onUserGroupModalChange}>
         <ModalContent>
           <ModalHeader>
             {editingUserGroup ? "编辑用户分组" : "新建用户分组"}
@@ -776,7 +786,7 @@ export default function GroupPage() {
         </ModalContent>
       </Modal>
 
-      <Modal
+      <Modal backdrop="blur" classNames={{ base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden" }}
         isOpen={tunnelAssignModalOpen}
         onOpenChange={onTunnelAssignModalChange}
       >
@@ -823,7 +833,7 @@ export default function GroupPage() {
         </ModalContent>
       </Modal>
 
-      <Modal
+      <Modal backdrop="blur" classNames={{ base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden" }}
         isOpen={userAssignModalOpen}
         onOpenChange={onUserAssignModalChange}
       >
