@@ -1,6 +1,6 @@
 # 恢复 PR #322 移除的功能
 
-**目标**: 修改 PR #322，保留被移除的功能，同时保留版本显示简化改动。
+**状态**: ✅ 已完成
 
 ## 背景
 
@@ -20,8 +20,9 @@ PR #322 (https://github.com/Sagit-chu/flvx/pull/322) 原本移除了三个功能
 - [x] 恢复 `api/error-message.ts` 中的批量操作失败处理函数
 - [x] 恢复 `api/index.ts` 中的 `dismissNodeExpiryReminder` API
 - [x] 恢复 `config.tsx` 中的更新通道选择功能
-- [x] 运行 lint 验证
-- [ ] 提交并推送修改
+- [x] 恢复 `use-dashboard-data.ts` 中的 `expiryReminderDismissed` 过滤逻辑
+- [x] 恢复 `batch-actions.ts` 中的 `BatchOperationFailure` 相关处理
+- [x] 提交并推送修改
 
 ## 修改的文件
 
@@ -29,6 +30,8 @@ PR #322 (https://github.com/Sagit-chu/flvx/pull/322) 原本移除了三个功能
 - `vite-frontend/src/api/error-message.ts` - 添加批量操作失败处理函数
 - `vite-frontend/src/api/index.ts` - 添加 `dismissNodeExpiryReminder` API
 - `vite-frontend/src/pages/config.tsx` - 添加更新通道选择功能
+- `vite-frontend/src/pages/dashboard/use-dashboard-data.ts` - 恢复 `expiryReminderDismissed` 过滤逻辑
+- `vite-frontend/src/pages/forward/batch-actions.ts` - 恢复批量操作失败处理
 
 ## 注意事项
 
