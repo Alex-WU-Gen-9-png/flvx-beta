@@ -3122,6 +3122,7 @@ export default function TunnelPage() {
         onOpenChange={(open) => {
           if (open) {
             setBatchResultModal((prev) => ({ ...prev, open: true }));
+
             return;
           }
           setBatchResultModal(EMPTY_BATCH_RESULT_MODAL_STATE);

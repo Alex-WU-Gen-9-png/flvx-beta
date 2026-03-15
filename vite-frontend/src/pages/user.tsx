@@ -59,7 +59,12 @@ import {
   getUserGroupList,
   getUserGroups,
 } from "@/api";
-import { EditIcon, DeleteIcon, SettingsIcon, SearchIcon } from "@/components/icons";
+import {
+  EditIcon,
+  DeleteIcon,
+  SettingsIcon,
+  SearchIcon,
+} from "@/components/icons";
 import { PageLoadingState } from "@/components/page-state";
 import { useLocalStorageState } from "@/hooks/use-local-storage-state";
 import { removeItemsById, replaceItemById } from "@/utils/list-state";
