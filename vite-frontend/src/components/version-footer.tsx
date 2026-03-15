@@ -87,7 +87,12 @@ export function VersionFooter({
   return (
     <div className={containerClassName}>
       <p className={versionClassName}>
-        {version}
+        v{version}
+        {updateAvailable && latestUpdateVersion && (
+          <span className={updateBadgeClassName} role="status">
+            {latestUpdateVersion}
+          </span>
+        )}
       </p>
       <p className={poweredClassName}>
         Powered by{" "}
@@ -97,7 +102,7 @@ export function VersionFooter({
           rel="noopener noreferrer"
           target="_blank"
         >
-          Flvx
+          FLVX
         </a>
       </p>
     </div>
