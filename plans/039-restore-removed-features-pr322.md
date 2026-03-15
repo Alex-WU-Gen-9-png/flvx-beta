@@ -24,7 +24,7 @@ PR #322 (https://github.com/Sagit-chu/flvx/pull/322) 原本移除了三个功能
 - [x] 恢复 `batch-actions.ts` 中的 `BatchOperationFailure` 相关处理
 - [x] 恢复 `forward.tsx` 中的 `BatchActionResultModal` 使用
 - [x] 恢复 `tunnel.tsx` 中的 `BatchActionResultModal` 使用
-- [ ] 提交并推送修改
+- [x] 提交并推送修改
 
 ## 修改的文件
 
