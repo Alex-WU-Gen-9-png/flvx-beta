@@ -784,44 +784,38 @@ const SortableTableRow = ({
       <TableCell
         className={`${FORWARD_GROUPED_TABLE_COLUMN_CLASS.inbound} max-w-[280px] ${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}
       >
-        <div
-          className={`w-full truncate rounded-md bg-default-100/50 px-2.5 py-1.5 text-left font-mono text-xs font-medium text-default-700 transition-all select-text ${
-            hasMultipleAddresses(forward.inIp)
-              ? "hover:bg-default-200 hover:shadow-sm cursor-pointer"
-              : "cursor-text"
+        <button
+          type="button"
+          className={`w-full truncate rounded-md bg-default-100/50 px-2.5 py-1.5 text-left font-mono text-xs font-medium text-default-700 transition-all ${
+            hasMultipleAddresses(forward.inIp) ? "hover:bg-default-200 hover:shadow-sm cursor-pointer" : "cursor-default"
           }`}
-          title="点击复制"
-          onClick={(e) => {
-            e.stopPropagation();
-            copyToClipboard(
-              (forward.inIp || "").replace(/:\d+$/, "") || "默认IP",
-              "入口地址",
-            );
+          title={formatInAddress(forward.inIp, forward.inPort)}
+          onClick={() => {
+            if (hasMultipleAddresses(forward.inIp)) {
+              showAddressModal(forward.inIp, forward.inPort, "入口端口");
+            }
           }}
         >
           {formatInAddress(forward.inIp, forward.inPort)}
-        </div>
+        </button>
       </TableCell>
       <TableCell
         className={`${FORWARD_GROUPED_TABLE_COLUMN_CLASS.target} max-w-[280px] ${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}
       >
-        <div
-          className={`w-full truncate rounded-md bg-default-100/50 px-2.5 py-1.5 text-left font-mono text-xs font-medium text-default-700 transition-all select-text ${
-            hasMultipleAddresses(forward.remoteAddr)
-              ? "hover:bg-default-200 hover:shadow-sm cursor-pointer"
-              : "cursor-text"
+        <button
+          type="button"
+          className={`w-full truncate rounded-md bg-default-100/50 px-2.5 py-1.5 text-left font-mono text-xs font-medium text-default-700 transition-all ${
+            hasMultipleAddresses(forward.remoteAddr) ? "hover:bg-default-200 hover:shadow-sm cursor-pointer" : "cursor-default"
           }`}
-          title="点击复制"
-          onClick={(e) => {
-            e.stopPropagation();
-            copyToClipboard(
-              forward.remoteAddr.split(",")[0].split(":")[0],
-              "落地地址",
-            );
+          title={formatRemoteAddress(forward.remoteAddr)}
+          onClick={() => {
+            if (hasMultipleAddresses(forward.remoteAddr)) {
+              showAddressModal(forward.remoteAddr, null, "目标地址");
+            }
           }}
         >
           {formatRemoteAddress(forward.remoteAddr)}
-        </div>
+        </button>
       </TableCell>
       <TableCell className={FORWARD_GROUPED_TABLE_COLUMN_CLASS.strategy}>
         <Chip
@@ -5986,7 +5980,7 @@ export default function ForwardPage() {
         onOpenChange={setIsSearchModalOpen}
       >
         <ModalContent>
-          {(onClose) => (
+          {() => (
             <>
               <ModalHeader className="flex flex-col gap-1">
                 搜索筛选用户规则
