@@ -1,4 +1,8 @@
-import type { ForwardApiItem, SpeedLimitApiItem } from "@/api/types";
+import type {
+  BatchOperationFailure,
+  ForwardApiItem,
+  SpeedLimitApiItem,
+} from "@/api/types";
 
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import toast from "react-hot-toast";
@@ -22,8 +26,8 @@ import {
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
-import { SearchBar } from "@/components/search-bar";
 import { AnimatedPage } from "@/components/animated-page";
+import { BatchActionResultModal } from "@/components/batch-action-result-modal";
 import { Card, CardBody, CardHeader } from "@/shadcn-bridge/heroui/card";
 import { Button } from "@/shadcn-bridge/heroui/button";
 import { Input } from "@/shadcn-bridge/heroui/input";
@@ -95,7 +99,6 @@ import {
 import { buildForwardOrder, FORWARD_ORDER_KEY } from "@/pages/forward/order";
 import { PageLoadingState } from "@/components/page-state";
 // import { useMobileBreakpoint } from "@/hooks/useMobileBreakpoint";
-import { useLocalStorageState } from "@/hooks/use-local-storage-state";
 import { saveOrder } from "@/utils/order-storage";
 import { JwtUtil } from "@/utils/jwt";
 
@@ -174,6 +177,20 @@ interface BatchProgressState {
   label: string;
   percent: number;
 }
+
+interface BatchResultModalState {
+  failures: BatchOperationFailure[];
+  open: boolean;
+  summary: string;
+  title: string;
+}
+
+const EMPTY_BATCH_RESULT_MODAL_STATE: BatchResultModalState = {
+  failures: [],
+  open: false,
+  summary: "",
+  title: "",
+};
 
 type ForwardGroupOrderMap = Record<string, string[]>;
 type ForwardGroupCollapsedMap = Record<string, boolean>;
@@ -583,10 +600,7 @@ const SortableTunnelGroupContainer = ({
   bodyClassName: string;
   children: React.ReactNode;
 }) => {
-  const sortableId = buildTunnelGroupSortableId(
-    groupUserId,
-    tunnel.tunnelKey,
-  );
+  const sortableId = buildTunnelGroupSortableId(groupUserId, tunnel.tunnelKey);
   const {
     attributes,
     listeners,
@@ -599,10 +613,10 @@ const SortableTunnelGroupContainer = ({
   const style: React.CSSProperties = {
     transform: transform
       ? CSS.Transform.toString({
-        ...transform,
-        x: Math.round(transform.x),
-        y: Math.round(transform.y),
-      })
+          ...transform,
+          x: Math.round(transform.x),
+          y: Math.round(transform.y),
+        })
       : undefined,
     transition: isDragging ? undefined : transition || undefined,
     opacity: isDragging ? 0.55 : 1,
@@ -679,10 +693,10 @@ const SortableForwardCard = ({ forward, renderCard }: any) => {
   const style: React.CSSProperties = {
     transform: transform
       ? CSS.Transform.toString({
-        ...transform,
-        x: Math.round(transform.x),
-        y: Math.round(transform.y),
-      })
+          ...transform,
+          x: Math.round(transform.x),
+          y: Math.round(transform.y),
+        })
       : undefined,
     transition: isDragging ? undefined : transition || undefined,
     opacity: isDragging ? 0.5 : 1,
@@ -724,11 +738,11 @@ const SortableTableRow = ({
 
   const style = {
     transform: CSS.Transform.toString(transform),
-    transition: isDragging ? 'none' : transition,
+    transition: isDragging ? "none" : transition,
     opacity: isDragging ? 0.6 : 1,
     zIndex: isDragging ? 50 : undefined,
-    position: isDragging ? ('relative' as const) : undefined,
-    willChange: 'transform',
+    position: isDragging ? ("relative" as const) : undefined,
+    willChange: "transform",
     backgroundColor: isDragging ? "var(--nextui-default-100)" : undefined,
   };
 
@@ -762,17 +776,28 @@ const SortableTableRow = ({
         </div>
       </TableCell>
       <TableCell
-        className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""} ${FORWARD_GROUPED_TABLE_COLUMN_CLASS.name} whitespace-nowrap text-foreground cursor-pointer hover:text-primary transition-colors`} onClick={() => copyToClipboard(forward.name, "规则名")}>{forward.name}
+        className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""} ${FORWARD_GROUPED_TABLE_COLUMN_CLASS.name} whitespace-nowrap text-foreground cursor-pointer hover:text-primary transition-colors`}
+        onClick={() => copyToClipboard(forward.name, "规则名")}
+      >
+        {forward.name}
       </TableCell>
       <TableCell
         className={`${FORWARD_GROUPED_TABLE_COLUMN_CLASS.inbound} max-w-[280px] ${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}
       >
         <div
-          className={`w-full truncate rounded-md bg-default-100/50 px-2.5 py-1.5 text-left font-mono text-xs font-medium text-default-700 transition-all select-text ${hasMultipleAddresses(forward.inIp)
+          className={`w-full truncate rounded-md bg-default-100/50 px-2.5 py-1.5 text-left font-mono text-xs font-medium text-default-700 transition-all select-text ${
+            hasMultipleAddresses(forward.inIp)
               ? "hover:bg-default-200 hover:shadow-sm cursor-pointer"
               : "cursor-text"
-            }`}
-          title="点击复制" onClick={(e) => { e.stopPropagation(); copyToClipboard((forward.inIp || "").replace(/:\d+$/, "") || "默认IP", "入口地址"); }}
+          }`}
+          title="点击复制"
+          onClick={(e) => {
+            e.stopPropagation();
+            copyToClipboard(
+              (forward.inIp || "").replace(/:\d+$/, "") || "默认IP",
+              "入口地址",
+            );
+          }}
         >
           {formatInAddress(forward.inIp, forward.inPort)}
         </div>
@@ -781,11 +806,19 @@ const SortableTableRow = ({
         className={`${FORWARD_GROUPED_TABLE_COLUMN_CLASS.target} max-w-[280px] ${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}
       >
         <div
-          className={`w-full truncate rounded-md bg-default-100/50 px-2.5 py-1.5 text-left font-mono text-xs font-medium text-default-700 transition-all select-text ${hasMultipleAddresses(forward.remoteAddr)
+          className={`w-full truncate rounded-md bg-default-100/50 px-2.5 py-1.5 text-left font-mono text-xs font-medium text-default-700 transition-all select-text ${
+            hasMultipleAddresses(forward.remoteAddr)
               ? "hover:bg-default-200 hover:shadow-sm cursor-pointer"
               : "cursor-text"
-            }`}
-          title="点击复制" onClick={(e) => { e.stopPropagation(); copyToClipboard(forward.remoteAddr.split(",")[0].split(":")[0], "落地地址"); }}
+          }`}
+          title="点击复制"
+          onClick={(e) => {
+            e.stopPropagation();
+            copyToClipboard(
+              forward.remoteAddr.split(",")[0].split(":")[0],
+              "落地地址",
+            );
+          }}
         >
           {formatRemoteAddress(forward.remoteAddr)}
         </div>
@@ -807,7 +840,10 @@ const SortableTableRow = ({
           {formatFlow(getForwardDisplayFlow(forward))}
         </span>
       </TableCell>
-      <TableCell className={`${FORWARD_GROUPED_TABLE_COLUMN_CLASS.status} cursor-pointer hover:underline text-primary font-bold`} onClick={() => copyToClipboard(forward.inPort.toString(), "入口端口")}>
+      <TableCell
+        className={`${FORWARD_GROUPED_TABLE_COLUMN_CLASS.status} cursor-pointer hover:underline text-primary font-bold`}
+        onClick={() => copyToClipboard(forward.inPort.toString(), "入口端口")}
+      >
         <div className="flex items-center gap-2.5 whitespace-nowrap">
           <Switch
             color="success"
@@ -916,11 +952,11 @@ const SortableCompactTableRow = ({
 
   const style = {
     transform: CSS.Transform.toString(transform),
-    transition: isDragging ? 'none' : transition,
+    transition: isDragging ? "none" : transition,
     opacity: isDragging ? 0.6 : 1,
     zIndex: isDragging ? 50 : undefined,
-    position: isDragging ? ('relative' as const) : undefined,
-    willChange: 'transform',
+    position: isDragging ? ("relative" as const) : undefined,
+    willChange: "transform",
     backgroundColor: isDragging ? "var(--nextui-default-100)" : undefined,
   };
 
@@ -929,43 +965,210 @@ const SortableCompactTableRow = ({
   return (
     <TableRow key={forward.id} ref={setNodeRef} style={style}>
       {true && (
-        <TableCell className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}>
-          <Checkbox isSelected={selectedIds.has(forward.id)} onValueChange={() => toggleSelect(forward.id)} />
+        <TableCell
+          className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}
+        >
+          <Checkbox
+            isSelected={selectedIds.has(forward.id)}
+            onValueChange={() => toggleSelect(forward.id)}
+          />
         </TableCell>
       )}
-      <TableCell className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}>
-        <div className="cursor-grab active:cursor-grabbing p-1 text-default-400 hover:text-default-600 transition-colors" {...attributes} {...listeners}>
-          <svg aria-hidden="true" className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M7 2a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 2zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 8zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 14zm6-8a2 2 0 1 1-.001-4.001A2 2 0 0 1 13 6zm0 2a2 2 0 1 1 .001 4.001A2 2 0 0 1 13 8zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 13 14z" /></svg>
+      <TableCell
+        className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}
+      >
+        <div
+          className="cursor-grab active:cursor-grabbing p-1 text-default-400 hover:text-default-600 transition-colors"
+          {...attributes}
+          {...listeners}
+        >
+          <svg
+            aria-hidden="true"
+            className="w-4 h-4"
+            fill="currentColor"
+            viewBox="0 0 20 20"
+          >
+            <path d="M7 2a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 2zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 8zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 14zm6-8a2 2 0 1 1-.001-4.001A2 2 0 0 1 13 6zm0 2a2 2 0 1 1 .001 4.001A2 2 0 0 1 13 8zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 13 14z" />
+          </svg>
         </div>
       </TableCell>
-      <TableCell className={`whitespace-nowrap text-foreground ${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}><span className="cursor-pointer hover:text-primary transition-colors" onClick={() => copyToClipboard(forward.name, "规则名")}>{forward.name}</span></TableCell>
-      <TableCell className={`whitespace-nowrap ${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}>
+      <TableCell
+        className={`whitespace-nowrap text-foreground ${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}
+      >
+        <span
+          className="cursor-pointer hover:text-primary transition-colors"
+          onClick={() => copyToClipboard(forward.name, "规则名")}
+        >
+          {forward.name}
+        </span>
+      </TableCell>
+      <TableCell
+        className={`whitespace-nowrap ${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}
+      >
         <div className="flex items-center">
-          <span className="font-medium text-default-700 text-sm">{forward.tunnelName}</span>
-          <span className="text-success font-bold text-[12px] mr-1.5">‾{formatTunnelTrafficRatio(forward.tunnelTrafficRatio)}</span>
+          <span className="font-medium text-default-700 text-sm">
+            {forward.tunnelName}
+          </span>
+          <span className="text-success font-bold text-[12px] mr-1.5">
+            ‾{formatTunnelTrafficRatio(forward.tunnelTrafficRatio)}
+          </span>
         </div>
       </TableCell>
-      <TableCell className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}><span className="text-sm font-mono font-medium cursor-pointer hover:bg-default-200/50 rounded px-1 transition-colors" onClick={() => copyToClipboard((forward.inIp || "").replace(/:\d+$/, "") || "默认IP", "入口地址")}>{(forward.inIp || "").replace(/:\d+$/, "") || "默认IP"}</span></TableCell>
-      <TableCell className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}><span className="text-sm font-mono font-medium cursor-pointer hover:bg-default-200/50 rounded px-1 transition-colors" onClick={() => copyToClipboard(forward.inPort.toString(), "入口端口")}>{forward.inPort}</span></TableCell>
+      <TableCell
+        className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}
+      >
+        <span
+          className="text-sm font-mono font-medium cursor-pointer hover:bg-default-200/50 rounded px-1 transition-colors"
+          onClick={() =>
+            copyToClipboard(
+              (forward.inIp || "").replace(/:\d+$/, "") || "默认IP",
+              "入口地址",
+            )
+          }
+        >
+          {(forward.inIp || "").replace(/:\d+$/, "") || "默认IP"}
+        </span>
+      </TableCell>
+      <TableCell
+        className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}
+      >
+        <span
+          className="text-sm font-mono font-medium cursor-pointer hover:bg-default-200/50 rounded px-1 transition-colors"
+          onClick={() => copyToClipboard(forward.inPort.toString(), "入口端口")}
+        >
+          {forward.inPort}
+        </span>
+      </TableCell>
       {/* 入口端口点击复制 */}
-      <TableCell className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}><span className="text-sm font-mono font-medium cursor-pointer hover:bg-default-200/50 rounded px-1 transition-colors" onClick={() => copyToClipboard(forward.remoteAddr.split(',')[0].replace(/:\d+$/, ""), "落地地址")}>{forward.remoteAddr.split(',')[0].replace(/:\d+$/, "")}</span>{forward.remoteAddr.includes(',') && <span className="text-primary-400 ml-0.5">...</span>}</TableCell>
-      <TableCell className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}><span className="text-sm font-mono font-medium cursor-pointer hover:bg-default-200/50 rounded px-1 transition-colors" onClick={() => copyToClipboard((forward.remoteAddr.split(',')[0].match(/:(\d+)$/)?.[1]) || "", "落地端口")}>{(forward.remoteAddr.split(',')[0].match(/:(\d+)$/)?.[1]) || "-"}</span></TableCell>
-      
-      <TableCell className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}><Chip className="text-sm font-medium shrink-0 whitespace-nowrap" color={strategyDisplay.color as any} size="sm" variant="flat">{strategyDisplay.text}</Chip></TableCell>
-      <TableCell className={`whitespace-nowrap ${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}><span className="text-sm font-medium text-default-600 font-mono">{formatFlow(getForwardDisplayFlow(forward))}</span></TableCell>
-      <TableCell className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}><div className="flex items-center gap-2.5 whitespace-nowrap"><Switch color="success" isDisabled={forward.status !== 1 && forward.status !== 0} isSelected={forward.serviceRunning} size="sm" onValueChange={() => handleServiceToggle(forward)} /></div></TableCell>
-      <TableCell className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}>
+      <TableCell
+        className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}
+      >
+        <span
+          className="text-sm font-mono font-medium cursor-pointer hover:bg-default-200/50 rounded px-1 transition-colors"
+          onClick={() =>
+            copyToClipboard(
+              forward.remoteAddr.split(",")[0].replace(/:\d+$/, ""),
+              "落地地址",
+            )
+          }
+        >
+          {forward.remoteAddr.split(",")[0].replace(/:\d+$/, "")}
+        </span>
+        {forward.remoteAddr.includes(",") && (
+          <span className="text-primary-400 ml-0.5">...</span>
+        )}
+      </TableCell>
+      <TableCell
+        className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}
+      >
+        <span
+          className="text-sm font-mono font-medium cursor-pointer hover:bg-default-200/50 rounded px-1 transition-colors"
+          onClick={() =>
+            copyToClipboard(
+              forward.remoteAddr.split(",")[0].match(/:(\d+)$/)?.[1] || "",
+              "落地端口",
+            )
+          }
+        >
+          {forward.remoteAddr.split(",")[0].match(/:(\d+)$/)?.[1] || "-"}
+        </span>
+      </TableCell>
+
+      <TableCell
+        className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}
+      >
+        <Chip
+          className="text-sm font-medium shrink-0 whitespace-nowrap"
+          color={strategyDisplay.color as any}
+          size="sm"
+          variant="flat"
+        >
+          {strategyDisplay.text}
+        </Chip>
+      </TableCell>
+      <TableCell
+        className={`whitespace-nowrap ${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}
+      >
+        <span className="text-sm font-medium text-default-600 font-mono">
+          {formatFlow(getForwardDisplayFlow(forward))}
+        </span>
+      </TableCell>
+      <TableCell
+        className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}
+      >
+        <div className="flex items-center gap-2.5 whitespace-nowrap">
+          <Switch
+            color="success"
+            isDisabled={forward.status !== 1 && forward.status !== 0}
+            isSelected={forward.serviceRunning}
+            size="sm"
+            onValueChange={() => handleServiceToggle(forward)}
+          />
+        </div>
+      </TableCell>
+      <TableCell
+        className={`${selectedIds.has(forward.id) ? "bg-primary-50/70 dark:bg-primary-900/40" : ""}`}
+      >
         <div className="flex justify-start gap-2 pl-2">
-          <Button isIconOnly className="bg-primary/10 text-primary hover:bg-primary/20" size="sm" onPress={() => handleEdit(forward)}><svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" strokeWidth={2} /></svg></Button>
-          <Button isIconOnly className="bg-warning/10 text-warning hover:bg-warning/20" size="sm" onPress={() => handleDiagnose(forward)}><svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" strokeWidth={2} /></svg></Button>
-          <Button isIconOnly className="bg-danger/10 text-danger hover:bg-danger/20" size="sm" onPress={() => handleDelete(forward)}><svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" strokeWidth={2} /></svg></Button>
+          <Button
+            isIconOnly
+            className="bg-primary/10 text-primary hover:bg-primary/20"
+            size="sm"
+            onPress={() => handleEdit(forward)}
+          >
+            <svg
+              className="h-4 w-4"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                strokeWidth={2}
+              />
+            </svg>
+          </Button>
+          <Button
+            isIconOnly
+            className="bg-warning/10 text-warning hover:bg-warning/20"
+            size="sm"
+            onPress={() => handleDiagnose(forward)}
+          >
+            <svg
+              className="h-4 w-4"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"
+                strokeWidth={2}
+              />
+            </svg>
+          </Button>
+          <Button
+            isIconOnly
+            className="bg-danger/10 text-danger hover:bg-danger/20"
+            size="sm"
+            onPress={() => handleDelete(forward)}
+          >
+            <svg
+              className="h-4 w-4"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                strokeWidth={2}
+              />
+            </svg>
+          </Button>
         </div>
       </TableCell>
     </TableRow>
   );
 };
-
-
 
 const getForwardDisplayFlow = (forward: Forward): number => {
   const directFlow = (forward.inFlow || 0) + (forward.outFlow || 0);
@@ -987,10 +1190,18 @@ export default function ForwardPage() {
     userId: tokenUserId ? tokenUserId.toString() : "all",
     tunnelId: "all",
     inPort: "",
-    remoteAddr: ""
+    remoteAddr: "",
   });
   const [isSearchModalOpen, setIsSearchModalOpen] = useState(false);
-  const activeFilterCount = (searchParams.name ? 1 : 0) + (searchParams.userId !== "all" && searchParams.userId !== (tokenUserId ? tokenUserId.toString() : "all") ? 1 : 0) + (searchParams.tunnelId !== "all" ? 1 : 0) + (searchParams.inPort ? 1 : 0) + (searchParams.remoteAddr ? 1 : 0);
+  const activeFilterCount =
+    (searchParams.name ? 1 : 0) +
+    (searchParams.userId !== "all" &&
+    searchParams.userId !== (tokenUserId ? tokenUserId.toString() : "all")
+      ? 1
+      : 0) +
+    (searchParams.tunnelId !== "all" ? 1 : 0) +
+    (searchParams.inPort ? 1 : 0) +
+    (searchParams.remoteAddr ? 1 : 0);
   const [loading, setLoading] = useState(true);
   const [forwards, setForwards] = useState<Forward[]>([]);
   const [tunnels, setTunnels] = useState<Tunnel[]>([]);
@@ -1103,6 +1314,8 @@ export default function ForwardPage() {
     label: "",
     percent: 0,
   });
+  const [batchResultModal, setBatchResultModal] =
+    useState<BatchResultModalState>(EMPTY_BATCH_RESULT_MODAL_STATE);
   const [groupOrderMap, setGroupOrderMap] = useState<ForwardGroupOrderMap>({});
   const [collapsedTunnelGroups, setCollapsedTunnelGroups] =
     useState<ForwardGroupCollapsedMap>({});
@@ -1222,7 +1435,7 @@ export default function ForwardPage() {
         buildForwardGroupOrderLocalKey(tokenUserId),
         JSON.stringify(nextOrderMap),
       );
-    } catch { }
+    } catch {}
   };
 
   const persistGroupCollapsedToLocal = (
@@ -1237,7 +1450,7 @@ export default function ForwardPage() {
         buildForwardGroupCollapsedLocalKey(tokenUserId),
         JSON.stringify(nextCollapsedMap),
       );
-    } catch { }
+    } catch {}
   };
 
   const persistGroupOrderToGlobal = async (
@@ -1381,7 +1594,7 @@ export default function ForwardPage() {
               JSON.stringify(globalCollapsedBucket),
             );
           }
-        } catch { }
+        } catch {}
       }
 
       if (cancelled) {
@@ -1645,7 +1858,7 @@ export default function ForwardPage() {
     setViewMode(newMode);
     try {
       localStorage.setItem("forward-view-mode", newMode);
-    } catch { }
+    } catch {}
   };
 
   const applyForwardList = useCallback(
@@ -2035,10 +2248,10 @@ export default function ForwardPage() {
       if (res.code === 0) {
         const warningItems = Array.isArray((res as any).data?.warnings)
           ? (res as any).data.warnings
-            .map((item: unknown) =>
-              typeof item === "string" ? item.trim() : "",
-            )
-            .filter((item: string) => item)
+              .map((item: unknown) =>
+                typeof item === "string" ? item.trim() : "",
+              )
+              .filter((item: string) => item)
           : [];
 
         warningItems.forEach((warning: string) => {
@@ -2151,7 +2364,7 @@ export default function ForwardPage() {
           onStart: (payload) => {
             const startForwardName =
               typeof payload.forwardName === "string" &&
-                payload.forwardName.trim() !== ""
+              payload.forwardName.trim() !== ""
                 ? payload.forwardName
                 : forward.name;
             const startTotal = Number(payload.total);
@@ -2345,17 +2558,25 @@ export default function ForwardPage() {
         toast.success(`已复制${label}`);
       } else {
         const textArea = document.createElement("textarea");
+
         textArea.value = text;
         textArea.style.position = "fixed";
         textArea.style.left = "-9999px";
         textArea.style.top = "0";
         document.body.appendChild(textArea);
-        textArea.focus(); textArea.select();
-        try { document.execCommand('copy'); toast.success(`已复制${label}`); } 
-        catch (err) { toast.error("复制失败"); }
+        textArea.focus();
+        textArea.select();
+        try {
+          document.execCommand("copy");
+          toast.success(`已复制${label}`);
+        } catch (err) {
+          toast.error("复制失败");
+        }
         document.body.removeChild(textArea);
       }
-    } catch { toast.error("复制失败"); }
+    } catch {
+      toast.error("复制失败");
+    }
   };
 
   // 复制地址
@@ -2848,6 +3069,36 @@ export default function ForwardPage() {
     setSelectedIds(new Set());
   };
 
+  const presentBatchOutcome = useCallback(
+    (outcome: {
+      failureDetails?: BatchOperationFailure[];
+      resultSummary?: string;
+      resultTitle?: string;
+      toastMessage: string;
+      toastVariant: "success" | "error";
+    }) => {
+      const failureDetails = outcome.failureDetails || [];
+
+      if (failureDetails.length > 0) {
+        setBatchResultModal({
+          failures: failureDetails,
+          open: true,
+          summary: outcome.resultSummary || outcome.toastMessage,
+          title: outcome.resultTitle || "批量操作结果",
+        });
+
+        return;
+      }
+
+      if (outcome.toastVariant === "success") {
+        toast.success(outcome.toastMessage);
+      } else {
+        toast.error(outcome.toastMessage);
+      }
+    },
+    [],
+  );
+
   const handleBatchDelete = async () => {
     if (selectedIds.size === 0) return;
     setBatchLoading(true);
@@ -2859,11 +3110,7 @@ export default function ForwardPage() {
     try {
       const outcome = await executeForwardBatchDelete(Array.from(selectedIds));
 
-      if (outcome.toastVariant === "success") {
-        toast.success(outcome.toastMessage);
-      } else {
-        toast.error(outcome.toastMessage);
-      }
+      presentBatchOutcome(outcome);
 
       if (outcome.shouldRefresh) {
         setBatchProgress({
@@ -3026,25 +3273,40 @@ export default function ForwardPage() {
 
     if (searchParams.userId !== "all") {
       const targetUserId = parseInt(searchParams.userId);
-      filteredForwards = filteredForwards.filter(f => f.userId === targetUserId || (targetUserId === 0 && !f.userId));
+
+      filteredForwards = filteredForwards.filter(
+        (f) => f.userId === targetUserId || (targetUserId === 0 && !f.userId),
+      );
     }
     if (searchParams.tunnelId !== "all") {
       const targetTunnelId = parseInt(searchParams.tunnelId);
-      filteredForwards = filteredForwards.filter(f => f.tunnelId === targetTunnelId);
+
+      filteredForwards = filteredForwards.filter(
+        (f) => f.tunnelId === targetTunnelId,
+      );
     }
     if (searchParams.name.trim()) {
       const lowerName = searchParams.name.toLowerCase();
-      filteredForwards = filteredForwards.filter(f => f.name && f.name.toLowerCase().includes(lowerName));
+
+      filteredForwards = filteredForwards.filter(
+        (f) => f.name && f.name.toLowerCase().includes(lowerName),
+      );
     }
     if (searchParams.inPort.trim()) {
       const targetPort = parseInt(searchParams.inPort.trim());
+
       if (!isNaN(targetPort)) {
-        filteredForwards = filteredForwards.filter(f => f.inPort === targetPort);
+        filteredForwards = filteredForwards.filter(
+          (f) => f.inPort === targetPort,
+        );
       }
     }
     if (searchParams.remoteAddr.trim()) {
       const lowerAddr = searchParams.remoteAddr.toLowerCase();
-      filteredForwards = filteredForwards.filter(f => f.remoteAddr && f.remoteAddr.toLowerCase().includes(lowerAddr));
+
+      filteredForwards = filteredForwards.filter(
+        (f) => f.remoteAddr && f.remoteAddr.toLowerCase().includes(lowerAddr),
+      );
     }
 
     // 确保过滤后的规则列表有效
@@ -3213,7 +3475,7 @@ export default function ForwardPage() {
 
       if (
         normalizeTunnelTrafficRatio(existingTunnelGroup.tunnelTrafficRatio) ===
-        1 &&
+          1 &&
         normalizeTunnelTrafficRatio(forward.tunnelTrafficRatio) !== 1
       ) {
         existingTunnelGroup.tunnelTrafficRatio = normalizeTunnelTrafficRatio(
@@ -3303,30 +3565,37 @@ export default function ForwardPage() {
     [sortedForwards],
   );
 
-
   const selectAll = () => {
     const allIds = sortedForwards.map((f) => f.id);
+
     setSelectedIds(new Set(allIds));
   };
 
   const isAllSelected = useMemo(() => {
-    return sortedForwards && sortedForwards.length > 0 && selectedIds.size === sortedForwards.length;
+    return (
+      sortedForwards &&
+      sortedForwards.length > 0 &&
+      selectedIds.size === sortedForwards.length
+    );
   }, [sortedForwards, selectedIds]);
 
   const isIndeterminate = useMemo(() => {
-    return selectedIds.size > 0 && sortedForwards && selectedIds.size < sortedForwards.length;
+    return (
+      selectedIds.size > 0 &&
+      sortedForwards &&
+      selectedIds.size < sortedForwards.length
+    );
   }, [sortedForwards, selectedIds]);
 
   const handleSelectAllToggle = (isSelected: boolean) => {
     if (isSelected) {
       const allIds = sortedForwards.map((f) => f.id);
+
       setSelectedIds(new Set(allIds));
     } else {
       setSelectedIds(new Set());
     }
   };
-
-
 
   const toggleTunnelGroupCollapsed = (userId: number, tunnelKey: string) => {
     const collapseKey = buildTunnelGroupCollapseKey(userId, tunnelKey);
@@ -3417,14 +3686,15 @@ export default function ForwardPage() {
               </h3>
               <div className="text-xs text-default-500 truncate flex items-center mt-0.5">
                 {/* 倍率 */}
-                <span className="truncate">{normalizeForwardTunnelName(forward.tunnelName)}</span>
+                <span className="truncate">
+                  {normalizeForwardTunnelName(forward.tunnelName)}
+                </span>
                 <span className="text-success font-bold text-[12px] mr-1">
                   ‾{formatTunnelTrafficRatio(forward.tunnelTrafficRatio)}
                 </span>
               </div>
             </div>
             <div className="flex items-center gap-1.5 ml-2">
-
               <Switch
                 isDisabled={forward.status !== 1 && forward.status !== 0}
                 isSelected={forward.serviceRunning}
@@ -3439,7 +3709,23 @@ export default function ForwardPage() {
               >
                 {statusDisplay.text}
               </Chip>
-              {viewMode === "direct" && (<div className="cursor-grab active:cursor-grabbing p-1 -mr-1 text-default-400 hover:text-default-600 transition-colors touch-manipulation flex-shrink-0" {...listeners} style={{ touchAction: "none" }} title="拖拽排序"><svg aria-hidden="true" className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M7 2a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 2zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 8zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 14zm6-8a2 2 0 1 1-.001-4.001A2 2 0 0 1 13 6zm0 2a2 2 0 1 1 .001 4.001A2 2 0 0 1 13 8zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 13 14z" /></svg></div>)}
+              {viewMode === "direct" && (
+                <div
+                  className="cursor-grab active:cursor-grabbing p-1 -mr-1 text-default-400 hover:text-default-600 transition-colors touch-manipulation flex-shrink-0"
+                  {...listeners}
+                  style={{ touchAction: "none" }}
+                  title="拖拽排序"
+                >
+                  <svg
+                    aria-hidden="true"
+                    className="w-4 h-4"
+                    fill="currentColor"
+                    viewBox="0 0 20 20"
+                  >
+                    <path d="M7 2a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 2zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 8zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 14zm6-8a2 2 0 1 1-.001-4.001A2 2 0 0 1 13 6zm0 2a2 2 0 1 1 .001 4.001A2 2 0 0 1 13 8zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 13 14z" />
+                  </svg>
+                </div>
+              )}
             </div>
           </div>
         </CardHeader>
@@ -3449,10 +3735,11 @@ export default function ForwardPage() {
             {/* 地址信息 */}
             <div className="space-y-1">
               <button
-                className={`cursor-pointer px-2 py-1 bg-default-50 dark:bg-default-100/50 rounded border border-default-200 dark:border-default-300 transition-colors duration-200 ${hasMultipleAddresses(forward.inIp)
+                className={`cursor-pointer px-2 py-1 bg-default-50 dark:bg-default-100/50 rounded border border-default-200 dark:border-default-300 transition-colors duration-200 ${
+                  hasMultipleAddresses(forward.inIp)
                     ? "hover:bg-default-100 dark:hover:bg-default-200/50"
                     : ""
-                  }`}
+                }`}
                 title={formatInAddress(forward.inIp, forward.inPort)}
                 type="button"
                 onClick={() =>
@@ -3488,10 +3775,11 @@ export default function ForwardPage() {
               </button>
 
               <button
-                className={`cursor-pointer px-2 py-1 bg-default-50 dark:bg-default-100/50 rounded border border-default-200 dark:border-default-300 transition-colors duration-200 ${hasMultipleAddresses(forward.remoteAddr)
+                className={`cursor-pointer px-2 py-1 bg-default-50 dark:bg-default-100/50 rounded border border-default-200 dark:border-default-300 transition-colors duration-200 ${
+                  hasMultipleAddresses(forward.remoteAddr)
                     ? "hover:bg-default-100 dark:hover:bg-default-200/50"
                     : ""
-                  }`}
+                }`}
                 title={formatRemoteAddress(forward.remoteAddr)}
                 type="button"
                 onClick={() =>
@@ -3665,22 +3953,44 @@ export default function ForwardPage() {
     <AnimatedPage className="px-3 lg:px-6 py-8">
       {/* 页面头部 */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between mb-6 gap-3">
-
         <div className="flex-1 flex items-center gap-2">
           <Button
             color={activeFilterCount > 0 ? "primary" : "default"}
-            variant={activeFilterCount > 0 ? "flat" : "bordered"}
             startContent={
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                />
               </svg>
             }
+            variant={activeFilterCount > 0 ? "flat" : "bordered"}
             onPress={() => setIsSearchModalOpen(true)}
           >
             高级筛选 {activeFilterCount > 0 ? `(${activeFilterCount})` : ""}
           </Button>
           {activeFilterCount > 0 && (
-            <Button size="sm" variant="light" color="danger" onPress={() => setSearchParams({ name: "", userId: tokenUserId ? tokenUserId.toString() : "all", tunnelId: "all", inPort: "", remoteAddr: "" })}>
+            <Button
+              color="danger"
+              size="sm"
+              variant="light"
+              onPress={() =>
+                setSearchParams({
+                  name: "",
+                  userId: tokenUserId ? tokenUserId.toString() : "all",
+                  tunnelId: "all",
+                  inPort: "",
+                  remoteAddr: "",
+                })
+              }
+            >
               清空条件
             </Button>
           )}
@@ -3756,7 +4066,6 @@ export default function ForwardPage() {
                 >
                   隧道
                 </Button>
-
               </>
             ) : (
               <>
@@ -3820,8 +4129,6 @@ export default function ForwardPage() {
                 >
                   导出
                 </Button>
-
-
 
                 <Button
                   color="primary"
@@ -3889,27 +4196,46 @@ export default function ForwardPage() {
                         {true && (
                           <TableColumn className="w-14">
                             {/* @ts-ignore */}
-                            <Checkbox isSelected={isAllSelected} isIndeterminate={isIndeterminate} onValueChange={handleSelectAllToggle} aria-label="全选" />
+                            <Checkbox
+                              aria-label="全选"
+                              isIndeterminate={isIndeterminate}
+                              isSelected={isAllSelected}
+                              onValueChange={handleSelectAllToggle}
+                            />
                           </TableColumn>
                         )}
-                        <TableColumn className="w-16 pl-2 whitespace-nowrap min-w-[60px]">排序</TableColumn>
-                        <TableColumn className="w-[180px]">规则名</TableColumn> 
-                        <TableColumn className="w-[180px]">隧道<sup className="text-success font-bold text-[10px] mr-1">‾倍率</sup></TableColumn>
-                        <TableColumn className="w-[150px]">入口地址</TableColumn>
+                        <TableColumn className="w-16 pl-2 whitespace-nowrap min-w-[60px]">
+                          排序
+                        </TableColumn>
+                        <TableColumn className="w-[180px]">规则名</TableColumn>
+                        <TableColumn className="w-[180px]">
+                          隧道
+                          <sup className="text-success font-bold text-[10px] mr-1">
+                            ‾倍率
+                          </sup>
+                        </TableColumn>
+                        <TableColumn className="w-[150px]">
+                          入口地址
+                        </TableColumn>
                         <TableColumn className="w-[80px]">端口</TableColumn>
-                        <TableColumn className="w-[120px]">落地地址</TableColumn>
+                        <TableColumn className="w-[120px]">
+                          落地地址
+                        </TableColumn>
                         <TableColumn className="w-[80px]">端口</TableColumn>
                         <TableColumn className="w-[80px]">策略</TableColumn>
                         <TableColumn className="w-[100px]">用量</TableColumn>
                         <TableColumn className="w-[80px]">状态</TableColumn>
-                        <TableColumn align="left" className="w-[120px] pl-4">操作</TableColumn>
+                        <TableColumn align="left" className="w-[120px] pl-4">
+                          操作
+                        </TableColumn>
                       </TableHeader>
                       <TableBody
                         emptyContent="暂无规则配置"
                         items={sortedForwards}
                       >
                         {(forward) => (
-                          <SortableCompactTableRow copyToClipboard={copyToClipboard}
+                          <SortableCompactTableRow
+                            copyToClipboard={copyToClipboard}
                             formatFlow={formatFlow}
                             formatInAddress={formatInAddress}
                             formatRemoteAddress={formatRemoteAddress}
@@ -3958,7 +4284,7 @@ export default function ForwardPage() {
               collisionDetection={pointerWithin}
               sensors={sensors}
               onDragEnd={handleDragEnd}
-              onDragStart={() => { }}
+              onDragStart={() => {}}
             >
               <SortableContext
                 items={sortableForwardIds}
@@ -3967,7 +4293,11 @@ export default function ForwardPage() {
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
                   {sortedForwards.map((forward) =>
                     forward && forward.id ? (
-                      <SortableForwardCard renderCard={renderForwardCard} key={forward.id} forward={forward} />
+                      <SortableForwardCard
+                        key={forward.id}
+                        forward={forward}
+                        renderCard={renderForwardCard}
+                      />
                     ) : null,
                   )}
                 </div>
@@ -4039,10 +4369,10 @@ export default function ForwardPage() {
                             .filter((id) => id > 0);
                           const collapsed =
                             sanitizedCollapsedTunnelGroups[
-                            buildTunnelGroupCollapseKey(
-                              group.userId,
-                              tunnel.tunnelKey,
-                            )
+                              buildTunnelGroupCollapseKey(
+                                group.userId,
+                                tunnel.tunnelKey,
+                              )
                             ] === true;
 
                           return (
@@ -4081,7 +4411,12 @@ export default function ForwardPage() {
                                     {true && (
                                       <TableColumn className="w-14">
                                         {/* @ts-ignore */}
-                                        <Checkbox isSelected={isAllSelected} isIndeterminate={isIndeterminate} onValueChange={handleSelectAllToggle} aria-label="全选" />
+                                        <Checkbox
+                                          aria-label="全选"
+                                          isIndeterminate={isIndeterminate}
+                                          isSelected={isAllSelected}
+                                          onValueChange={handleSelectAllToggle}
+                                        />
                                       </TableColumn>
                                     )}
                                     <TableColumn
@@ -4149,7 +4484,8 @@ export default function ForwardPage() {
                                         items={tunnelSortableForwardIds}
                                         strategy={verticalListSortingStrategy}
                                       >
-                                        <SortableTableRow copyToClipboard={copyToClipboard}
+                                        <SortableTableRow
+                                          copyToClipboard={copyToClipboard}
                                           formatFlow={formatFlow}
                                           formatInAddress={formatInAddress}
                                           formatRemoteAddress={
@@ -4252,10 +4588,10 @@ export default function ForwardPage() {
                           .filter((id) => id > 0);
                         const collapsed =
                           sanitizedCollapsedTunnelGroups[
-                          buildTunnelGroupCollapseKey(
-                            group.userId,
-                            tunnel.tunnelKey,
-                          )
+                            buildTunnelGroupCollapseKey(
+                              group.userId,
+                              tunnel.tunnelKey,
+                            )
                           ] === true;
 
                         return (
@@ -4280,7 +4616,7 @@ export default function ForwardPage() {
                               collisionDetection={pointerWithin}
                               sensors={sensors}
                               onDragEnd={handleDragEnd}
-                              onDragStart={() => { }}
+                              onDragStart={() => {}}
                             >
                               <SortableContext
                                 items={tunnelSortableForwardIds}
@@ -4323,8 +4659,10 @@ export default function ForwardPage() {
 
       {/* 新增/编辑模态框 */}
       <Modal
-        classNames={{ base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden" }}
         backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={modalOpen}
         placement="center"
         scrollBehavior="outside"
@@ -4536,8 +4874,10 @@ export default function ForwardPage() {
 
       {/* 删除确认模态框 */}
       <Modal
-        classNames={{ base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden" }}
         backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={deleteModalOpen}
         placement="center"
         scrollBehavior="outside"
@@ -4581,7 +4921,9 @@ export default function ForwardPage() {
 
       {/* 地址列表弹窗 */}
       <Modal
-        classNames={{ base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden" }}
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={addressModalOpen}
         scrollBehavior="outside"
         size="lg"
@@ -4622,8 +4964,10 @@ export default function ForwardPage() {
 
       {/* 导出数据模态框 */}
       <Modal
-        classNames={{ base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden" }}
         backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={exportModalOpen}
         placement="center"
         scrollBehavior="outside"
@@ -4779,8 +5123,10 @@ export default function ForwardPage() {
 
       {/* 导入数据模态框 */}
       <Modal
-        classNames={{ base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden" }}
         backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={importModalOpen}
         placement="center"
         scrollBehavior="outside"
@@ -4906,10 +5252,11 @@ export default function ForwardPage() {
                     {importResults.map((result, index) => (
                       <div
                         key={index}
-                        className={`p-2 rounded border ${result.success
+                        className={`p-2 rounded border ${
+                          result.success
                             ? "bg-success-50 dark:bg-success-100/10 border-success-200 dark:border-success-300/20"
                             : "bg-danger-50 dark:bg-danger-100/10 border-danger-200 dark:border-danger-300/20"
-                          }`}
+                        }`}
                       >
                         <div className="flex items-center gap-2">
                           {result.success ? (
@@ -4942,10 +5289,11 @@ export default function ForwardPage() {
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2 mb-0.5">
                               <span
-                                className={`text-xs font-medium ${result.success
+                                className={`text-xs font-medium ${
+                                  result.success
                                     ? "text-success-700 dark:text-success-300"
                                     : "text-danger-700 dark:text-danger-300"
-                                  }`}
+                                }`}
                               >
                                 {result.success ? "成功" : "失败"}
                               </span>
@@ -4957,10 +5305,11 @@ export default function ForwardPage() {
                               </code>
                             </div>
                             <div
-                              className={`text-xs ${result.success
+                              className={`text-xs ${
+                                result.success
                                   ? "text-success-600 dark:text-success-400"
                                   : "text-danger-600 dark:text-danger-400"
-                                }`}
+                              }`}
                             >
                               {result.message}
                             </div>
@@ -4992,7 +5341,9 @@ export default function ForwardPage() {
       {/* 诊断结果模态框 */}
       <Modal
         backdrop="blur"
-        classNames={{ base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden" }}
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={diagnosisModalOpen}
         placement="center"
         scrollBehavior="inside"
@@ -5071,10 +5422,10 @@ export default function ForwardPage() {
                       <div className="text-center p-3 bg-success-50 dark:bg-success-900/20 rounded-lg border border-success-200 dark:border-success-700">
                         <div className="text-2xl font-bold text-success-600 dark:text-success-400">
                           {diagnosisProgress.completed > 0 ||
-                            diagnosisProgress.total > 0
+                          diagnosisProgress.total > 0
                             ? diagnosisProgress.success
                             : diagnosisResult.results.filter((r) => r.success)
-                              .length}
+                                .length}
                         </div>
                         <div className="text-xs text-success-600 dark:text-success-400/80 mt-1">
                           成功
@@ -5083,10 +5434,10 @@ export default function ForwardPage() {
                       <div className="text-center p-3 bg-danger-50 dark:bg-danger-900/20 rounded-lg border border-danger-200 dark:border-danger-700">
                         <div className="text-2xl font-bold text-danger-600 dark:text-danger-400">
                           {diagnosisProgress.completed > 0 ||
-                            diagnosisProgress.total > 0
+                          diagnosisProgress.total > 0
                             ? diagnosisProgress.failed
                             : diagnosisResult.results.filter((r) => !r.success)
-                              .length}
+                                .length}
                         </div>
                         <div className="text-xs text-danger-600 dark:text-danger-400/80 mt-1">
                           失败
@@ -5172,12 +5523,13 @@ export default function ForwardPage() {
                                     return (
                                       <tr
                                         key={index}
-                                        className={`hover:bg-default-50 dark:hover:bg-gray-700/50 ${isDiagnosing
+                                        className={`hover:bg-default-50 dark:hover:bg-gray-700/50 ${
+                                          isDiagnosing
                                             ? "bg-warning-50 dark:bg-warning-900/20"
                                             : isSuccess
                                               ? "bg-white dark:bg-gray-800"
                                               : "bg-danger-50 dark:bg-danger-900/30"
-                                          }`}
+                                        }`}
                                       >
                                         <td className="px-3 py-2">
                                           <div className="flex items-center gap-2">
@@ -5185,10 +5537,11 @@ export default function ForwardPage() {
                                               <Spinner size="sm" />
                                             ) : (
                                               <span
-                                                className={`w-5 h-5 rounded-full flex items-center justify-center text-xs ${isSuccess
+                                                className={`w-5 h-5 rounded-full flex items-center justify-center text-xs ${
+                                                  isSuccess
                                                     ? "bg-success text-white"
                                                     : "bg-danger text-white"
-                                                  }`}
+                                                }`}
                                               >
                                                 {isSuccess ? "✓" : "✗"}
                                               </span>
@@ -5237,10 +5590,11 @@ export default function ForwardPage() {
                                         <td className="px-3 py-2 text-center">
                                           {isSuccess ? (
                                             <span
-                                              className={`font-semibold ${(result.packetLoss || 0) > 0
+                                              className={`font-semibold ${
+                                                (result.packetLoss || 0) > 0
                                                   ? "text-warning"
                                                   : "text-success"
-                                                }`}
+                                              }`}
                                             >
                                               {result.packetLoss?.toFixed(1)}%
                                             </span>
@@ -5356,22 +5710,24 @@ export default function ForwardPage() {
                                 return (
                                   <div
                                     key={index}
-                                    className={`border rounded-lg p-3 ${isDiagnosing
+                                    className={`border rounded-lg p-3 ${
+                                      isDiagnosing
                                         ? "border-warning-200 dark:border-warning-300/30 bg-warning-50 dark:bg-warning-900/20"
                                         : isSuccess
                                           ? "border-divider bg-white dark:bg-gray-800"
                                           : "border-danger-200 dark:border-danger-300/30 bg-danger-50 dark:bg-danger-900/30"
-                                      }`}
+                                    }`}
                                   >
                                     <div className="flex items-start gap-2 mb-2">
                                       {isDiagnosing ? (
                                         <Spinner size="sm" />
                                       ) : (
                                         <span
-                                          className={`w-6 h-6 rounded-full flex items-center justify-center text-xs flex-shrink-0 ${isSuccess
+                                          className={`w-6 h-6 rounded-full flex items-center justify-center text-xs flex-shrink-0 ${
+                                            isSuccess
                                               ? "bg-success text-white"
                                               : "bg-danger text-white"
-                                            }`}
+                                          }`}
                                         >
                                           {isSuccess ? "✓" : "✗"}
                                         </span>
@@ -5416,10 +5772,11 @@ export default function ForwardPage() {
                                         </div>
                                         <div className="text-center">
                                           <div
-                                            className={`text-lg font-bold ${(result.packetLoss || 0) > 0
+                                            className={`text-lg font-bold ${
+                                              (result.packetLoss || 0) > 0
                                                 ? "text-warning"
                                                 : "text-success"
-                                              }`}
+                                            }`}
                                           >
                                             {result.packetLoss?.toFixed(1)}%
                                           </div>
@@ -5448,10 +5805,11 @@ export default function ForwardPage() {
                                     ) : (
                                       <div className="mt-2 pt-2 border-t border-divider">
                                         <div
-                                          className={`text-xs ${isDiagnosing
+                                          className={`text-xs ${
+                                            isDiagnosing
                                               ? "text-warning"
                                               : "text-danger"
-                                            }`}
+                                          }`}
                                         >
                                           {isDiagnosing
                                             ? result.message || "诊断中..."
@@ -5499,26 +5857,26 @@ export default function ForwardPage() {
                     {diagnosisResult.results.some(
                       (r) => r.success === false && !r.diagnosing,
                     ) && (
-                        <div className="space-y-2 hidden md:block">
-                          <h4 className="text-sm font-semibold text-danger">
-                            失败详情
-                          </h4>
-                          <div className="space-y-2">
-                            {diagnosisResult.results
-                              .filter((r) => r.success === false && !r.diagnosing)
-                              .map((result, index) => (
-                                <Alert
-                                  key={index}
-                                  className="text-xs"
-                                  color="danger"
-                                  description={result.message || "连接失败"}
-                                  title={result.description}
-                                  variant="flat"
-                                />
-                              ))}
-                          </div>
+                      <div className="space-y-2 hidden md:block">
+                        <h4 className="text-sm font-semibold text-danger">
+                          失败详情
+                        </h4>
+                        <div className="space-y-2">
+                          {diagnosisResult.results
+                            .filter((r) => r.success === false && !r.diagnosing)
+                            .map((result, index) => (
+                              <Alert
+                                key={index}
+                                className="text-xs"
+                                color="danger"
+                                description={result.message || "连接失败"}
+                                title={result.description}
+                                variant="flat"
+                              />
+                            ))}
                         </div>
-                      )}
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="text-center py-16">
@@ -5565,7 +5923,9 @@ export default function ForwardPage() {
 
       {/* 批量删除确认模态框 */}
       <Modal
-        classNames={{ base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden" }}
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={batchDeleteModalOpen}
         onOpenChange={setBatchDeleteModalOpen}
       >
@@ -5597,7 +5957,9 @@ export default function ForwardPage() {
 
       {/* 批量换隧道模态框 */}
       <Modal
-        classNames={{ base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden" }}
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={batchChangeTunnelModalOpen}
         onOpenChange={setBatchChangeTunnelModalOpen}
       >
@@ -5646,10 +6008,11 @@ export default function ForwardPage() {
         </ModalContent>
       </Modal>
 
-
       {/* 搜索与筛选五合一模态框 */}
       <Modal
-        classNames={{ base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden" }}
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={isSearchModalOpen}
         placement="center"
         size="md"
@@ -5667,8 +6030,13 @@ export default function ForwardPage() {
                     label="规则名称 (模糊)"
                     placeholder="请输入规则名称关键字"
                     value={searchParams.name}
-                    onChange={(e) => setSearchParams(prev => ({ ...prev, name: e.target.value }))}
                     variant="bordered"
+                    onChange={(e) =>
+                      setSearchParams((prev) => ({
+                        ...prev,
+                        name: e.target.value,
+                      }))
+                    }
                   />
 
                   {isAdmin && (
@@ -5679,7 +6047,11 @@ export default function ForwardPage() {
                       variant="bordered"
                       onSelectionChange={(keys) => {
                         const key = Array.from(keys)[0] as string;
-                        setSearchParams(prev => ({ ...prev, userId: key || "all" }));
+
+                        setSearchParams((prev) => ({
+                          ...prev,
+                          userId: key || "all",
+                        }));
                       }}
                     >
                       <SelectItem key="all">全部用户</SelectItem>
@@ -5698,7 +6070,11 @@ export default function ForwardPage() {
                     variant="bordered"
                     onSelectionChange={(keys) => {
                       const key = Array.from(keys)[0] as string;
-                      setSearchParams(prev => ({ ...prev, tunnelId: key || "all" }));
+
+                      setSearchParams((prev) => ({
+                        ...prev,
+                        tunnelId: key || "all",
+                      }));
                     }}
                   >
                     <SelectItem key="all">全部隧道</SelectItem>
@@ -5714,16 +6090,26 @@ export default function ForwardPage() {
                     placeholder="请输入具体端口号"
                     type="number"
                     value={searchParams.inPort}
-                    onChange={(e) => setSearchParams(prev => ({ ...prev, inPort: e.target.value }))}
                     variant="bordered"
+                    onChange={(e) =>
+                      setSearchParams((prev) => ({
+                        ...prev,
+                        inPort: e.target.value,
+                      }))
+                    }
                   />
 
                   <Input
                     label="目标地址或端口 (模糊)"
                     placeholder="请输入目标IP、域名或端口"
                     value={searchParams.remoteAddr}
-                    onChange={(e) => setSearchParams(prev => ({ ...prev, remoteAddr: e.target.value }))}
                     variant="bordered"
+                    onChange={(e) =>
+                      setSearchParams((prev) => ({
+                        ...prev,
+                        remoteAddr: e.target.value,
+                      }))
+                    }
                   />
                 </div>
               </ModalBody>
@@ -5737,7 +6123,7 @@ export default function ForwardPage() {
                       userId: tokenUserId ? tokenUserId.toString() : "all",
                       tunnelId: "all",
                       inPort: "",
-                      remoteAddr: ""
+                      remoteAddr: "",
                     });
                   }}
                 >
@@ -5749,6 +6135,21 @@ export default function ForwardPage() {
         </ModalContent>
       </Modal>
 
+      <BatchActionResultModal
+        failures={batchResultModal.failures}
+        isOpen={batchResultModal.open}
+        summary={batchResultModal.summary}
+        title={batchResultModal.title}
+        onOpenChange={(open) => {
+          if (open) {
+            setBatchResultModal((prev) => ({ ...prev, open: true }));
+
+            return;
+          }
+
+          setBatchResultModal(EMPTY_BATCH_RESULT_MODAL_STATE);
+        }}
+      />
     </AnimatedPage>
   );
 }
