@@ -4589,6 +4589,7 @@ export default function ForwardPage() {
                                       <SortableForwardCard
                                         key={forward.id}
                                         forward={forward}
+                                        renderCard={renderForwardCard}
                                       />
                                     ) : null,
                                   )}
