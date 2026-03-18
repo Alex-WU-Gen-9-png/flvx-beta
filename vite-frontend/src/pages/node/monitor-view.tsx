@@ -32,6 +32,7 @@ import {
   Cpu,
   Clock,
   Globe,
+  ArrowLeft,
 } from "lucide-react";
 import toast from "react-hot-toast";
 
@@ -168,11 +169,11 @@ const getColorByUsage = (usage?: number) => {
   return "success";
 };
 
-function ServerCard({ node, metric }: { node: any; metric: RealtimeNodeMetric | null }) {
+function ServerCard({ node, metric, onPress }: { node: any; metric: RealtimeNodeMetric | null; onPress?: () => void }) {
   const isOnline = node.connectionStatus === "online";
   
   return (
-    <Card className={`border-t-4 ${isOnline ? "border-t-success" : "border-t-danger"}`}>
+    <Card className={`border-t-4 transition-all hover:scale-[1.02] hover:shadow-lg cursor-pointer ${isOnline ? "border-t-success" : "border-t-danger"}`} onClick={onPress}>
       <CardHeader className="pb-2 flex justify-between items-center">
         <div className="flex items-center gap-2">
           <Server className={`w-5 h-5 ${isOnline ? "text-success" : "text-default-400"}`} />
@@ -270,7 +271,6 @@ type MetricType =
   | "network"
   | "load"
   | "connections";
-type TunnelMetricType = "traffic";
 
 const METRICS_MAX_ROWS = 5000;
 
@@ -284,6 +284,7 @@ const DEFAULT_SERVICE_MONITOR_LIMITS: ServiceMonitorLimitsApiData = {
 };
 
 export function MonitorView({ nodeMap }: MonitorViewProps) {
+  const [detailNodeId, setDetailNodeId] = useState<number | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null);
   const [metrics, setMetrics] = useState<NodeMetricApiItem[]>([]);
   const [metricsLoading, setMetricsLoading] = useState(false);
@@ -295,24 +296,22 @@ export function MonitorView({ nodeMap }: MonitorViewProps) {
 
   const [tunnels, setTunnels] = useState<MonitorTunnelApiItem[]>([]);
   const [tunnelsLoading, setTunnelsLoading] = useState(false);
-  const [tunnelsError, setTunnelsError] = useState<string | null>(null);
+  const [, setTunnelsError] = useState<string | null>(null);
   const [selectedTunnelId, setSelectedTunnelId] = useState<number | null>(null);
   const [tunnelMetrics, setTunnelMetrics] = useState<TunnelMetricApiItem[]>([]);
   const [tunnelMetricsLoading, setTunnelMetricsLoading] = useState(false);
-  const [tunnelMetricsTruncated, setTunnelMetricsTruncated] = useState(false);
+  const [, setTunnelMetricsTruncated] = useState(false);
   const [tunnelMetricsError, setTunnelMetricsError] = useState<string | null>(
     null,
   );
   const [tunnelRangeMs, setTunnelRangeMs] = useState(60 * 60 * 1000);
-  const [activeTunnelMetricType, setActiveTunnelMetricType] =
-    useState<TunnelMetricType>("traffic");
 
   const [serviceMonitors, setServiceMonitors] = useState<
     ServiceMonitorApiItem[]
   >([]);
   const [monitorsLoading, setMonitorsLoading] = useState(false);
-  const [monitorsError, setMonitorsError] = useState<string | null>(null);
-  const [latestResultsError, setLatestResultsError] = useState<string | null>(
+  const [, setMonitorsError] = useState<string | null>(null);
+  const [, setLatestResultsError] = useState<string | null>(
     null,
   );
   const [monitorResults, setMonitorResults] = useState<
@@ -1028,15 +1027,6 @@ export function MonitorView({ nodeMap }: MonitorViewProps) {
   const modalResults =
     resultsMonitorId != null ? monitorResults[resultsMonitorId] || [] : [];
 
-  const selectedRealtimeMetric =
-    selectedNodeId != null ? realtimeNodeMetrics[selectedNodeId] || null : null;
-  const latestPersistedNodeTs =
-    metrics.length > 0 ? metrics[metrics.length - 1]?.timestamp : null;
-  const latestPersistedTunnelTs =
-    tunnelMetrics.length > 0
-      ? tunnelMetrics[tunnelMetrics.length - 1]?.timestamp
-      : null;
-
   const resolveMonitorIntervalSec = useCallback(
     (monitor: ServiceMonitorApiItem) => {
       let interval = Number(monitor.intervalSec ?? 0);
@@ -1158,6 +1148,14 @@ export function MonitorView({ nodeMap }: MonitorViewProps) {
     return formatBytes(n);
   };
 
+  const detailNode = detailNodeId != null ? nodes.find((n) => n.id === detailNodeId) : null;
+  const detailRealtimeMetric = detailNodeId != null ? realtimeNodeMetrics[detailNodeId] || null : null;
+
+  // Service monitors filtered for the detail node (0 = panel-executed, show all in that case)
+  const detailServiceMonitors = detailNodeId != null
+    ? serviceMonitors.filter((m) => m.nodeId === detailNodeId || m.nodeId === 0)
+    : serviceMonitors;
+
   return (
     <div className="space-y-6">
       {accessDenied && (
@@ -1175,628 +1173,309 @@ export function MonitorView({ nodeMap }: MonitorViewProps) {
         </Card>
       )}
 
-      {!accessDenied && (
+      {/* ====== GRID VIEW ====== */}
+      {!accessDenied && !detailNodeId && (
         <>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {nodes.map((node) => {
-               const metric = realtimeNodeMetrics[node.id] || null;
-               return <ServerCard key={node.id} node={node} metric={metric} />;
-            })}
+          <div className="flex flex-wrap items-center gap-3 mb-1">
+            <div className="flex items-center gap-2 text-xs text-default-500">
+              <div className={`w-2 h-2 rounded-full ${wsConnected ? "bg-success" : wsConnecting ? "bg-warning" : "bg-default-300"}`} />
+              <span>{wsConnected ? "实时已连接" : wsConnecting ? "实时连接中" : "实时未连接"}</span>
+            </div>
+            <Chip color="primary" size="sm" variant="flat">节点在线 {onlineNodes.length}/{nodes.length}</Chip>
+            <Chip color="success" size="sm" variant="flat">监控 成功 {monitorSummary.ok} / 失败 {monitorSummary.fail}</Chip>
+            {monitorSummary.stale > 0 && <Chip color="warning" size="sm" variant="flat">陈旧 {monitorSummary.stale}</Chip>}
           </div>
 
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between">
-              <h3 className="text-lg font-semibold">监控概览</h3>
-              <div className="flex items-center gap-2 text-xs text-default-500">
-                <div
-                  className={`w-2 h-2 rounded-full ${
-                    wsConnected
-                      ? "bg-success"
-                      : wsConnecting
-                        ? "bg-warning"
-                        : "bg-default-300"
-                  }`}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {nodes.map((node) => {
+              const metric = realtimeNodeMetrics[node.id] || null;
+              return (
+                <ServerCard
+                  key={node.id}
+                  node={node}
+                  metric={metric}
+                  onPress={() => {
+                    setDetailNodeId(node.id);
+                    setSelectedNodeId(node.id);
+                  }}
                 />
-                <span>
-                  {wsConnected
-                    ? "实时已连接"
-                    : wsConnecting
-                      ? "实时连接中"
-                      : "实时未连接"}
-                </span>
-              </div>
-            </CardHeader>
-            <CardBody className="space-y-3">
-              <div className="flex flex-wrap gap-2">
-                <Chip color="primary" size="sm" variant="flat">
-                  节点在线 {onlineNodes.length}/{nodes.length}
-                </Chip>
-                <Chip color="success" size="sm" variant="flat">
-                  服务监控 成功 {monitorSummary.ok} / 失败 {monitorSummary.fail}
-                </Chip>
-                <Chip color="default" size="sm" variant="flat">
-                  禁用 {monitorSummary.disabled}
-                </Chip>
-                {monitorSummary.unknown > 0 ? (
-                  <Chip color="default" size="sm" variant="flat">
-                    未检查 {monitorSummary.unknown}
-                  </Chip>
-                ) : null}
-                {monitorSummary.stale > 0 ? (
-                  <Chip color="warning" size="sm" variant="flat">
-                    陈旧 {monitorSummary.stale}
-                  </Chip>
-                ) : null}
-              </div>
+              );
+            })}
+          </div>
+        </>
+      )}
 
-              <div className="text-xs text-default-500 space-y-1">
-                <div>
-                  历史图表来自数据库，入库批量刷新约 30s（可能存在 0-30s 延迟）
-                </div>
-                <div>
-                  节点最近入库：
-                  {latestPersistedNodeTs ? (
-                    <span className="font-mono">
-                      {formatDateTime(latestPersistedNodeTs)}（约{
-                      Math.max(
-                        0,
-                        Math.round((Date.now() - latestPersistedNodeTs) / 1000),
-                      )}
-                      s前）
-                    </span>
-                  ) : (
-                    "-"
-                  )}
-                </div>
-                <div>
-                  实时数据更新时间：
-                  {selectedRealtimeMetric ? (
-                    <span className="font-mono">
-                      {formatDateTime(selectedRealtimeMetric.receivedAt)}
-                    </span>
-                  ) : (
-                    "-"
-                  )}
-                </div>
-              </div>
-            </CardBody>
-          </Card>
+      {/* ====== DETAIL VIEW ====== */}
+      {!accessDenied && detailNodeId && (
+        <>
+          {/* Header */}
+          <div className="flex items-center gap-3 flex-wrap">
+            <Button size="sm" variant="flat" onPress={() => setDetailNodeId(null)}>
+              <ArrowLeft className="w-4 h-4 mr-1" />
+              返回总览
+            </Button>
+            <div className="flex items-center gap-2">
+              <Server className={`w-5 h-5 ${detailNode?.connectionStatus === "online" ? "text-success" : "text-default-400"}`} />
+              <h3 className="text-lg font-semibold">{detailNode?.name || `节点 #${detailNodeId}`}</h3>
+              <Chip size="sm" color={detailNode?.connectionStatus === "online" ? "success" : "danger"} variant="flat">
+                {detailNode?.connectionStatus === "online" ? "在线" : "离线"}
+              </Chip>
+            </div>
+            <div className="flex items-center gap-2 text-xs text-default-500 ml-auto">
+              <div className={`w-2 h-2 rounded-full ${wsConnected ? "bg-success" : wsConnecting ? "bg-warning" : "bg-default-300"}`} />
+              <span>{wsConnected ? "实时已连接" : wsConnecting ? "实时连接中" : "实时未连接"}</span>
+            </div>
+          </div>
 
+          {/* Realtime KPI cards */}
+          {detailRealtimeMetric && (
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+              {[
+                { label: "CPU", value: `${detailRealtimeMetric.cpuUsage.toFixed(1)}%`, color: getColorByUsage(detailRealtimeMetric.cpuUsage) },
+                { label: "内存", value: `${detailRealtimeMetric.memoryUsage.toFixed(1)}%`, color: getColorByUsage(detailRealtimeMetric.memoryUsage) },
+                { label: "磁盘", value: `${detailRealtimeMetric.diskUsage.toFixed(1)}%`, color: getColorByUsage(detailRealtimeMetric.diskUsage) },
+                { label: "↓ 下行", value: formatBytesPerSecond(detailRealtimeMetric.netInSpeed), color: "success" as const },
+                { label: "↑ 上行", value: formatBytesPerSecond(detailRealtimeMetric.netOutSpeed), color: "primary" as const },
+                { label: "运行时间", value: formatUptime(detailRealtimeMetric.uptime), color: "default" as const },
+              ].map((item) => (
+                <Card key={item.label}>
+                  <CardBody className="py-3 px-4 flex flex-col items-center">
+                    <span className="text-[11px] text-default-500 mb-1">{item.label}</span>
+                    <span className="text-sm font-semibold font-mono">{item.value}</span>
+                  </CardBody>
+                </Card>
+              ))}
+            </div>
+          )}
+
+          {/* Node metrics chart */}
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <h3 className="text-lg font-semibold">节点指标图表</h3>
-            </CardHeader>
-            <CardBody className="space-y-4">
-              <div className="flex flex-wrap gap-2">
-                <Select
-                  className="w-48"
-                  placeholder="选择节点"
-                  selectedKeys={selectedNodeId ? [String(selectedNodeId)] : []}
-                  onSelectionChange={(keys) => {
-                    const nodeId = Number(Array.from(keys)[0]);
-
-                    setSelectedNodeId(nodeId || null);
-                  }}
-                >
-                  {nodes.map((node) => (
-                    <SelectItem key={String(node.id)}>
-                      {node.name}
-                      {node.connectionStatus === "online" ? "" : " (离线)"}
-                    </SelectItem>
-                  ))}
-                </Select>
-
+              <div className="flex items-center gap-2">
                 <Select
                   className="w-36"
                   selectedKeys={[String(metricsRangeMs)]}
                   onSelectionChange={(keys) => {
                     const v = Number(Array.from(keys)[0]);
-
                     if (v > 0) setMetricsRangeMs(v);
                   }}
                 >
                   <SelectItem key={String(15 * 60 * 1000)}>15分钟</SelectItem>
                   <SelectItem key={String(60 * 60 * 1000)}>1小时</SelectItem>
-                  <SelectItem key={String(6 * 60 * 60 * 1000)}>
-                    6小时
-                  </SelectItem>
-                  <SelectItem key={String(24 * 60 * 60 * 1000)}>
-                    24小时
-                  </SelectItem>
+                  <SelectItem key={String(6 * 60 * 60 * 1000)}>6小时</SelectItem>
+                  <SelectItem key={String(24 * 60 * 60 * 1000)}>24小时</SelectItem>
                 </Select>
-
-                {selectedNodeId && (
+                <Button isLoading={metricsLoading} size="sm" variant="flat" onPress={() => selectedNodeId && loadMetrics(selectedNodeId)}>
+                  <RefreshCw className="w-4 h-4 mr-1" />
+                  刷新
+                </Button>
+              </div>
+            </CardHeader>
+            <CardBody className="space-y-4">
+              <div className="flex flex-wrap gap-2">
+                {([
+                  { key: "cpu", label: "CPU" },
+                  { key: "memory", label: "内存" },
+                  { key: "disk", label: "磁盘" },
+                  { key: "network", label: "网络" },
+                  { key: "load", label: "负载" },
+                  { key: "connections", label: "连接" },
+                ] as { key: MetricType; label: string }[]).map((item) => (
                   <Button
-                    isLoading={metricsLoading}
+                    key={item.key}
+                    color={activeMetricType === item.key ? "primary" : "default"}
                     size="sm"
-                    variant="flat"
-                    onPress={() => loadMetrics(selectedNodeId)}
+                    variant={activeMetricType === item.key ? "solid" : "flat"}
+                    onPress={() => setActiveMetricType(item.key)}
                   >
-                    <RefreshCw className="w-4 h-4 mr-1" />
-                    刷新
+                    {item.label}
                   </Button>
-                )}
+                ))}
               </div>
 
-              {selectedNodeId && (
+              {metricsLoading ? (
+                <div className="flex justify-center py-8"><RefreshCw className="w-6 h-6 animate-spin" /></div>
+              ) : metricsError ? (
+                <div className="text-center py-8 text-danger text-sm">{metricsError}</div>
+              ) : metrics.length > 0 ? (
                 <>
-                  <div className="flex flex-wrap items-center gap-3 text-xs text-default-500">
-                    <div className="flex items-center gap-2">
-                      <div
-                        className={`w-2 h-2 rounded-full ${
-                          wsConnected
-                            ? "bg-success"
-                            : wsConnecting
-                              ? "bg-warning"
-                              : "bg-default-300"
-                        }`}
-                      />
-                      <span>实时</span>
-                    </div>
-                    {selectedRealtimeMetric ? (
-                      <span className="font-mono">
-                        CPU {selectedRealtimeMetric.cpuUsage.toFixed(1)}% · 内存{" "}
-                        {selectedRealtimeMetric.memoryUsage.toFixed(1)}% · ↓{" "}
-                        {formatBytesPerSecond(selectedRealtimeMetric.netInSpeed)} · ↑{" "}
-                        {formatBytesPerSecond(selectedRealtimeMetric.netOutSpeed)} · 更新{" "}
-                        {formatDateTime(selectedRealtimeMetric.receivedAt)}
-                      </span>
-                    ) : (
-                      <span>暂无实时数据</span>
-                    )}
+                  <div className="h-64">
+                    <ResponsiveContainer height="100%" width="100%">
+                      <LineChart data={chartData}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="time" fontSize={12} />
+                        <YAxis fontSize={12} tickFormatter={nodeYAxisTickFormatter} />
+                        <Tooltip
+                          contentStyle={{ backgroundColor: "rgba(0,0,0,0.8)", border: "none", borderRadius: "8px" }}
+                          labelStyle={{ color: "#fff" }}
+                          formatter={nodeTooltipFormatter}
+                        />
+                        {chartConfig.lines.map((line) => (
+                          <Line key={line.dataKey} dataKey={line.dataKey} dot={false} name={line.name} stroke={line.color} strokeWidth={2} type="monotone" />
+                        ))}
+                      </LineChart>
+                    </ResponsiveContainer>
                   </div>
-
-                  <div className="text-xs text-default-500">
-                    最近入库：
-                    {latestPersistedNodeTs ? (
-                      <span className="font-mono">
-                        {formatDateTime(latestPersistedNodeTs)}（约
-                        {Math.max(
-                          0,
-                          Math.round((Date.now() - latestPersistedNodeTs) / 1000),
-                        )}
-                        s前）
-                      </span>
-                    ) : (
-                      "-"
-                    )}
-                  </div>
-
-                  <div className="flex flex-wrap gap-2">
-                    {(
-                      [
-                        { key: "cpu", label: "CPU" },
-                        { key: "memory", label: "内存" },
-                        { key: "disk", label: "磁盘" },
-                        { key: "network", label: "网络" },
-                        { key: "load", label: "负载" },
-                        { key: "connections", label: "连接" },
-                      ] as { key: MetricType; label: string }[]
-                    ).map((item) => (
-                      <Button
-                        key={item.key}
-                        color={
-                          activeMetricType === item.key ? "primary" : "default"
-                        }
-                        size="sm"
-                        variant={
-                          activeMetricType === item.key ? "solid" : "flat"
-                        }
-                        onPress={() => setActiveMetricType(item.key)}
-                      >
-                        {item.label}
-                      </Button>
-                    ))}
-                  </div>
-
-                  {metricsLoading ? (
-                    <div className="flex justify-center py-8">
-                      <RefreshCw className="w-6 h-6 animate-spin" />
-                    </div>
-                  ) : metricsError ? (
-                    <div className="text-center py-8 text-danger text-sm">
-                      {metricsError}
-                    </div>
-                  ) : metrics.length > 0 ? (
-                    <>
-                      <div className="h-64">
-                        <ResponsiveContainer height="100%" width="100%">
-                          <LineChart data={chartData}>
-                            <CartesianGrid strokeDasharray="3 3" />
-                             <XAxis dataKey="time" fontSize={12} />
-                             <YAxis
-                               fontSize={12}
-                               tickFormatter={nodeYAxisTickFormatter}
-                             />
-                             <Tooltip
-                               contentStyle={{
-                                 backgroundColor: "rgba(0,0,0,0.8)",
-                                 border: "none",
-                                 borderRadius: "8px",
-                               }}
-                               labelStyle={{ color: "#fff" }}
-                               formatter={nodeTooltipFormatter}
-                             />
-                            {chartConfig.lines.map((line) => (
-                              <Line
-                                key={line.dataKey}
-                                dataKey={line.dataKey}
-                                dot={false}
-                                name={line.name}
-                                stroke={line.color}
-                                strokeWidth={2}
-                                type="monotone"
-                              />
-                            ))}
-                          </LineChart>
-                        </ResponsiveContainer>
-                      </div>
-                      {metricsTruncated && (
-                        <div className="text-xs text-default-500">
-                          数据点过多，已截断为最近 {METRICS_MAX_ROWS}{" "}
-                          条，建议缩小时间范围。
-                        </div>
-                      )}
-                    </>
-                  ) : (
-                    <div className="text-center py-8 text-default-500">
-                      暂无指标数据
-                    </div>
+                  {metricsTruncated && (
+                    <div className="text-xs text-default-500">数据点过多，已截断为最近 {METRICS_MAX_ROWS} 条，建议缩小时间范围。</div>
                   )}
                 </>
-              )}
-
-              {!selectedNodeId && (
-                <div className="text-center py-8 text-default-500">
-                  请选择一个在线节点查看指标
-                </div>
+              ) : (
+                <div className="text-center py-8 text-default-500">暂无指标数据</div>
               )}
             </CardBody>
           </Card>
 
+          {/* Tunnel traffic chart */}
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <h3 className="text-lg font-semibold">隧道流量趋势</h3>
-            </CardHeader>
-            <CardBody className="space-y-4">
-              {tunnelsError ? (
-                <div className="text-sm text-danger">{tunnelsError}</div>
-              ) : null}
-
-              <div className="flex flex-wrap gap-2">
+              <div className="flex items-center gap-2">
                 <Select
                   className="w-56"
                   placeholder={tunnelsLoading ? "加载中..." : "选择隧道"}
-                  selectedKeys={
-                    selectedTunnelId ? [String(selectedTunnelId)] : []
-                  }
+                  selectedKeys={selectedTunnelId ? [String(selectedTunnelId)] : []}
                   onSelectionChange={(keys) => {
                     const tunnelId = Number(Array.from(keys)[0]);
-
                     setSelectedTunnelId(tunnelId || null);
                   }}
                 >
                   {tunnels.map((t) => (
-                    <SelectItem key={String(t.id)}>
-                      {t.name}
-                      {t.status === 1 ? "" : " (禁用)"}
-                    </SelectItem>
+                    <SelectItem key={String(t.id)}>{t.name}{t.status === 1 ? "" : " (禁用)"}</SelectItem>
                   ))}
                 </Select>
-
                 <Select
                   className="w-36"
                   selectedKeys={[String(tunnelRangeMs)]}
                   onSelectionChange={(keys) => {
                     const v = Number(Array.from(keys)[0]);
-
                     if (v > 0) setTunnelRangeMs(v);
                   }}
                 >
                   <SelectItem key={String(15 * 60 * 1000)}>15分钟</SelectItem>
                   <SelectItem key={String(60 * 60 * 1000)}>1小时</SelectItem>
-                  <SelectItem key={String(6 * 60 * 60 * 1000)}>
-                    6小时
-                  </SelectItem>
-                  <SelectItem key={String(24 * 60 * 60 * 1000)}>
-                    24小时
-                  </SelectItem>
+                  <SelectItem key={String(6 * 60 * 60 * 1000)}>6小时</SelectItem>
+                  <SelectItem key={String(24 * 60 * 60 * 1000)}>24小时</SelectItem>
                 </Select>
-
-                {selectedTunnelId && (
-                  <Button
-                    isLoading={tunnelMetricsLoading}
-                    size="sm"
-                    variant="flat"
-                    onPress={() => void loadTunnelMetrics(selectedTunnelId)}
-                  >
-                    <RefreshCw className="w-4 h-4 mr-1" />
-                    刷新
-                  </Button>
-                )}
               </div>
-
-              {selectedTunnelId && (
-                <>
-                  <div className="text-xs text-default-500">
-                    最近入库：
-                    {latestPersistedTunnelTs ? (
-                      <span className="font-mono">
-                        {formatDateTime(latestPersistedTunnelTs)}（约
-                        {Math.max(
-                          0,
-                          Math.round((Date.now() - latestPersistedTunnelTs) / 1000),
-                        )}
-                        s前）
-                      </span>
-                    ) : (
-                      "-"
-                    )}
+            </CardHeader>
+            <CardBody>
+              {selectedTunnelId ? (
+                tunnelMetricsLoading ? (
+                  <div className="flex justify-center py-8"><RefreshCw className="w-6 h-6 animate-spin" /></div>
+                ) : tunnelMetricsError ? (
+                  <div className="text-center py-8 text-danger text-sm">{tunnelMetricsError}</div>
+                ) : tunnelMetrics.length > 0 ? (
+                  <div className="h-64">
+                    <ResponsiveContainer height="100%" width="100%">
+                      <LineChart data={tunnelChartData}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="time" fontSize={12} />
+                        <YAxis fontSize={12} tickFormatter={tunnelYAxisTickFormatter} />
+                        <Tooltip
+                          contentStyle={{ backgroundColor: "rgba(0,0,0,0.8)", border: "none", borderRadius: "8px" }}
+                          labelStyle={{ color: "#fff" }}
+                          formatter={tunnelTooltipFormatter}
+                        />
+                        {tunnelChartConfig.lines.map((line) => (
+                          <Line key={line.dataKey} dataKey={line.dataKey} dot={false} name={line.name} stroke={line.color} strokeWidth={2} type="monotone" />
+                        ))}
+                      </LineChart>
+                    </ResponsiveContainer>
                   </div>
-
-                  <div className="flex flex-wrap gap-2">
-                    {(
-                      [{ key: "traffic", label: "流量" }] as {
-                        key: TunnelMetricType;
-                        label: string;
-                      }[]
-                    ).map((item) => (
-                      <Button
-                        key={item.key}
-                        color={
-                          activeTunnelMetricType === item.key
-                            ? "primary"
-                            : "default"
-                        }
-                        size="sm"
-                        variant={
-                          activeTunnelMetricType === item.key ? "solid" : "flat"
-                        }
-                        onPress={() => setActiveTunnelMetricType(item.key)}
-                      >
-                        {item.label}
-                      </Button>
-                    ))}
-                  </div>
-
-                  {tunnelMetricsLoading ? (
-                    <div className="flex justify-center py-8">
-                      <RefreshCw className="w-6 h-6 animate-spin" />
-                    </div>
-                  ) : tunnelMetricsError ? (
-                    <div className="text-center py-8 text-danger text-sm">
-                      {tunnelMetricsError}
-                    </div>
-                  ) : tunnelMetrics.length > 0 ? (
-                    <>
-                      <div className="h-64">
-                        <ResponsiveContainer height="100%" width="100%">
-                          <LineChart data={tunnelChartData}>
-                            <CartesianGrid strokeDasharray="3 3" />
-                             <XAxis dataKey="time" fontSize={12} />
-                             <YAxis
-                               fontSize={12}
-                               tickFormatter={tunnelYAxisTickFormatter}
-                             />
-                             <Tooltip
-                               contentStyle={{
-                                 backgroundColor: "rgba(0,0,0,0.8)",
-                                 border: "none",
-                                 borderRadius: "8px",
-                               }}
-                               labelStyle={{ color: "#fff" }}
-                               formatter={tunnelTooltipFormatter}
-                             />
-                            {tunnelChartConfig.lines.map((line) => (
-                              <Line
-                                key={line.dataKey}
-                                dataKey={line.dataKey}
-                                dot={false}
-                                name={line.name}
-                                stroke={line.color}
-                                strokeWidth={2}
-                                type="monotone"
-                              />
-                            ))}
-                          </LineChart>
-                        </ResponsiveContainer>
-                      </div>
-                      {tunnelMetricsTruncated && (
-                        <div className="text-xs text-default-500">
-                          数据点过多，已截断为最近 {METRICS_MAX_ROWS}{" "}
-                          条，建议缩小时间范围。
-                        </div>
-                      )}
-                    </>
-                  ) : (
-                    <div className="text-center py-8 text-default-500">
-                      暂无指标数据
-                    </div>
-                  )}
-                </>
-              )}
-
-              {!selectedTunnelId && (
-                <div className="text-center py-8 text-default-500">
-                  请选择一个隧道查看指标
-                </div>
+                ) : (
+                  <div className="text-center py-8 text-default-500">暂无指标数据</div>
+                )
+              ) : (
+                <div className="text-center py-8 text-default-500">请选择一个隧道查看指标</div>
               )}
             </CardBody>
           </Card>
 
+          {/* Service monitors with latency charts */}
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <h3 className="text-lg font-semibold">服务监控</h3>
-              <Button
-                color="primary"
-                size="sm"
-                variant="flat"
-                onPress={() => handleOpenEditModal()}
-              >
+              <Button color="primary" size="sm" variant="flat" onPress={() => handleOpenEditModal()}>
                 <Plus className="w-4 h-4 mr-1" />
                 添加监控
               </Button>
             </CardHeader>
-            <CardBody>
-              {monitorsError ? (
-                <div className="text-sm text-danger mb-3">{monitorsError}</div>
-              ) : null}
-              {latestResultsError ? (
-                <div className="text-xs text-default-500 mb-3">
-                  {latestResultsError}
-                </div>
-              ) : null}
-
+            <CardBody className="space-y-4">
               {monitorsLoading ? (
-                <div className="flex justify-center py-8">
-                  <RefreshCw className="w-6 h-6 animate-spin" />
-                </div>
-              ) : serviceMonitors.length > 0 ? (
-                <Table aria-label="服务监控列表">
-                  <TableHeader>
-                    <TableColumn>名称</TableColumn>
-                    <TableColumn>类型</TableColumn>
-                    <TableColumn>目标</TableColumn>
-                    <TableColumn>间隔</TableColumn>
-                    <TableColumn>启用</TableColumn>
-                    <TableColumn>最新结果</TableColumn>
-                    <TableColumn>操作</TableColumn>
-                  </TableHeader>
-                  <TableBody>
-                    {serviceMonitors.map((monitor) => {
-                      const latestResult = getLatestResult(monitor.id);
-                      const stale = isResultStale(monitor, latestResult);
+                <div className="flex justify-center py-8"><RefreshCw className="w-6 h-6 animate-spin" /></div>
+              ) : detailServiceMonitors.length > 0 ? (
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  {detailServiceMonitors.map((monitor) => {
+                    const latestResult = getLatestResult(monitor.id);
+                    const stale = isResultStale(monitor, latestResult);
+                    const results = monitorResults[monitor.id] || [];
+                    const latencyData = [...results].reverse().map((r) => ({
+                      time: formatTimestamp(r.timestamp),
+                      latency: r.success === 1 ? r.latencyMs : null,
+                      success: r.success,
+                    }));
 
-                      return (
-                        <TableRow key={monitor.id}>
-                          <TableCell>
-                            <div>
-                              <div className="font-medium">{monitor.name}</div>
-                              {monitor.nodeId > 0 && (
-                                <div className="text-xs text-default-500">
-                                  节点:{" "}
-                                  {nodeMap.get(monitor.nodeId)?.name ||
-                                    monitor.nodeId}
-                                </div>
-                              )}
+                    return (
+                      <Card key={monitor.id} className="border border-default-200/60">
+                        <CardHeader className="pb-1 flex flex-row items-center justify-between">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <div className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                              monitor.enabled !== 1 ? "bg-default-300" :
+                              !latestResult ? "bg-default-400" :
+                              latestResult.success === 1 ? "bg-success" : "bg-danger"
+                            }`} />
+                            <span className="font-semibold text-sm truncate">{monitor.name}</span>
+                            <Chip size="sm" color="primary" variant="flat">{monitor.type.toUpperCase()}</Chip>
+                            {stale ? <Chip size="sm" color="warning" variant="flat">陈旧</Chip> : null}
+                          </div>
+                          <Dropdown>
+                            <DropdownTrigger>
+                              <Button isIconOnly size="sm" variant="light"><MoreVertical className="w-4 h-4" /></Button>
+                            </DropdownTrigger>
+                            <DropdownMenu>
+                              <DropdownItem startContent={<Play className="w-4 h-4" />} onPress={() => handleRunMonitor(monitor.id)}>立即检查</DropdownItem>
+                              <DropdownItem startContent={<Activity className="w-4 h-4" />} onPress={() => openResultsModal(monitor.id)}>查看记录</DropdownItem>
+                              <DropdownItem startContent={<Edit className="w-4 h-4" />} onPress={() => handleOpenEditModal(monitor)}>编辑</DropdownItem>
+                              <DropdownItem className="text-danger" color="danger" startContent={<Trash2 className="w-4 h-4" />} onPress={() => handleDeleteMonitor(monitor.id)}>删除</DropdownItem>
+                            </DropdownMenu>
+                          </Dropdown>
+                        </CardHeader>
+                        <CardBody className="pt-0 space-y-2">
+                          <div className="flex items-center gap-3 text-xs text-default-500">
+                            <span className="font-mono">{monitor.target}</span>
+                            <span>间隔 {monitor.intervalSec}s</span>
+                            {latestResult && Number.isFinite(latestResult.latencyMs) ? (
+                              <span className="font-mono text-success">{latestResult.latencyMs.toFixed(0)}ms</span>
+                            ) : null}
+                          </div>
+                          {latencyData.length > 0 ? (
+                            <div className="h-24">
+                              <ResponsiveContainer height="100%" width="100%">
+                                <LineChart data={latencyData}>
+                                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(128,128,128,0.15)" />
+                                  <XAxis dataKey="time" fontSize={10} tick={false} />
+                                  <YAxis fontSize={10} tickFormatter={(v: number) => `${Math.round(v)}ms`} />
+                                  <Tooltip
+                                    contentStyle={{ backgroundColor: "rgba(0,0,0,0.85)", border: "none", borderRadius: "8px", fontSize: "12px" }}
+                                    labelStyle={{ color: "#fff" }}
+                                    formatter={(value: unknown) => [`${Number(value).toFixed(0)}ms`, "延迟"]}
+                                  />
+                                  <Line dataKey="latency" dot={false} stroke="#10b981" strokeWidth={1.5} type="monotone" connectNulls={false} />
+                                </LineChart>
+                              </ResponsiveContainer>
                             </div>
-                          </TableCell>
-                          <TableCell>
-                            <Chip color="primary" size="sm" variant="flat">
-                              {monitor.type.toUpperCase()}
-                            </Chip>
-                          </TableCell>
-                          <TableCell>
-                            <span className="font-mono text-sm">
-                              {monitor.target}
-                            </span>
-                          </TableCell>
-                          <TableCell>{monitor.intervalSec}s</TableCell>
-                          <TableCell>
-                            {monitor.enabled === 1 ? (
-                              <Chip color="success" size="sm" variant="flat">
-                                启用
-                              </Chip>
-                            ) : (
-                              <Chip color="default" size="sm" variant="flat">
-                                禁用
-                              </Chip>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            {latestResult ? (
-                              <div className="space-y-1">
-                                <div className="flex flex-wrap items-center gap-2">
-                                  {latestResult.success === 1 ? (
-                                    <Chip color="success" size="sm" variant="flat">
-                                      成功
-                                    </Chip>
-                                  ) : (
-                                    <Chip color="danger" size="sm" variant="flat">
-                                      失败
-                                    </Chip>
-                                  )}
-                                  {stale ? (
-                                    <Chip color="warning" size="sm" variant="flat">
-                                      陈旧
-                                    </Chip>
-                                  ) : null}
-
-                                  <span className="font-mono text-xs text-default-500">
-                                    {Number.isFinite(latestResult.latencyMs)
-                                      ? `${latestResult.latencyMs.toFixed(0)}ms`
-                                      : "-"}
-                                  </span>
-
-                                  <span className="font-mono text-xs text-default-500">
-                                    {formatDateTime(latestResult.timestamp)}
-                                  </span>
-                                </div>
-
-                                {latestResult.errorMessage ? (
-                                  <div className="text-xs text-danger">
-                                    {latestResult.errorMessage}
-                                  </div>
-                                ) : null}
-                              </div>
-                            ) : monitor.enabled === 1 ? (
-                              <span className="text-default-400 text-sm">
-                                未检查
-                              </span>
-                            ) : (
-                              <span className="text-default-400">-</span>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            <Dropdown>
-                              <DropdownTrigger>
-                                <Button isIconOnly size="sm" variant="light">
-                                  <MoreVertical className="w-4 h-4" />
-                                </Button>
-                              </DropdownTrigger>
-                              <DropdownMenu>
-                                <DropdownItem
-                                  startContent={<Play className="w-4 h-4" />}
-                                  onPress={() => handleRunMonitor(monitor.id)}
-                                >
-                                  立即检查
-                                </DropdownItem>
-                                <DropdownItem
-                                  startContent={
-                                    <Activity className="w-4 h-4" />
-                                  }
-                                  onPress={() => openResultsModal(monitor.id)}
-                                >
-                                  查看记录
-                                </DropdownItem>
-                                <DropdownItem
-                                  startContent={<Edit className="w-4 h-4" />}
-                                  onPress={() => handleOpenEditModal(monitor)}
-                                >
-                                  编辑
-                                </DropdownItem>
-                                <DropdownItem
-                                  className="text-danger"
-                                  color="danger"
-                                  startContent={<Trash2 className="w-4 h-4" />}
-                                  onPress={() =>
-                                    handleDeleteMonitor(monitor.id)
-                                  }
-                                >
-                                  删除
-                                </DropdownItem>
-                              </DropdownMenu>
-                            </Dropdown>
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-              ) : (
-                <div className="text-center py-8 text-default-500">
-                  暂无服务监控，点击&quot;添加监控&quot;创建
+                          ) : (
+                            <div className="text-xs text-default-400 py-2">暂无检查记录</div>
+                          )}
+                        </CardBody>
+                      </Card>
+                    );
+                  })}
                 </div>
+              ) : (
+                <div className="text-center py-8 text-default-500">暂无服务监控，点击&quot;添加监控&quot;创建</div>
               )}
             </CardBody>
           </Card>
