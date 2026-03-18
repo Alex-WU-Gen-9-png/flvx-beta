@@ -1068,6 +1068,7 @@ func (h *Handler) validateTunnelEntryPortConflictsForNewEntriesTx(tx *gorm.DB, t
 			if nodeErr != nil {
 				continue
 			}
+
 			if err := h.validateForwardPortAvailabilityTx(tx, node, port, f.ID); err != nil {
 				return fmt.Errorf("转发 %s 入口端口冲突: %w", f.Name, err)
 			}
@@ -4155,6 +4156,20 @@ func (h *Handler) validateForwardPortAvailability(node *nodeRecord, port int, cu
 		return nil
 	}
 	occupied, err := h.repo.HasOtherForwardOnNodePort(node.ID, port, currentForwardID)
+	if err != nil {
+		return err
+	}
+	if occupied {
+		return fmt.Errorf("节点 %s 端口 %d 已被其他转发占用", node.Name, port)
+	}
+	return nil
+}
+
+func (h *Handler) validateForwardPortAvailabilityTx(tx *gorm.DB, node *nodeRecord, port int, currentForwardID int64) error {
+	if h == nil || h.repo == nil || tx == nil || node == nil || port <= 0 {
+		return nil
+	}
+	occupied, err := h.repo.HasOtherForwardOnNodePortTx(tx, node.ID, port, currentForwardID)
 	if err != nil {
 		return err
 	}
