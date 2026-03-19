@@ -2,13 +2,14 @@ import type { MonitorNodeApiItem } from "@/api/types";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import toast from "react-hot-toast";
-import { RefreshCw, LayoutGrid, List } from "lucide-react";
+import { RefreshCw, LayoutGrid, List, Server, ArrowRightLeft } from "lucide-react";
 
 import { AnimatedPage } from "@/components/animated-page";
 import { Button } from "@/shadcn-bridge/heroui/button";
 import { Card, CardBody, CardHeader } from "@/shadcn-bridge/heroui/card";
 import { getMonitorNodes } from "@/api";
 import { MonitorView } from "@/pages/node/monitor-view";
+import { TunnelMonitorView } from "@/pages/node/tunnel-monitor-view";
 
 type MonitorNode = {
   id: number;
@@ -16,11 +17,14 @@ type MonitorNode = {
   connectionStatus: "online" | "offline";
 };
 
+type MonitorTab = "nodes" | "tunnels";
+
 export default function MonitorPage() {
   const [nodes, setNodes] = useState<MonitorNodeApiItem[]>([]);
   const [nodesLoading, setNodesLoading] = useState(false);
   const [nodesError, setNodesError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"list" | "grid">("list");
+  const [activeTab, setActiveTab] = useState<MonitorTab>("nodes");
 
   const loadNodes = useCallback(async (options?: { silent?: boolean }) => {
     const silent = options?.silent ?? false;
@@ -81,7 +85,7 @@ export default function MonitorPage() {
           <div className="min-w-0">
             <h2 className="text-xl font-semibold truncate">监控</h2>
             <div className="text-xs text-default-500 truncate">
-              实时节点状态 + 历史指标图表 + 隧道流量 + 服务监控（TCP/ICMP）
+              实时节点状态 + 隧道质量检测 + 历史指标图表 + 服务监控（TCP/ICMP）
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -93,19 +97,47 @@ export default function MonitorPage() {
             >
               {viewMode === "list" ? <LayoutGrid className="w-4 h-4" /> : <List className="w-4 h-4" />}
             </Button>
-            <Button
-              isLoading={nodesLoading}
-              size="sm"
-              variant="flat"
-              onPress={() => loadNodes()}
-            >
-              <RefreshCw className="w-4 h-4 mr-1" />
-              刷新节点
-            </Button>
+            {activeTab === "nodes" && (
+              <Button
+                isLoading={nodesLoading}
+                size="sm"
+                variant="flat"
+                onPress={() => loadNodes()}
+              >
+                <RefreshCw className="w-4 h-4 mr-1" />
+                刷新节点
+              </Button>
+            )}
           </div>
         </div>
 
-        {nodesError ? (
+        {/* Tab Switcher */}
+        <div className="flex items-center gap-1 p-1 rounded-xl bg-default-100 dark:bg-default-50/10 w-fit">
+          <button
+            className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
+              activeTab === "nodes"
+                ? "bg-background shadow-sm text-foreground"
+                : "text-default-500 hover:text-foreground"
+            }`}
+            onClick={() => setActiveTab("nodes")}
+          >
+            <Server className="w-4 h-4" />
+            节点
+          </button>
+          <button
+            className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
+              activeTab === "tunnels"
+                ? "bg-background shadow-sm text-foreground"
+                : "text-default-500 hover:text-foreground"
+            }`}
+            onClick={() => setActiveTab("tunnels")}
+          >
+            <ArrowRightLeft className="w-4 h-4" />
+            隧道
+          </button>
+        </div>
+
+        {nodesError && activeTab === "nodes" ? (
           <Card>
             <CardHeader>
               <h3 className="text-sm font-semibold">节点列表</h3>
@@ -117,7 +149,11 @@ export default function MonitorPage() {
         ) : null}
       </div>
 
-      <MonitorView nodeMap={nodeMap} viewMode={viewMode} />
+      {activeTab === "nodes" ? (
+        <MonitorView nodeMap={nodeMap} viewMode={viewMode} />
+      ) : (
+        <TunnelMonitorView viewMode={viewMode} />
+      )}
     </AnimatedPage>
   );
 }
