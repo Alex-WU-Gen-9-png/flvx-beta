@@ -1,62 +1,43 @@
-import * as React from "react";
+/**
+ * useTheme — backwards-compatible hook
+ * =====================================
+ * Wraps the new theme system's context to provide the same API that the
+ * rest of the codebase already expects: `{ theme, setTheme }`.
+ *
+ * For full theme system access, use `useThemeContext` from "@/themes".
+ */
 
-type ThemeMode = "light" | "dark";
+import { useSyncExternalStore, useCallback } from "react";
 
-const STORAGE_KEY = "flvx:theme";
+import {
+  subscribe,
+  getSavedMode,
+  getEffectiveMode,
+  saveMode,
+  reapplyActiveTheme,
+  type ThemeMode,
+} from "@/themes/registry";
 
-function resolveInitialTheme(): ThemeMode {
-  if (typeof window === "undefined") {
-    return "light";
-  }
-
-  const fromStorage = window.localStorage.getItem(STORAGE_KEY);
-
-  if (fromStorage === "dark" || fromStorage === "light") {
-    return fromStorage;
-  }
-
-  return window.matchMedia("(prefers-color-scheme: dark)").matches
-    ? "dark"
-    : "light";
-}
-
-let currentTheme: ThemeMode = resolveInitialTheme();
-const listeners = new Set<(theme: ThemeMode) => void>();
-
-function broadcast(theme: ThemeMode) {
-  currentTheme = theme;
-  if (typeof window !== "undefined") {
-    window.localStorage.setItem(STORAGE_KEY, theme);
-  }
-  listeners.forEach((listener) => {
-    listener(theme);
+// Monotonic counter for snapshot identity
+let _rev = 0;
+const _sub = (cb: () => void) =>
+  subscribe(() => {
+    _rev++;
+    cb();
   });
-}
+const _snap = () => _rev;
 
 export function useTheme() {
-  const [theme, setThemeState] = React.useState<ThemeMode>(currentTheme);
+  useSyncExternalStore(_sub, _snap);
 
-  React.useEffect(() => {
-    const listener = (nextTheme: ThemeMode) => {
-      setThemeState(nextTheme);
-    };
+  const theme = getEffectiveMode();
+  const mode = getSavedMode();
 
-    listeners.add(listener);
-
-    return () => {
-      listeners.delete(listener);
-    };
+  const setTheme = useCallback((next: string) => {
+    if (next !== "dark" && next !== "light" && next !== "system") return;
+    saveMode(next as ThemeMode);
+    reapplyActiveTheme();
   }, []);
 
-  const setTheme = React.useCallback((nextTheme: string) => {
-    if (nextTheme !== "dark" && nextTheme !== "light") {
-      return;
-    }
-    broadcast(nextTheme);
-  }, []);
-
-  return {
-    setTheme,
-    theme,
-  };
+  return { theme, mode, setTheme };
 }

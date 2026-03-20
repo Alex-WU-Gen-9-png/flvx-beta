@@ -1407,13 +1407,6 @@ export default function NodePage() {
     if (!nodeList || nodeList.length === 0) return [];
 
     const sortedByDb = [...nodeList].sort((a, b) => {
-      const expiryDiff =
-        getNodeExpiryMeta(a.expiryTime, a.renewalCycle).sortWeight -
-        getNodeExpiryMeta(b.expiryTime, b.renewalCycle).sortWeight;
-
-      if (expiryDiff !== 0) {
-        return expiryDiff;
-      }
       const aInx = a.inx ?? 0;
       const bInx = b.inx ?? 0;
 
