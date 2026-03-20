@@ -677,9 +677,10 @@ func (r *Repository) ListNodes() ([]map[string]interface{}, error) {
 			"version":       nullableString(n.Version),
 			"http":          n.HTTP, "tls": n.TLS, "socks": n.Socks,
 			"status": n.Status, "isRemote": n.IsRemote,
-			"remoteUrl":    nullableString(n.RemoteURL),
-			"remoteToken":  nullableString(n.RemoteToken),
-			"remoteConfig": nullableString(n.RemoteConfig),
+			"remoteUrl":                 nullableString(n.RemoteURL),
+			"remoteToken":               nullableString(n.RemoteToken),
+			"remoteConfig":              nullableString(n.RemoteConfig),
+			"expiryReminderDismissed":   n.ExpiryReminderDismissed,
 		})
 	}
 	return items, nil
