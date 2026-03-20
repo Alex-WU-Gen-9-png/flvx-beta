@@ -13,7 +13,6 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  Legend,
 } from "recharts";
 import {
   RefreshCw,
@@ -488,7 +487,7 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
                     <YAxis
                       fontSize={11}
                       tick={{ fill: "#888" }}
-                      tickFormatter={(v) => `${Number(v).toFixed(0)}ms`}
+                      tickFormatter={(v: any) => `${Number(v).toFixed(0)}ms`}
                       label={{ value: "延迟 (ms)", angle: -90, position: "insideLeft", style: { fontSize: 11, fill: "#888" } }}
                     />
                     <Tooltip
@@ -501,13 +500,7 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
                         return [`${n.toFixed(1)}ms`, label];
                       }}
                     />
-                    <Legend
-                      formatter={(value: string) => {
-                        if (value === "entryToExit") return "入口→出口";
-                        if (value === "exitToBing") return "出口→Bing";
-                        return value;
-                      }}
-                    />
+
                     <Line
                       connectNulls
                       dataKey="entryToExit"
@@ -569,7 +562,7 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
                       labelStyle={{ color: "#fff" }}
                       formatter={tunnelTooltipFormatter}
                     />
-                    <Legend />
+
                     <Line dataKey="bytesIn" dot={false} name="入站流量" stroke="#10b981" strokeWidth={2} type="monotone" />
                     <Line dataKey="bytesOut" dot={false} name="出站流量" stroke="#ef4444" strokeWidth={2} type="monotone" />
                   </LineChart>
