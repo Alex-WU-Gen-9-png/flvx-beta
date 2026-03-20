@@ -1083,7 +1083,6 @@ export default function UserPage() {
           <Table aria-label="用户列表" className="overflow-x-auto min-w-full">
             <TableHeader>
               <TableColumn>用户名</TableColumn>
-              <TableColumn>状态</TableColumn>
               <TableColumn>流量统计</TableColumn>
               <TableColumn>配额限制</TableColumn>
               <TableColumn>规则数量</TableColumn>
@@ -1101,35 +1100,27 @@ export default function UserPage() {
                 return (
                   <TableRow key={user.id}>
                     <TableCell>
-                      <div className="flex flex-col">
-                        <span className="font-medium text-foreground text-sm">
-                          {user.name || user.user}
-                        </span>
-                        <span className="text-xs text-default-500">
-                          @{user.user}
-                        </span>
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex flex-col gap-1 items-start">
-                        <Chip
-                          className="text-xs"
-                          color={userStatus.color}
-                          size="sm"
-                          variant="flat"
-                        >
-                          {userStatus.text}
-                        </Chip>
-                        {user.disabledByQuota ? (
-                          <Chip
-                            className="text-[10px] h-5 px-1"
-                            color="danger"
-                            size="sm"
-                            variant="flat"
-                          >
-                            配额超额
+                      <div className="flex items-center gap-2">
+                        <div
+                          className={`shrink-0 w-2 h-2 rounded-full ${
+                            userStatus.color === "success"
+                              ? "bg-success"
+                              : "bg-danger"
+                          }`}
+                        />
+                        <div className="flex flex-col">
+                          <span className="font-medium text-foreground text-sm">
+                            {user.name || user.user}
+                          </span>
+                          <span className="text-xs text-default-500">
+                            @{user.user}
+                          </span>
+                        </div>
+                        {user.disabledByQuota && (
+                          <Chip className="text-[10px] h-4 px-1 ml-1" color="danger" size="sm" variant="flat">
+                            超额
                           </Chip>
-                        ) : null}
+                        )}
                       </div>
                     </TableCell>
                     <TableCell>
@@ -1193,55 +1184,39 @@ export default function UserPage() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <div className="flex flex-wrap items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-1.5 min-w-max">
                         <Button
                           size="sm"
                           variant="flat"
-                          color="success"
-                          className="min-h-8 min-w-[50px] px-2"
-                          startContent={<SettingsIcon className="w-3 h-3" />}
+                          className="h-6 px-2 min-w-0 text-xs bg-emerald-50 text-emerald-600 hover:bg-emerald-100 dark:bg-emerald-950/30 dark:text-emerald-400"
                           onPress={() => handleManageTunnels(user)}
                         >
                           权限
                         </Button>
                         <Button
-                          isIconOnly
                           size="sm"
-                          variant="light"
-                          className="text-default-600 hover:text-primary min-h-8 min-w-8"
-                          onPress={() => handleEdit(user)}
-                        >
-                          <EditIcon className="w-4 h-4" />
-                        </Button>
-                        <Button
-                          isIconOnly
-                          size="sm"
-                          variant="light"
-                          className="text-default-600 hover:text-warning min-h-8 min-w-8"
+                          variant="flat"
+                          className="h-6 px-2 min-w-0 text-xs bg-amber-50 text-amber-600 hover:bg-amber-100 dark:bg-amber-950/30 dark:text-amber-400"
                           title="重置流量"
                           onPress={() => handleResetFlow(user)}
                         >
-                          <svg
-                            aria-hidden="true"
-                            className="w-4 h-4"
-                            fill="currentColor"
-                            viewBox="0 0 20 20"
-                          >
-                            <path
-                              clipRule="evenodd"
-                              d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z"
-                              fillRule="evenodd"
-                            />
-                          </svg>
+                          重置
                         </Button>
                         <Button
-                          isIconOnly
                           size="sm"
-                          variant="light"
-                          className="text-default-600 hover:text-danger min-h-8 min-w-8"
+                          variant="flat"
+                          className="h-6 px-2 min-w-0 text-xs bg-indigo-50 text-indigo-600 hover:bg-indigo-100 dark:bg-indigo-950/30 dark:text-indigo-400"
+                          onPress={() => handleEdit(user)}
+                        >
+                          编辑
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="flat"
+                          className="h-6 px-2 min-w-0 text-xs bg-rose-50 text-rose-600 hover:bg-rose-100 dark:bg-rose-950/30 dark:text-rose-400"
                           onPress={() => handleDelete(user)}
                         >
-                          <DeleteIcon className="w-4 h-4" />
+                          删除
                         </Button>
                       </div>
                     </TableCell>
