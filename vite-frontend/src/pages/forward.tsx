@@ -4977,7 +4977,7 @@ export default function ForwardPage() {
                   key={item.id}
                   className="flex justify-between items-center p-3 border border-default-200 dark:border-default-100 rounded-lg"
                 >
-                  <code className="text-sm flex-1 mr-3 text-foreground">
+                  <code className="font-mono text-sm flex-1 mr-3 text-foreground">
                     {item.address}
                   </code>
                   <Button

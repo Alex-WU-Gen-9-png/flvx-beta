@@ -66,12 +66,12 @@ export const AnnouncementBanner = ({
                     </ol>
                   ),
                   code: ({ children }) => (
-                    <code className="rounded bg-blue-100/80 dark:bg-blue-900/40 px-1 py-0.5 text-[0.92em]">
+                    <code className="font-mono rounded bg-blue-100/80 dark:bg-blue-900/40 px-1 py-0.5 text-[0.92em]">
                       {children}
                     </code>
                   ),
                   pre: ({ children }) => (
-                    <pre className="mb-2 overflow-x-auto rounded-md bg-blue-100/70 dark:bg-blue-900/40 p-2.5 text-xs leading-relaxed">
+                    <pre className="mb-2 font-mono overflow-x-auto rounded-md bg-blue-100/70 dark:bg-blue-900/40 p-2.5 text-xs leading-relaxed">
                       {children}
                     </pre>
                   ),

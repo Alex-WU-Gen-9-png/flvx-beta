@@ -20,6 +20,15 @@ import { CSS } from "@dnd-kit/utilities";
 
 import { SearchBar } from "@/components/search-bar";
 import { AnimatedPage } from "@/components/animated-page";
+import { LayoutGrid, List, Terminal, ArrowUpCircle, RotateCcw, Edit, Trash2 } from "lucide-react";
+import {
+  Table,
+  TableHeader,
+  TableColumn,
+  TableBody,
+  TableRow,
+  TableCell,
+} from "@/shadcn-bridge/heroui/table";
 import { Card, CardBody, CardHeader } from "@/shadcn-bridge/heroui/card";
 import { Button } from "@/shadcn-bridge/heroui/button";
 import { Input } from "@/shadcn-bridge/heroui/input";
@@ -291,6 +300,10 @@ export default function NodePage() {
   const [activeTab, setActiveTab] = useLocalStorageState<NodeTab>(
     "node-active-tab",
     "local",
+  );
+  const [viewMode, setViewMode] = useLocalStorageState<"list" | "grid">(
+    "node-view-mode",
+    "grid",
   );
 
   // Backward-compat: older versions stored extra tab values.
@@ -1639,6 +1652,21 @@ export default function NodePage() {
               </>
             ) : (
               <>
+                {/* 视图切换按钮 */}
+                <Button
+                  isIconOnly
+                  size="sm"
+                  variant="flat"
+                  className="text-default-600 hidden sm:flex"
+                  onPress={() => setViewMode(viewMode === "list" ? "grid" : "list")}
+                >
+                  {viewMode === "list" ? (
+                    <LayoutGrid className="w-4 h-4" />
+                  ) : (
+                    <List className="w-4 h-4" />
+                  )}
+                </Button>
+
                 {/* 筛选按钮 */}
                 <Button
                   isIconOnly
@@ -1738,6 +1766,198 @@ export default function NodePage() {
                 : "暂无本地节点，点击上方按钮开始创建"
           }
         />
+      ) : viewMode === "list" ? (
+        <Card>
+          <Table aria-label="节点列表" className="overflow-x-auto min-w-full">
+            <TableHeader>
+              <TableColumn>节点名称</TableColumn>
+              <TableColumn>状态</TableColumn>
+              <TableColumn>协议/端口</TableColumn>
+              <TableColumn>系统信息</TableColumn>
+              <TableColumn>到期时间</TableColumn>
+              <TableColumn>操作</TableColumn>
+            </TableHeader>
+            <TableBody items={displayNodes}>
+              {(node) => {
+                const isRemoteNode = node.isRemote === 1;
+                const remoteUsage = isRemoteNode
+                  ? remoteUsageMap[node.id]
+                  : null;
+                const expiryMeta = getNodeExpiryMeta(
+                  node.expiryTime,
+                  node.renewalCycle,
+                );
+                const connectionStatusMeta = getConnectionStatusMeta(
+                  node.connectionStatus,
+                );
+
+                const hasRemark = Boolean(node.remark?.trim());
+
+                return (
+                  <TableRow key={node.id}>
+                    <TableCell>
+                      <div className="flex flex-col">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-foreground text-sm">
+                            {node.name}
+                          </span>
+                          {hasRemark && (
+                            <Chip size="sm" variant="flat" className="h-4 px-1 text-[10px]">
+                              {node.remark}
+                            </Chip>
+                          )}
+                        </div>
+                        <span className="text-xs text-default-500 font-mono mt-0.5">
+                          {isRemoteNode ? new URL(node.remoteUrl || "").hostname : node.serverIp}
+                        </span>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <Chip
+                        variant="flat"
+                        size="sm"
+                        color={connectionStatusMeta.color}
+                        className="text-xs"
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <div className={`w-1.5 h-1.5 rounded-full ${node.connectionStatus === "online" ? "bg-success" : node.syncError ? "bg-danger" : "bg-default-400"} ${node.systemInfo && node.connectionStatus === "online" ? "animate-pulse" : ""}`} />
+                          <span>{connectionStatusMeta.text}</span>
+                        </div>
+                      </Chip>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-sm font-medium">
+                          {isRemoteNode ? "Remote" : "Local"}
+                        </span>
+                        <span className="text-xs text-default-500 font-mono">
+                          {isRemoteNode 
+                            ? (remoteUsage ? `${remoteUsage.portRangeStart}-${remoteUsage.portRangeEnd}` : "未知端口")
+                            : node.port}
+                        </span>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-col gap-0.5 whitespace-nowrap text-[11px] min-w-[100px]">
+                        {!isRemoteNode && node.systemInfo ? (
+                           <>
+                             <div className="flex items-center justify-between gap-2">
+                               <span className="text-default-500">CPU</span>
+                               <span className={node.systemInfo.cpuUsage > 80 ? "text-danger font-medium" : ""}>
+                                 {node.systemInfo.cpuUsage.toFixed(1)}%
+                               </span>
+                             </div>
+                             <div className="flex items-center justify-between gap-2">
+                               <span className="text-default-500">RAM</span>
+                               <span className={node.systemInfo.memoryUsage > 80 ? "text-danger font-medium" : ""}>
+                                 {node.systemInfo.memoryUsage.toFixed(1)}%
+                               </span>
+                             </div>
+                           </>
+                        ) : (
+                          <span className="text-default-400">-</span>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-col gap-1 items-start whitespace-nowrap min-w-[100px]">
+                        {node.expiryTime ? (
+                          <>
+                            <span className="text-sm">
+                              {new Date(node.expiryTime).toLocaleString()}
+                            </span>
+                            {expiryMeta && expiryMeta.state !== "healthy" && expiryMeta.state !== "permanent" && (
+                              <Chip
+                                color={expiryMeta.tone}
+                                size="sm"
+                                variant="flat"
+                                className="h-5 px-1 text-[10px]"
+                              >
+                                {expiryMeta.label}
+                              </Chip>
+                            )}
+                          </>
+                        ) : (
+                          <span className="text-default-400 text-sm">无限期</span>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {!isRemoteNode && (
+                          <Button
+                            size="sm"
+                            variant="flat"
+                            color="success"
+                            className="min-w-8 min-h-8 px-1"
+                            title="安装命令"
+                            isLoading={node.copyLoading}
+                            onPress={() => openInstallSelector(node)}
+                          >
+                            <Terminal className="w-4 h-4" />
+                          </Button>
+                        )}
+                        {!isRemoteNode && (
+                          <Button
+                            size="sm"
+                            variant="flat"
+                            color="warning"
+                            className="min-w-8 min-h-8 px-1"
+                            title="升级"
+                            isDisabled={node.connectionStatus !== "online"}
+                            isLoading={node.upgradeLoading}
+                            onPress={() => {
+                              setUpgradeTargetNodeId(node.id);
+                              openUpgradeModal("single");
+                            }}
+                          >
+                            <ArrowUpCircle className="w-4 h-4" />
+                          </Button>
+                        )}
+                        {!isRemoteNode && (
+                          <Button
+                            size="sm"
+                            variant="flat"
+                            color="secondary"
+                            className="min-w-8 min-h-8 px-1"
+                            title="回退"
+                            isDisabled={node.connectionStatus !== "online"}
+                            isLoading={node.rollbackLoading}
+                            onPress={() => handleRollbackNode(node)}
+                          >
+                            <RotateCcw className="w-4 h-4" />
+                          </Button>
+                        )}
+                        {!isRemoteNode && (
+                          <Button
+                            size="sm"
+                            variant="flat"
+                            color="primary"
+                            className="min-w-8 min-h-8 px-1"
+                            title="编辑"
+                            onPress={() => handleEdit(node)}
+                          >
+                            <Edit className="w-4 h-4" />
+                          </Button>
+                        )}
+                        <Button
+                          size="sm"
+                          variant="flat"
+                          color="danger"
+                          className="min-w-8 min-h-8 px-1"
+                          title="删除"
+                          onPress={() => handleDelete(node)}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+              }}
+            </TableBody>
+          </Table>
+        </Card>
       ) : (
         <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
           <SortableContext
