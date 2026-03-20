@@ -4,10 +4,10 @@ Sync current changes to `main`, merge to `master` (if needed) or just PR/merge o
 
 ## Tasks
 
-- [ ] Determine the next tag version (`2.1.9-beta7`).
-- [ ] Create a feature branch `release/2.1.9-beta7`.
-- [ ] Commit all current changes to the feature branch.
-- [ ] Push the feature branch to remote.
-- [ ] Create a PR to `main`.
-- [ ] Merge the PR to `main`.
-- [ ] Create and push tag `2.1.9-beta7`.
+- [x] Determine the next tag version (`2.1.9-beta7`).
+- [x] Create a feature branch `release/2.1.9-beta7`.
+- [x] Commit all current changes to the feature branch.
+- [x] Push the feature branch to remote.
+- [x] Create a PR to `main`.
+- [x] Merge the PR to `main`.
+- [x] Create and push tag `2.1.9-beta7`.
