@@ -3422,10 +3422,10 @@ func (r *Repository) UpsertTunnelMetricBuckets(metrics []*model.TunnelMetric) er
 	return r.db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "tunnel_id"}, {Name: "node_id"}, {Name: "timestamp"}},
 		DoUpdates: clause.Assignments(map[string]interface{}{
-			"bytes_in":    gorm.Expr("bytes_in + excluded.bytes_in"),
-			"bytes_out":   gorm.Expr("bytes_out + excluded.bytes_out"),
-			"connections": gorm.Expr("connections + excluded.connections"),
-			"errors":      gorm.Expr("errors + excluded.errors"),
+			"bytes_in":    gorm.Expr("tunnel_metric.bytes_in + excluded.bytes_in"),
+			"bytes_out":   gorm.Expr("tunnel_metric.bytes_out + excluded.bytes_out"),
+			"connections": gorm.Expr("tunnel_metric.connections + excluded.connections"),
+			"errors":      gorm.Expr("tunnel_metric.errors + excluded.errors"),
 			// avg_latency_ms is not additive; keep the existing bucket value.
 		}),
 	}).CreateInBatches(rows, 100).Error
