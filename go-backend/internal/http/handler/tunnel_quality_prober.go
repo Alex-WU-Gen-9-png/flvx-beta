@@ -4,17 +4,19 @@ import (
 	"context"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go-backend/internal/store/model"
 )
 
 const (
-	tunnelQualityProbeInterval = 10 * time.Second
-	tunnelQualityProbeTimeout  = 8 * time.Second
-	tunnelQualityPingTimeoutMs = 5000
-	tunnelQualityRetention     = 24 * time.Hour // keep 24h of history
-	tunnelQualityPruneInterval = 10 * time.Minute
+	tunnelQualityProbeInterval  = 1 * time.Second
+	tunnelQualityProbeTimeout   = 8 * time.Second
+	tunnelQualityPingTimeoutMs  = 5000
+	tunnelQualityRetention      = 24 * time.Hour // keep 24h of history
+	tunnelQualityPruneInterval  = 10 * time.Minute
+	tunnelQualityReportInterval = 30 * time.Second // DB save interval
 )
 
 // tunnelQualitySnapshot is the in-memory latest probe result for a tunnel.
@@ -27,6 +29,9 @@ type tunnelQualitySnapshot struct {
 	Success            bool    `json:"success"`
 	ErrorMessage       string  `json:"errorMessage,omitempty"`
 	Timestamp          int64   `json:"timestamp"`
+
+	// internal fields for db reporting
+	lastDBWrite int64 `json:"-"`
 }
 
 // tunnelQualityProber runs periodic TCP ping probes against all enabled tunnels.
@@ -38,6 +43,7 @@ type tunnelQualityProber struct {
 	cancel    context.CancelFunc
 	interval  time.Duration
 	lastPrune int64
+	probing   int32 // atomic flag: 1 = probeAll running, 0 = idle
 }
 
 // newTunnelQualityProber creates a new prober (not yet running).
@@ -120,6 +126,12 @@ func (p *tunnelQualityProber) maybePrune() {
 }
 
 func (p *tunnelQualityProber) probeAll() {
+	// Skip if previous probe round is still running (interval < timeout guard)
+	if !atomic.CompareAndSwapInt32(&p.probing, 0, 1) {
+		return
+	}
+	defer atomic.StoreInt32(&p.probing, 0)
+
 	h := p.handler
 	if h == nil || h.repo == nil {
 		return
@@ -136,7 +148,7 @@ func (p *tunnelQualityProber) probeAll() {
 
 	// Probe tunnels concurrently with a worker limit
 	// (mirrors health.Checker worker pool pattern)
-	const maxWorkers = 4
+	const maxWorkers = 20
 	sem := make(chan struct{}, maxWorkers)
 	var wg sync.WaitGroup
 
@@ -303,7 +315,27 @@ func (p *tunnelQualityProber) storeResult(snap *tunnelQualitySnapshot) {
 	}
 
 	// Update in-memory cache (latest per tunnel)
+	// Retain the lastDBWrite timestamp if it exists, so we only DB write every 30s
+	var lastWrite int64
+	if existing, ok := p.cache.Load(snap.TunnelID); ok {
+		if eg, ok := existing.(*tunnelQualitySnapshot); ok {
+			lastWrite = eg.lastDBWrite
+		}
+	}
+	snap.lastDBWrite = lastWrite
+
+	now := time.Now().UnixMilli()
+	writeToDB := false
+	if now-snap.lastDBWrite >= int64(tunnelQualityReportInterval/time.Millisecond) {
+		writeToDB = true
+		snap.lastDBWrite = now
+	}
+
 	p.cache.Store(snap.TunnelID, snap)
+
+	if !writeToDB {
+		return
+	}
 
 	// Persist to database (history)
 	h := p.handler

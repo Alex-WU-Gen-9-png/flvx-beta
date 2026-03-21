@@ -264,9 +264,9 @@ type MetricType =
 const METRICS_MAX_ROWS = 5000;
 
 const DEFAULT_SERVICE_MONITOR_LIMITS: ServiceMonitorLimitsApiData = {
-  checkerScanIntervalSec: 30,
-  minIntervalSec: 30,
-  defaultIntervalSec: 60,
+  checkerScanIntervalSec: 1,
+  minIntervalSec: 1,
+  defaultIntervalSec: 1,
   minTimeoutSec: 1,
   defaultTimeoutSec: 5,
   maxTimeoutSec: 60,
@@ -619,7 +619,7 @@ export function MonitorView({ nodeMap, viewMode = "grid" }: MonitorViewProps) {
     const timer = window.setInterval(() => {
       void loadServiceMonitors({ silent: true });
       void loadLatestMonitorResults();
-    }, 30_000);
+    }, 1_000);
 
     return () => window.clearInterval(timer);
   }, [loadLatestMonitorResults, loadServiceMonitors]);
@@ -1412,7 +1412,7 @@ export function MonitorView({ nodeMap, viewMode = "grid" }: MonitorViewProps) {
                           <div className="flex items-center gap-3 min-w-0 flex-wrap">
                             <Chip size="sm" color="primary" variant="flat">{resolvedActiveMonitor.type.toUpperCase()}</Chip>
                             <span className="font-mono text-xs text-default-500">{resolvedActiveMonitor.target}</span>
-                            <span className="text-xs text-default-500">间隔 {resolvedActiveMonitor.intervalSec}s</span>
+                            <span className="text-xs text-default-500">每秒测试，30秒上报</span>
                             {activeLatestResult && Number.isFinite(activeLatestResult.latencyMs) ? (
                               <span className="font-mono text-xs font-semibold text-success">{activeLatestResult.latencyMs.toFixed(0)}ms</span>
                             ) : null}

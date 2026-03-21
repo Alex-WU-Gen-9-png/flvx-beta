@@ -29,10 +29,10 @@ const (
 
 func DefaultServiceMonitorLimits() ServiceMonitorLimits {
 	return ServiceMonitorLimits{
-		CheckerScanIntervalSec: 30,
-		WorkerLimit:            5,
-		MinIntervalSec:         30,
-		DefaultIntervalSec:     60,
+		CheckerScanIntervalSec: 1,
+		WorkerLimit:            20,
+		MinIntervalSec:         1,
+		DefaultIntervalSec:     1,
 		MinTimeoutSec:          1,
 		DefaultTimeoutSec:      5,
 		MaxTimeoutSec:          60,
