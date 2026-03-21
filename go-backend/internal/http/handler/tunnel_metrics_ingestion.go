@@ -35,6 +35,7 @@ func (h *Handler) recordTunnelMetricsFromFlowItems(nodeID int64, items []flowIte
 	}
 
 	forwardDeltas := make(map[int64]tunnelTrafficDelta)
+	var skippedParse, skippedZero int
 	for _, item := range items {
 		name := strings.TrimSpace(item.N)
 		if name == "" || name == "web_api" {
@@ -42,9 +43,11 @@ func (h *Handler) recordTunnelMetricsFromFlowItems(nodeID int64, items []flowIte
 		}
 		forwardID, _, _, ok := parseFlowServiceIDs(name)
 		if !ok {
+			skippedParse++
 			continue
 		}
 		if item.D == 0 && item.U == 0 {
+			skippedZero++
 			continue
 		}
 		d := forwardDeltas[forwardID]
@@ -53,6 +56,9 @@ func (h *Handler) recordTunnelMetricsFromFlowItems(nodeID int64, items []flowIte
 		forwardDeltas[forwardID] = d
 	}
 	if len(forwardDeltas) == 0 {
+		if len(items) > 0 {
+			log.Printf("monitoring debug op=tunnel_metric.no_forward_deltas node_id=%d items=%d skipped_parse=%d skipped_zero=%d", nodeID, len(items), skippedParse, skippedZero)
+		}
 		return
 	}
 
@@ -67,6 +73,7 @@ func (h *Handler) recordTunnelMetricsFromFlowItems(nodeID int64, items []flowIte
 		return
 	}
 	if len(forwardTunnelMap) == 0 {
+		log.Printf("monitoring debug op=tunnel_metric.no_tunnel_map node_id=%d forward_ids=%v", nodeID, forwardIDs)
 		return
 	}
 
@@ -107,5 +114,7 @@ func (h *Handler) recordTunnelMetricsFromFlowItems(nodeID int64, items []flowIte
 
 	if err := h.repo.UpsertTunnelMetricBuckets(metrics); err != nil {
 		log.Printf("monitoring write failed op=tunnel_metric.upsert_buckets node_id=%d bucket_ts=%d count=%d err=%v", nodeID, bucketTs, len(metrics), err)
+	} else {
+		log.Printf("monitoring ok op=tunnel_metric.upsert_buckets node_id=%d bucket_ts=%d count=%d", nodeID, bucketTs, len(metrics))
 	}
 }
