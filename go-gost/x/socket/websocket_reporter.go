@@ -190,7 +190,7 @@ func NewWebSocketReporter(serverURL string, secret string) *WebSocketReporter {
 	return &WebSocketReporter{
 		url:            serverURL,
 		curBackoff:     initialBackoff,   // 当前退避间隔
-		pingInterval:   5 * time.Second,  // 指标上报间隔
+		pingInterval:   1 * time.Second,  // 指标上报间隔（每秒采集）
 		configInterval: 10 * time.Minute, // 配置上报间隔
 		ctx:            ctx,
 		cancel:         cancel,

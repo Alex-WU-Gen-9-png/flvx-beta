@@ -50,7 +50,7 @@ interface TunnelMonitorViewProps {
   viewMode?: "list" | "grid";
 }
 
-const QUALITY_POLL_INTERVAL = 10_000; // 10 seconds
+const QUALITY_POLL_INTERVAL = 1_000; // 1 second
 
 const formatTimestamp = (ts: number, rangeMs?: number): string => {
   const date = new Date(ts);
@@ -572,7 +572,7 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
         {/* Auto-probe status */}
         <div className="flex items-center gap-2 text-xs text-default-500">
           <LiveDot />
-          <span>自动探测中（每10秒）</span>
+          <span>自动探测中（每秒测试，30秒上报）</span>
           {quality?.timestamp && (
             <span className="text-default-400">
               · 最近更新: {new Date(quality.timestamp).toLocaleTimeString("zh-CN")}
@@ -712,7 +712,7 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
         {lastQualityUpdate && (
           <div className="flex items-center gap-1.5 text-xs text-default-500">
             <LiveDot />
-            <span>自动探测 · 更新于 {lastQualityUpdate}</span>
+            <span>每秒探测 · 更新于 {lastQualityUpdate}</span>
           </div>
         )}
         <div className="ml-auto">
