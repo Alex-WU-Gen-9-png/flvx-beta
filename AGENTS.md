@@ -1,9 +1,9 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** Sat Mar 21 2026
-**Commit:** 0767c9c
+**Generated:** Sun Mar 22 2026
+**Commit:** 8ebde9d
 **Branch:** main
-**Tag:** 2.1.9-beta13
+**Tag:** 2.1.9-beta14
 
 ## OVERVIEW
 FLVX (formerly Flux Panel) is a traffic forwarding management system built on a forked GOST v3 stack. It ships as a Go-based admin API (SQLite/PostgreSQL) + Vite/React UI + Go forwarding agent, with optional mobile WebView wrappers.
