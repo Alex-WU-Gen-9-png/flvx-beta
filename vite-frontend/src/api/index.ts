@@ -427,6 +427,7 @@ export const getNodeMetrics = (
   return Network.get<NodeMetricApiItem[]>(
     `/monitor/nodes/${nodeId}/metrics`,
     params,
+    { timeout: 60_000 },
   );
 };
 
