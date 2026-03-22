@@ -6,7 +6,7 @@ import type {
   ServiceMonitorLimitsApiData,
 } from "@/api/types";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   LineChart,
   Line,
@@ -269,6 +269,143 @@ type MetricType =
 
 const METRICS_MAX_ROWS = 5000;
 
+/* ─── Memoized Node Metrics Chart sub-component ─────────────────── */
+
+interface NodeMetricsChartCardProps {
+  rangeMs: number;
+  onRangeChange: (v: number) => void;
+  activeMetricType: MetricType;
+  onMetricTypeChange: (t: MetricType) => void;
+  loading: boolean;
+  error: string | null;
+  truncated: boolean;
+  maxRows: number;
+  data: Array<Record<string, unknown>>;
+  nodeId: number | null;
+  onRefresh: (id: number) => void;
+}
+
+const METRIC_TYPE_BUTTONS: { key: MetricType; label: string }[] = [
+  { key: "cpu", label: "CPU" },
+  { key: "memory", label: "内存" },
+  { key: "disk", label: "磁盘" },
+  { key: "network", label: "网络" },
+  { key: "load", label: "负载" },
+  { key: "connections", label: "连接" },
+];
+
+const NodeMetricsChartCard = React.memo(function NodeMetricsChartCard({
+  rangeMs, onRangeChange, activeMetricType, onMetricTypeChange,
+  loading, error, truncated, maxRows, data, nodeId, onRefresh,
+}: NodeMetricsChartCardProps) {
+  const chartConfig = (() => {
+    switch (activeMetricType) {
+      case "cpu":    return { lines: [{ dataKey: "cpu", color: "#3b82f6", name: "CPU %" }], yAxisLabel: "使用率 (%)" };
+      case "memory": return { lines: [{ dataKey: "memory", color: "#8b5cf6", name: "内存 %" }], yAxisLabel: "使用率 (%)" };
+      case "disk":   return { lines: [{ dataKey: "disk", color: "#f59e0b", name: "磁盘 %" }], yAxisLabel: "使用率 (%)" };
+      case "network": return { lines: [{ dataKey: "netIn", color: "#10b981", name: "入站速度" }, { dataKey: "netOut", color: "#ef4444", name: "出站速度" }], yAxisLabel: "速度 (bytes/s)" };
+      case "load":   return { lines: [{ dataKey: "load1", color: "#3b82f6", name: "负载 1m" }, { dataKey: "load5", color: "#8b5cf6", name: "负载 5m" }, { dataKey: "load15", color: "#f59e0b", name: "负载 15m" }], yAxisLabel: "负载值" };
+      case "connections": return { lines: [{ dataKey: "tcp", color: "#3b82f6", name: "TCP 连接" }, { dataKey: "udp", color: "#10b981", name: "UDP 连接" }], yAxisLabel: "连接数" };
+    }
+  })();
+
+  const yAxisTickFormatter = (value: unknown) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return "";
+    switch (activeMetricType) {
+      case "network": return formatBytesPerSecond(n);
+      case "cpu": case "memory": case "disk": return `${n.toFixed(0)}%`;
+      case "load": return n.toFixed(1);
+      case "connections": return String(Math.round(n));
+    }
+  };
+
+  const tooltipFormatter = (value: unknown) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return "-";
+    switch (activeMetricType) {
+      case "network": return formatBytesPerSecond(n);
+      case "cpu": case "memory": case "disk": return `${n.toFixed(1)}%`;
+      case "load": return n.toFixed(2);
+      case "connections": return String(Math.round(n));
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between">
+        <h3 className="text-lg font-semibold">节点指标图表</h3>
+        <div className="flex items-center gap-2">
+          <Select
+            className="w-36"
+            selectedKeys={[String(rangeMs)]}
+            onSelectionChange={(keys) => {
+              const v = Number(Array.from(keys)[0]);
+              if (v > 0) onRangeChange(v);
+            }}
+          >
+            <SelectItem key={String(15 * 60 * 1000)}>15分钟</SelectItem>
+            <SelectItem key={String(60 * 60 * 1000)}>1小时</SelectItem>
+            <SelectItem key={String(6 * 60 * 60 * 1000)}>6小时</SelectItem>
+            <SelectItem key={String(24 * 60 * 60 * 1000)}>24小时</SelectItem>
+          </Select>
+          <Button isLoading={loading} size="sm" variant="flat" onPress={() => nodeId && onRefresh(nodeId)}>
+            <RefreshCw className="w-4 h-4 mr-1" />
+            刷新
+          </Button>
+        </div>
+      </CardHeader>
+      <CardBody className="space-y-4">
+        <div className="flex flex-wrap gap-2">
+          {METRIC_TYPE_BUTTONS.map((item) => (
+            <Button
+              key={item.key}
+              color={activeMetricType === item.key ? "primary" : "default"}
+              size="sm"
+              variant={activeMetricType === item.key ? "solid" : "flat"}
+              onPress={() => onMetricTypeChange(item.key)}
+            >
+              {item.label}
+            </Button>
+          ))}
+        </div>
+
+        {loading ? (
+          <div className="flex justify-center py-8"><RefreshCw className="w-6 h-6 animate-spin" /></div>
+        ) : error ? (
+          <div className="text-center py-8 text-danger text-sm">{error}</div>
+        ) : data.length > 0 ? (
+          <>
+            <div className="h-64">
+              <ResponsiveContainer height="100%" width="100%">
+                <LineChart data={data}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="time" fontSize={12} />
+                  <YAxis fontSize={12} tickFormatter={yAxisTickFormatter} />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: "rgba(0,0,0,0.8)", border: "none", borderRadius: "8px" }}
+                    labelStyle={{ color: "#fff" }}
+                    formatter={tooltipFormatter}
+                  />
+                  {chartConfig.lines.map((line) => (
+                    <Line key={line.dataKey} dataKey={line.dataKey} dot={false} name={line.name} stroke={line.color} strokeWidth={2} type="monotone" />
+                  ))}
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+            {truncated && (
+              <div className="text-xs text-default-500">数据点过多，已截断为最近 {maxRows} 条，建议缩小时间范围。</div>
+            )}
+          </>
+        ) : (
+          <div className="text-center py-8 text-default-500">暂无指标数据</div>
+        )}
+      </CardBody>
+    </Card>
+  );
+});
+
+
 const DEFAULT_SERVICE_MONITOR_LIMITS: ServiceMonitorLimitsApiData = {
   checkerScanIntervalSec: 1,
   minIntervalSec: 1,
@@ -475,8 +612,11 @@ export function MonitorView({ nodeMap, viewMode = "grid" }: MonitorViewProps) {
           return;
         }
         setMetricsTruncated(false);
-        setMetricsError(response.msg || "加载指标失败");
-        if (!silent) toast.error(response.msg || "加载指标失败");
+        const msg = response.msg || "加载指标失败";
+        const isTimeout = msg.toLowerCase().includes("timeout");
+        const friendlyMsg = isTimeout ? "加载指标超时，请缩小时间范围后重试" : msg;
+        setMetricsError(friendlyMsg);
+        if (!silent) toast.error(friendlyMsg);
       } catch {
         setMetricsTruncated(false);
         if (!silent) setMetricsError("加载指标失败");
@@ -629,7 +769,7 @@ export function MonitorView({ nodeMap, viewMode = "grid" }: MonitorViewProps) {
     const timer = window.setInterval(() => {
       void loadServiceMonitors({ silent: true });
       void loadLatestMonitorResults();
-    }, 1_000);
+    }, 5_000);
 
     return () => window.clearInterval(timer);
   }, [loadLatestMonitorResults, loadServiceMonitors]);
@@ -660,7 +800,7 @@ export function MonitorView({ nodeMap, viewMode = "grid" }: MonitorViewProps) {
     void loadMonitorResults(activeServiceMonitorId, { rangeMs: serviceMonitorRangeMs });
   }, [activeServiceMonitorId, serviceMonitorRangeMs, loadMonitorResults]);
 
-  const chartData = metrics.map((m) => ({
+  const chartData = useMemo(() => metrics.map((m) => ({
     time: formatTimestamp(m.timestamp, metricsRangeMs),
     cpu: m.cpuUsage,
     memory: m.memoryUsage,
@@ -672,52 +812,7 @@ export function MonitorView({ nodeMap, viewMode = "grid" }: MonitorViewProps) {
     load15: m.load15,
     tcp: m.tcpConns,
     udp: m.udpConns,
-  }));
-
-  const getChartConfig = () => {
-    switch (activeMetricType) {
-      case "cpu":
-        return {
-          lines: [{ dataKey: "cpu", color: "#3b82f6", name: "CPU %" }],
-          yAxisLabel: "使用率 (%)",
-        };
-      case "memory":
-        return {
-          lines: [{ dataKey: "memory", color: "#8b5cf6", name: "内存 %" }],
-          yAxisLabel: "使用率 (%)",
-        };
-      case "disk":
-        return {
-          lines: [{ dataKey: "disk", color: "#f59e0b", name: "磁盘 %" }],
-          yAxisLabel: "使用率 (%)",
-        };
-      case "network":
-        return {
-          lines: [
-            { dataKey: "netIn", color: "#10b981", name: "入站速度" },
-            { dataKey: "netOut", color: "#ef4444", name: "出站速度" },
-          ],
-          yAxisLabel: "速度 (bytes/s)",
-        };
-      case "load":
-        return {
-          lines: [
-            { dataKey: "load1", color: "#3b82f6", name: "负载 1m" },
-            { dataKey: "load5", color: "#8b5cf6", name: "负载 5m" },
-            { dataKey: "load15", color: "#f59e0b", name: "负载 15m" },
-          ],
-          yAxisLabel: "负载值",
-        };
-      case "connections":
-        return {
-          lines: [
-            { dataKey: "tcp", color: "#3b82f6", name: "TCP 连接" },
-            { dataKey: "udp", color: "#10b981", name: "UDP 连接" },
-          ],
-          yAxisLabel: "连接数",
-        };
-    }
-  };
+  })), [metrics, metricsRangeMs]);
 
 
 
@@ -979,46 +1074,6 @@ export function MonitorView({ nodeMap, viewMode = "grid" }: MonitorViewProps) {
     return { disabled, ok, fail, unknown, stale };
   }, [getLatestResult, isResultStale, serviceMonitors]);
 
-  const chartConfig = getChartConfig();
-
-  const nodeYAxisTickFormatter = (value: unknown) => {
-    const n = Number(value);
-
-    if (!Number.isFinite(n)) return "";
-
-    switch (activeMetricType) {
-      case "network":
-        return formatBytesPerSecond(n);
-      case "cpu":
-      case "memory":
-      case "disk":
-        return `${n.toFixed(0)}%`;
-      case "load":
-        return n.toFixed(1);
-      case "connections":
-        return String(Math.round(n));
-    }
-  };
-
-  const nodeTooltipFormatter = (value: unknown) => {
-    const n = Number(value);
-
-    if (!Number.isFinite(n)) return "-";
-
-    switch (activeMetricType) {
-      case "network":
-        return formatBytesPerSecond(n);
-      case "cpu":
-      case "memory":
-      case "disk":
-        return `${n.toFixed(1)}%`;
-      case "load":
-        return n.toFixed(2);
-      case "connections":
-        return String(Math.round(n));
-    }
-  };
-
 
 
   const detailNode = detailNodeId != null ? nodes.find((n) => n.id === detailNodeId) : null;
@@ -1259,83 +1314,19 @@ export function MonitorView({ nodeMap, viewMode = "grid" }: MonitorViewProps) {
           )}
 
           {/* Node metrics chart */}
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between">
-              <h3 className="text-lg font-semibold">节点指标图表</h3>
-              <div className="flex items-center gap-2">
-                <Select
-                  className="w-36"
-                  selectedKeys={[String(metricsRangeMs)]}
-                  onSelectionChange={(keys) => {
-                    const v = Number(Array.from(keys)[0]);
-                    if (v > 0) setMetricsRangeMs(v);
-                  }}
-                >
-                  <SelectItem key={String(15 * 60 * 1000)}>15分钟</SelectItem>
-                  <SelectItem key={String(60 * 60 * 1000)}>1小时</SelectItem>
-                  <SelectItem key={String(6 * 60 * 60 * 1000)}>6小时</SelectItem>
-                  <SelectItem key={String(24 * 60 * 60 * 1000)}>24小时</SelectItem>
-                </Select>
-                <Button isLoading={metricsLoading} size="sm" variant="flat" onPress={() => selectedNodeId && loadMetrics(selectedNodeId)}>
-                  <RefreshCw className="w-4 h-4 mr-1" />
-                  刷新
-                </Button>
-              </div>
-            </CardHeader>
-            <CardBody className="space-y-4">
-              <div className="flex flex-wrap gap-2">
-                {([
-                  { key: "cpu", label: "CPU" },
-                  { key: "memory", label: "内存" },
-                  { key: "disk", label: "磁盘" },
-                  { key: "network", label: "网络" },
-                  { key: "load", label: "负载" },
-                  { key: "connections", label: "连接" },
-                ] as { key: MetricType; label: string }[]).map((item) => (
-                  <Button
-                    key={item.key}
-                    color={activeMetricType === item.key ? "primary" : "default"}
-                    size="sm"
-                    variant={activeMetricType === item.key ? "solid" : "flat"}
-                    onPress={() => setActiveMetricType(item.key)}
-                  >
-                    {item.label}
-                  </Button>
-                ))}
-              </div>
-
-              {metricsLoading ? (
-                <div className="flex justify-center py-8"><RefreshCw className="w-6 h-6 animate-spin" /></div>
-              ) : metricsError ? (
-                <div className="text-center py-8 text-danger text-sm">{metricsError}</div>
-              ) : metrics.length > 0 ? (
-                <>
-                  <div className="h-64">
-                    <ResponsiveContainer height="100%" width="100%">
-                      <LineChart data={chartData}>
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="time" fontSize={12} />
-                        <YAxis fontSize={12} tickFormatter={nodeYAxisTickFormatter} />
-                        <Tooltip
-                          contentStyle={{ backgroundColor: "rgba(0,0,0,0.8)", border: "none", borderRadius: "8px" }}
-                          labelStyle={{ color: "#fff" }}
-                          formatter={nodeTooltipFormatter}
-                        />
-                        {chartConfig.lines.map((line) => (
-                          <Line key={line.dataKey} dataKey={line.dataKey} dot={false} name={line.name} stroke={line.color} strokeWidth={2} type="monotone" />
-                        ))}
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
-                  {metricsTruncated && (
-                    <div className="text-xs text-default-500">数据点过多，已截断为最近 {METRICS_MAX_ROWS} 条，建议缩小时间范围。</div>
-                  )}
-                </>
-              ) : (
-                <div className="text-center py-8 text-default-500">暂无指标数据</div>
-              )}
-            </CardBody>
-          </Card>
+          <NodeMetricsChartCard
+            rangeMs={metricsRangeMs}
+            onRangeChange={setMetricsRangeMs}
+            activeMetricType={activeMetricType}
+            onMetricTypeChange={setActiveMetricType}
+            loading={metricsLoading}
+            error={metricsError}
+            truncated={metricsTruncated}
+            maxRows={METRICS_MAX_ROWS}
+            data={chartData}
+            nodeId={selectedNodeId}
+            onRefresh={loadMetrics}
+          />
 
 
           {/* Service monitors chart – same style as node metrics */}

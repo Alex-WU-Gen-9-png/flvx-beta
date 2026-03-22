@@ -4,7 +4,7 @@ import type {
   TunnelQualityApiItem,
 } from "@/api/types";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   LineChart,
   Line,
@@ -72,15 +72,6 @@ const formatTimestamp = (ts: number, rangeMs?: number): string => {
   });
 };
 
-const formatBytes = (bytes: number): string => {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
-};
 
 /** Render a colored latency value with appropriate visual cue */
 function LatencyDisplay({ value, loading }: { value?: number; loading?: boolean }) {
@@ -181,6 +172,161 @@ function UptimeHistoryBar({
     </div>
   );
 }
+
+/* ─── Module-level constants & memoized sub-components ────────────── */
+
+const TIME_RANGE_OPTIONS = [
+  { key: String(15 * 60 * 1000), label: "15分钟" },
+  { key: String(60 * 60 * 1000), label: "1小时" },
+  { key: String(6 * 60 * 60 * 1000), label: "6小时" },
+  { key: String(24 * 60 * 60 * 1000), label: "24小时" },
+];
+
+function TimeRangeSelect({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  return (
+    <Select
+      className="w-36"
+      selectedKeys={[String(value)]}
+      onSelectionChange={(keys) => {
+        const v = Number(Array.from(keys)[0]);
+        if (v > 0) onChange(v);
+      }}
+    >
+      {TIME_RANGE_OPTIONS.map((opt) => (
+        <SelectItem key={opt.key}>{opt.label}</SelectItem>
+      ))}
+    </Select>
+  );
+}
+
+interface QualityChartCardProps {
+  rangeMs: number;
+  onRangeChange: (v: number) => void;
+  loading: boolean;
+  error: string | null;
+  data: Array<{ time: string; entryToExit: number | null; exitToBing: number | null }>;
+  tunnelId: number;
+  onRefresh: (id: number) => void;
+}
+
+const QualityChartCard = React.memo(function QualityChartCard({
+  rangeMs, onRangeChange, loading, error, data, tunnelId, onRefresh,
+}: QualityChartCardProps) {
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between">
+        <h3 className="text-lg font-semibold">质量趋势</h3>
+        <div className="flex items-center gap-2">
+          <TimeRangeSelect value={rangeMs} onChange={onRangeChange} />
+          <Button isLoading={loading} size="sm" variant="flat" onPress={() => onRefresh(tunnelId)}>
+            <RefreshCw className="w-4 h-4 mr-1" />
+            刷新
+          </Button>
+        </div>
+      </CardHeader>
+      <CardBody>
+        {loading ? (
+          <div className="flex justify-center py-8"><RefreshCw className="w-6 h-6 animate-spin" /></div>
+        ) : error ? (
+          <div className="text-center py-8 text-danger text-sm">{error}</div>
+        ) : data.length > 0 ? (
+          <div className="h-64">
+            <ResponsiveContainer height="100%" width="100%">
+              <LineChart data={data}>
+                <CartesianGrid strokeDasharray="3 3" opacity={0.3} />
+                <XAxis dataKey="time" fontSize={11} tick={{ fill: "#888" }} />
+                <YAxis
+                  fontSize={11}
+                  tick={{ fill: "#888" }}
+                  tickFormatter={(v: any) => `${Number(v).toFixed(0)}ms`}
+                  label={{ value: "延迟 (ms)", angle: -90, position: "insideLeft", style: { fontSize: 11, fill: "#888" } }}
+                />
+                <Tooltip
+                  contentStyle={{ backgroundColor: "rgba(0,0,0,0.85)", border: "none", borderRadius: "8px", fontSize: 12 }}
+                  labelStyle={{ color: "#fff" }}
+                  formatter={(value: unknown, name: string) => {
+                    const n = Number(value);
+                    if (!Number.isFinite(n)) return "-";
+                    const label = name === "entryToExit" ? "入口→出口" : name === "exitToBing" ? "出口→Bing" : name;
+                    return [`${n.toFixed(1)}ms`, label];
+                  }}
+                />
+                <Line connectNulls dataKey="entryToExit" dot={false} name="entryToExit" stroke="#10b981" strokeWidth={2} type="monotone" />
+                <Line connectNulls dataKey="exitToBing" dot={false} name="exitToBing" stroke="#3b82f6" strokeWidth={2} type="monotone" />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        ) : (
+          <div className="text-center py-8 text-default-500">暂无质量历史数据</div>
+        )}
+      </CardBody>
+    </Card>
+  );
+});
+
+interface TrafficChartCardProps {
+  rangeMs: number;
+  onRangeChange: (v: number) => void;
+  loading: boolean;
+  error: string | null;
+  data: Array<{ time: string; bytesIn: number; bytesOut: number; connections: number }>;
+  tunnelId: number;
+  onRefresh: (id: number) => void;
+}
+
+const TrafficChartCard = React.memo(function TrafficChartCard({
+  rangeMs, onRangeChange, loading, error, data, tunnelId, onRefresh,
+}: TrafficChartCardProps) {
+  const yFormatter = (value: unknown) => {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return "0 B";
+    const k = 1024;
+    const sizes = ["B", "KB", "MB", "GB", "TB"];
+    const i = Math.floor(Math.log(n) / Math.log(k));
+    return `${parseFloat((n / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
+  };
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between">
+        <h3 className="text-lg font-semibold">流量趋势</h3>
+        <div className="flex items-center gap-2">
+          <TimeRangeSelect value={rangeMs} onChange={onRangeChange} />
+          <Button isLoading={loading} size="sm" variant="flat" onPress={() => onRefresh(tunnelId)}>
+            <RefreshCw className="w-4 h-4 mr-1" />
+            刷新
+          </Button>
+        </div>
+      </CardHeader>
+      <CardBody>
+        {loading ? (
+          <div className="flex justify-center py-8"><RefreshCw className="w-6 h-6 animate-spin" /></div>
+        ) : error ? (
+          <div className="text-center py-8 text-danger text-sm">{error}</div>
+        ) : data.length > 0 ? (
+          <div className="h-64">
+            <ResponsiveContainer height="100%" width="100%">
+              <LineChart data={data}>
+                <CartesianGrid strokeDasharray="3 3" opacity={0.3} />
+                <XAxis dataKey="time" fontSize={11} tick={{ fill: "#888" }} />
+                <YAxis fontSize={11} tick={{ fill: "#888" }} tickFormatter={yFormatter} />
+                <Tooltip
+                  contentStyle={{ backgroundColor: "rgba(0,0,0,0.85)", border: "none", borderRadius: "8px", fontSize: 12 }}
+                  labelStyle={{ color: "#fff" }}
+                  formatter={yFormatter}
+                />
+                <Line dataKey="bytesIn" dot={false} name="入站流量" stroke="#10b981" strokeWidth={2} type="monotone" />
+                <Line dataKey="bytesOut" dot={false} name="出站流量" stroke="#ef4444" strokeWidth={2} type="monotone" />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        ) : (
+          <div className="text-center py-8 text-default-500">暂无流量数据</div>
+        )}
+      </CardBody>
+    </Card>
+  );
+});
 
 export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps) {
   const [tunnels, setTunnels] = useState<MonitorTunnelApiItem[]>([]);
@@ -419,34 +565,27 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
     return () => window.clearInterval(timer);
   }, [detailTunnelId, loadQualityHistory, loadTunnelMetrics]);
 
-  // Chart data for quality history
-  const qualityChartData = qualityHistory.map((q) => ({
-    time: formatTimestamp(q.timestamp, qualityRangeMs),
-    entryToExit: q.entryToExitLatency >= 0 ? q.entryToExitLatency : null,
-    exitToBing: q.exitToBingLatency >= 0 ? q.exitToBingLatency : null,
-    entryToExitLoss: q.entryToExitLoss,
-    exitToBingLoss: q.exitToBingLoss,
-  }));
+  // Memoize chart data so React.memo sub-components see stable references
+  const qualityChartData = useMemo(
+    () => qualityHistory.map((q) => ({
+      time: formatTimestamp(q.timestamp, qualityRangeMs),
+      entryToExit: q.entryToExitLatency >= 0 ? q.entryToExitLatency : null,
+      exitToBing: q.exitToBingLatency >= 0 ? q.exitToBingLatency : null,
+      entryToExitLoss: q.entryToExitLoss,
+      exitToBingLoss: q.exitToBingLoss,
+    })),
+    [qualityHistory, qualityRangeMs],
+  );
 
-  // Chart data for traffic metrics
-  const tunnelChartData = tunnelMetrics.map((m) => ({
-    time: formatTimestamp(m.timestamp, tunnelRangeMs),
-    bytesIn: m.bytesIn,
-    bytesOut: m.bytesOut,
-    connections: m.connections,
-  }));
-
-  const tunnelYAxisTickFormatter = (value: unknown) => {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return "";
-    return formatBytes(n);
-  };
-
-  const tunnelTooltipFormatter = (value: unknown) => {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return "-";
-    return formatBytes(n);
-  };
+  const tunnelChartData = useMemo(
+    () => tunnelMetrics.map((m) => ({
+      time: formatTimestamp(m.timestamp, tunnelRangeMs),
+      bytesIn: m.bytesIn,
+      bytesOut: m.bytesOut,
+      connections: m.connections,
+    })),
+    [tunnelMetrics, tunnelRangeMs],
+  );
 
   const detailTunnel = detailTunnelId != null
     ? tunnels.find((t) => t.id === detailTunnelId)
@@ -467,23 +606,6 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
     }
     return latest > 0 ? new Date(latest).toLocaleTimeString("zh-CN") : null;
   }, [qualityMap]);
-
-  /** Shared time range Select component */
-  const TimeRangeSelect = ({ value, onChange }: { value: number; onChange: (v: number) => void }) => (
-    <Select
-      className="w-36"
-      selectedKeys={[String(value)]}
-      onSelectionChange={(keys) => {
-        const v = Number(Array.from(keys)[0]);
-        if (v > 0) onChange(v);
-      }}
-    >
-      <SelectItem key={String(15 * 60 * 1000)}>15分钟</SelectItem>
-      <SelectItem key={String(60 * 60 * 1000)}>1小时</SelectItem>
-      <SelectItem key={String(6 * 60 * 60 * 1000)}>6小时</SelectItem>
-      <SelectItem key={String(24 * 60 * 60 * 1000)}>24小时</SelectItem>
-    </Select>
-  );
 
   // =====================
   // RENDER
@@ -583,123 +705,27 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
           )}
         </div>
 
-        {/* ====== Quality History Chart (mirrors service monitor chart) ====== */}
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between">
-            <h3 className="text-lg font-semibold">质量趋势</h3>
-            <div className="flex items-center gap-2">
-              <TimeRangeSelect value={qualityRangeMs} onChange={setQualityRangeMs} />
-              <Button
-                isLoading={qualityHistoryLoading}
-                size="sm"
-                variant="flat"
-                onPress={() => detailTunnelId && loadQualityHistory(detailTunnelId)}
-              >
-                <RefreshCw className="w-4 h-4 mr-1" />
-                刷新
-              </Button>
-            </div>
-          </CardHeader>
-          <CardBody>
-            {qualityHistoryLoading ? (
-              <div className="flex justify-center py-8"><RefreshCw className="w-6 h-6 animate-spin" /></div>
-            ) : qualityHistoryError ? (
-              <div className="text-center py-8 text-danger text-sm">{qualityHistoryError}</div>
-            ) : qualityChartData.length > 0 ? (
-              <div className="h-64">
-                <ResponsiveContainer height="100%" width="100%">
-                  <LineChart data={qualityChartData}>
-                    <CartesianGrid strokeDasharray="3 3" opacity={0.3} />
-                    <XAxis dataKey="time" fontSize={11} tick={{ fill: "#888" }} />
-                    <YAxis
-                      fontSize={11}
-                      tick={{ fill: "#888" }}
-                      tickFormatter={(v: any) => `${Number(v).toFixed(0)}ms`}
-                      label={{ value: "延迟 (ms)", angle: -90, position: "insideLeft", style: { fontSize: 11, fill: "#888" } }}
-                    />
-                    <Tooltip
-                      contentStyle={{ backgroundColor: "rgba(0,0,0,0.85)", border: "none", borderRadius: "8px", fontSize: 12 }}
-                      labelStyle={{ color: "#fff" }}
-                      formatter={(value: unknown, name: string) => {
-                        const n = Number(value);
-                        if (!Number.isFinite(n)) return "-";
-                        const label = name === "entryToExit" ? "入口→出口" : name === "exitToBing" ? "出口→Bing" : name;
-                        return [`${n.toFixed(1)}ms`, label];
-                      }}
-                    />
+        {/* ====== Quality History Chart — isolated with React.memo ====== */}
+        <QualityChartCard
+          rangeMs={qualityRangeMs}
+          onRangeChange={setQualityRangeMs}
+          loading={qualityHistoryLoading}
+          error={qualityHistoryError}
+          data={qualityChartData}
+          tunnelId={detailTunnelId}
+          onRefresh={loadQualityHistory}
+        />
 
-                    <Line
-                      connectNulls
-                      dataKey="entryToExit"
-                      dot={false}
-                      name="entryToExit"
-                      stroke="#10b981"
-                      strokeWidth={2}
-                      type="monotone"
-                    />
-                    <Line
-                      connectNulls
-                      dataKey="exitToBing"
-                      dot={false}
-                      name="exitToBing"
-                      stroke="#3b82f6"
-                      strokeWidth={2}
-                      type="monotone"
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            ) : (
-              <div className="text-center py-8 text-default-500">暂无质量历史数据</div>
-            )}
-          </CardBody>
-        </Card>
-
-        {/* ====== Traffic Chart (unchanged) ====== */}
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between">
-            <h3 className="text-lg font-semibold">流量趋势</h3>
-            <div className="flex items-center gap-2">
-              <TimeRangeSelect value={tunnelRangeMs} onChange={setTunnelRangeMs} />
-              <Button
-                isLoading={tunnelMetricsLoading}
-                size="sm"
-                variant="flat"
-                onPress={() => detailTunnelId && loadTunnelMetrics(detailTunnelId)}
-              >
-                <RefreshCw className="w-4 h-4 mr-1" />
-                刷新
-              </Button>
-            </div>
-          </CardHeader>
-          <CardBody>
-            {tunnelMetricsLoading ? (
-              <div className="flex justify-center py-8"><RefreshCw className="w-6 h-6 animate-spin" /></div>
-            ) : tunnelMetricsError ? (
-              <div className="text-center py-8 text-danger text-sm">{tunnelMetricsError}</div>
-            ) : tunnelChartData.length > 0 ? (
-              <div className="h-64">
-                <ResponsiveContainer height="100%" width="100%">
-                  <LineChart data={tunnelChartData}>
-                    <CartesianGrid strokeDasharray="3 3" opacity={0.3} />
-                    <XAxis dataKey="time" fontSize={11} tick={{ fill: "#888" }} />
-                    <YAxis fontSize={11} tick={{ fill: "#888" }} tickFormatter={tunnelYAxisTickFormatter} />
-                    <Tooltip
-                      contentStyle={{ backgroundColor: "rgba(0,0,0,0.85)", border: "none", borderRadius: "8px", fontSize: 12 }}
-                      labelStyle={{ color: "#fff" }}
-                      formatter={tunnelTooltipFormatter}
-                    />
-
-                    <Line dataKey="bytesIn" dot={false} name="入站流量" stroke="#10b981" strokeWidth={2} type="monotone" />
-                    <Line dataKey="bytesOut" dot={false} name="出站流量" stroke="#ef4444" strokeWidth={2} type="monotone" />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            ) : (
-              <div className="text-center py-8 text-default-500">暂无流量数据</div>
-            )}
-          </CardBody>
-        </Card>
+        {/* ====== Traffic Chart — isolated with React.memo ====== */}
+        <TrafficChartCard
+          rangeMs={tunnelRangeMs}
+          onRangeChange={setTunnelRangeMs}
+          loading={tunnelMetricsLoading}
+          error={tunnelMetricsError}
+          data={tunnelChartData}
+          tunnelId={detailTunnelId}
+          onRefresh={loadTunnelMetrics}
+        />
       </div>
     );
   }

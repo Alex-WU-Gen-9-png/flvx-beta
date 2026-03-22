@@ -3320,15 +3320,61 @@ func (r *Repository) GetNodeMetrics(nodeID int64, startMs, endMs int64) ([]model
 	if r == nil || r.db == nil {
 		return nil, nil
 	}
+
+	rangeMs := endMs - startMs
+	const maxRawRangeMs = int64(60 * 60 * 1000) // 1 hour — return raw data for short ranges
+	const targetPoints = 500                     // target number of chart points for downsampled data
+
+	// For short ranges, return raw data (full resolution).
+	if rangeMs <= maxRawRangeMs {
+		var metrics []model.NodeMetric
+		err := r.db.Where("node_id = ? AND timestamp >= ? AND timestamp <= ?", nodeID, startMs, endMs).
+			Order("timestamp ASC").
+			Limit(5000).
+			Find(&metrics).Error
+		return metrics, err
+	}
+
+	// For longer ranges, downsample via SQL aggregation to keep the response small and fast.
+	bucketMs := rangeMs / targetPoints
+	if bucketMs < 1000 {
+		bucketMs = 1000 // minimum 1-second buckets
+	}
+
+	bucketExpr := fmt.Sprintf("(timestamp / %d * %d)", bucketMs, bucketMs)
+	groupExpr := fmt.Sprintf("timestamp / %d", bucketMs)
+
 	var metrics []model.NodeMetric
-	err := r.db.Where("node_id = ? AND timestamp >= ? AND timestamp <= ?", nodeID, startMs, endMs).
-		Order("timestamp DESC").
-		Limit(5000).
-		Find(&metrics).Error
-	if len(metrics) > 1 {
-		for i, j := 0, len(metrics)-1; i < j; i, j = i+1, j-1 {
-			metrics[i], metrics[j] = metrics[j], metrics[i]
-		}
+	err := r.db.Model(&model.NodeMetric{}).
+		Select(
+			fmt.Sprintf(
+				"? AS node_id, "+
+					"CAST(%s AS INTEGER) AS timestamp, "+
+					"AVG(cpu_usage) AS cpu_usage, "+
+					"AVG(mem_usage) AS mem_usage, "+
+					"AVG(disk_usage) AS disk_usage, "+
+					"CAST(AVG(net_in_bytes) AS INTEGER) AS net_in_bytes, "+
+					"CAST(AVG(net_out_bytes) AS INTEGER) AS net_out_bytes, "+
+					"CAST(AVG(net_in_speed) AS INTEGER) AS net_in_speed, "+
+					"CAST(AVG(net_out_speed) AS INTEGER) AS net_out_speed, "+
+					"AVG(load1) AS load1, "+
+					"AVG(load5) AS load5, "+
+					"AVG(load15) AS load15, "+
+					"CAST(AVG(tcp_conns) AS INTEGER) AS tcp_conns, "+
+					"CAST(AVG(udp_conns) AS INTEGER) AS udp_conns, "+
+					"CAST(MAX(uptime) AS INTEGER) AS uptime",
+				bucketExpr,
+			),
+			nodeID,
+		).
+		Where("node_id = ? AND timestamp >= ? AND timestamp <= ?", nodeID, startMs, endMs).
+		Group(groupExpr).
+		Order("timestamp ASC").
+		Limit(targetPoints + 100). // safety margin
+		Scan(&metrics).Error
+
+	if metrics == nil {
+		metrics = make([]model.NodeMetric, 0)
 	}
 	return metrics, err
 }
