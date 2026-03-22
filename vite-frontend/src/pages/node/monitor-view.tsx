@@ -794,6 +794,20 @@ export function MonitorView({ nodeMap, viewMode = "grid" }: MonitorViewProps) {
     void loadResultsForModal();
   }, [resultsModalOpen, resultsMonitorId, resultsLimit, loadResultsForModal]);
 
+  // Auto-load results for the resolved default monitor when entering detail view
+  useEffect(() => {
+    if (!detailNodeId) return;
+    if (activeServiceMonitorId) return; // user already selected one
+    // Find the first monitor belonging to this node (or panel-level)
+    const firstMonitor = serviceMonitors.find(
+      (m) => m.nodeId === detailNodeId || m.nodeId === 0,
+    );
+    if (firstMonitor && (!monitorResults[firstMonitor.id] || monitorResults[firstMonitor.id].length <= 1)) {
+      void loadMonitorResults(firstMonitor.id, { rangeMs: serviceMonitorRangeMs });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detailNodeId, serviceMonitors]);
+
   // Reload results for the active service monitor chart when time range changes
   useEffect(() => {
     if (!activeServiceMonitorId) return;
@@ -1023,6 +1037,11 @@ export function MonitorView({ nodeMap, viewMode = "grid" }: MonitorViewProps) {
     [resolvedServiceMonitorLimits.defaultIntervalSec, resolvedServiceMonitorLimits.minIntervalSec],
   );
 
+  // Backend batches DB writes every 30s, but latest API reads from in-memory cache.
+  // The cache timestamp reflects the real check time (every ~1s), so stale detection
+  // should still allow for the batch report interval + scan jitter.
+  const SERVICE_MONITOR_REPORT_INTERVAL_MS = 30_000; // matches backend serviceMonitorReportInterval
+
   const isResultStale = useCallback(
     (monitor: ServiceMonitorApiItem, latestResult: ServiceMonitorResultApiItem | null) => {
       if (monitor.enabled !== 1) {
@@ -1033,8 +1052,9 @@ export function MonitorView({ nodeMap, viewMode = "grid" }: MonitorViewProps) {
 	  }
 
       const intervalMs = resolveMonitorIntervalSec(monitor) * 1000;
+      // Budget = batch report interval + one check interval + scan jitter + grace
       const budgetMs =
-        intervalMs + resolvedServiceMonitorLimits.checkerScanIntervalSec * 1000 + 5000;
+        SERVICE_MONITOR_REPORT_INTERVAL_MS + intervalMs + resolvedServiceMonitorLimits.checkerScanIntervalSec * 1000 + 5000;
 
       return Date.now() - latestResult.timestamp > budgetMs;
     },
