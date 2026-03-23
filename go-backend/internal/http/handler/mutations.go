@@ -1107,6 +1107,15 @@ func (h *Handler) syncTunnelForwardsEntryPorts(tunnelID int64, entryNodeIDs []in
 			continue
 		}
 
+		// If the existing port is outside any entry node's allowed range,
+		// pick a new random port that satisfies all entry nodes.
+		if !h.isPortValidForAllEntryNodes(port, entryNodeIDs) {
+			newPort := h.pickTunnelPort(tunnelID)
+			if newPort > 0 {
+				port = newPort
+			}
+		}
+
 		var entries []forwardPortReplaceEntry
 		if allowInIP {
 			entries = buildForwardPortEntriesWithPreservedInIP(entryNodeIDs, oldPorts, port)
@@ -1118,6 +1127,25 @@ func (h *Handler) syncTunnelForwardsEntryPorts(tunnelID int64, entryNodeIDs []in
 		}
 		_ = h.repo.ReplaceForwardPorts(f.ID, entries)
 	}
+}
+
+func (h *Handler) isPortValidForAllEntryNodes(port int, entryNodeIDs []int64) bool {
+	if port <= 0 {
+		return false
+	}
+	for _, nodeID := range entryNodeIDs {
+		node, err := h.getNodeRecord(nodeID)
+		if err != nil {
+			continue
+		}
+		if validateLocalNodePort(node, port) != nil {
+			return false
+		}
+		if validateRemoteNodePort(node, port) != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *Handler) tunnelDelete(w http.ResponseWriter, r *http.Request) {
