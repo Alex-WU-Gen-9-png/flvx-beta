@@ -3348,7 +3348,7 @@ func (r *Repository) GetNodeMetrics(nodeID int64, startMs, endMs int64) ([]model
 	err := r.db.Model(&model.NodeMetric{}).
 		Select(
 			fmt.Sprintf(
-				"? AS node_id, "+
+				"%d AS node_id, "+
 					"CAST(%s AS INTEGER) AS timestamp, "+
 					"AVG(cpu_usage) AS cpu_usage, "+
 					"AVG(mem_usage) AS mem_usage, "+
@@ -3363,9 +3363,8 @@ func (r *Repository) GetNodeMetrics(nodeID int64, startMs, endMs int64) ([]model
 					"CAST(AVG(tcp_conns) AS INTEGER) AS tcp_conns, "+
 					"CAST(AVG(udp_conns) AS INTEGER) AS udp_conns, "+
 					"CAST(MAX(uptime) AS INTEGER) AS uptime",
-				bucketExpr,
+				nodeID, bucketExpr,
 			),
-			nodeID,
 		).
 		Where("node_id = ? AND timestamp >= ? AND timestamp <= ?", nodeID, startMs, endMs).
 		Group(groupExpr).

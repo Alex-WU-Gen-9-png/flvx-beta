@@ -2,18 +2,20 @@
 
 ## Issue
 - GitHub Issue: [#373](https://github.com/Sagit-chu/flvx/issues/373)
-- 添加隧道入口时，端口校验不严格 - 默认端口可能不在新入口设置范围内
-
-## 问题分析
-当已有隧道上添加新入口节点时，系统会使用既有转发的端口部署到新入口节点上，
-但该端口可能不在新入口节点设置的端口范围内，且没有校验提示。
-
-### 根因
-`syncTunnelForwardsEntryPorts` 函数在同步入口端口时，直接复用了原有端口，
-没有检查该端口是否在新入口节点的允许范围内。
 
 ## 修复方案
 
-- [x] 1. 新增 `isPortValidForAllEntryNodes` 辅助方法，校验端口是否在各节点范围内
-- [x] 2. 在 `syncTunnelForwardsEntryPorts` 中检测端口超范围时，通过 `pickTunnelPort` 自动随机分配新端口
-- [x] 3. 构建通过 + 全量测试通过
+在 `syncTunnelForwardsEntryPorts` 中实现逐节点端口分配：
+
+- **旧入口节点**：保留原端口不变
+- **新入口节点**：通过 `resolvePortForNewEntryNode` 决策：
+  - 参考端口在范围内且未被占用 → 跟随设置一样的端口
+  - 参考端口超出范围或被占用 → 通过 `pickRandomPortForNode` 为该节点单独随机分配
+
+## 任务清单
+
+- [x] 1. 实现 `pickRandomPortForNode` 辅助方法（单节点端口随机分配）
+- [x] 2. 实现 `resolvePortForNewEntryNode` 方法（端口决策逻辑）
+- [x] 3. 重写 `syncTunnelForwardsEntryPorts` 为逐节点分配
+- [x] 4. 移除不再需要的 `isPortValidForAllEntryNodes`
+- [x] 5. 构建通过 + 全量测试通过
