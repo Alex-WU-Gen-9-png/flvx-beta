@@ -3349,20 +3349,20 @@ func (r *Repository) GetNodeMetrics(nodeID int64, startMs, endMs int64) ([]model
 		Select(
 			fmt.Sprintf(
 				"%d AS node_id, "+
-					"CAST(%s AS INTEGER) AS timestamp, "+
+					"CAST(%s AS BIGINT) AS timestamp, "+
 					"AVG(cpu_usage) AS cpu_usage, "+
 					"AVG(mem_usage) AS mem_usage, "+
 					"AVG(disk_usage) AS disk_usage, "+
-					"CAST(AVG(net_in_bytes) AS INTEGER) AS net_in_bytes, "+
-					"CAST(AVG(net_out_bytes) AS INTEGER) AS net_out_bytes, "+
-					"CAST(AVG(net_in_speed) AS INTEGER) AS net_in_speed, "+
-					"CAST(AVG(net_out_speed) AS INTEGER) AS net_out_speed, "+
+					"CAST(AVG(net_in_bytes) AS BIGINT) AS net_in_bytes, "+
+					"CAST(AVG(net_out_bytes) AS BIGINT) AS net_out_bytes, "+
+					"CAST(AVG(net_in_speed) AS BIGINT) AS net_in_speed, "+
+					"CAST(AVG(net_out_speed) AS BIGINT) AS net_out_speed, "+
 					"AVG(load1) AS load1, "+
 					"AVG(load5) AS load5, "+
 					"AVG(load15) AS load15, "+
-					"CAST(AVG(tcp_conns) AS INTEGER) AS tcp_conns, "+
-					"CAST(AVG(udp_conns) AS INTEGER) AS udp_conns, "+
-					"CAST(MAX(uptime) AS INTEGER) AS uptime",
+					"CAST(AVG(tcp_conns) AS BIGINT) AS tcp_conns, "+
+					"CAST(AVG(udp_conns) AS BIGINT) AS udp_conns, "+
+					"CAST(MAX(uptime) AS BIGINT) AS uptime",
 				nodeID, bucketExpr,
 			),
 		).
