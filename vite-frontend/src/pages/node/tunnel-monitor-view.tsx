@@ -31,6 +31,7 @@ import {
   getTunnelMetrics,
   getMonitorTunnelQuality,
   getMonitorTunnelQualityHistory,
+  getConfigByName,
 } from "@/api";
 
 import { Button } from "@/shadcn-bridge/heroui/button";
@@ -51,6 +52,9 @@ interface TunnelMonitorViewProps {
 }
 
 const QUALITY_POLL_INTERVAL = 1_000; // 1 second
+const MONITOR_TUNNEL_QUALITY_ENABLED_CONFIG_KEY = "monitor_tunnel_quality_enabled";
+const MONITOR_TUNNEL_QUALITY_ENABLED_EVENT =
+  "monitorTunnelQualityEnabledChanged";
 
 const formatTimestamp = (ts: number, rangeMs?: number): string => {
   const date = new Date(ts);
@@ -72,8 +76,6 @@ const formatTimestamp = (ts: number, rangeMs?: number): string => {
   });
 };
 
-
-/** Render a colored latency value with appropriate visual cue */
 function LatencyDisplay({ value, loading }: { value?: number; loading?: boolean }) {
   if (loading) {
     return <RefreshCw className="w-3 h-3 animate-spin inline text-primary" />;
@@ -90,7 +92,6 @@ function LatencyDisplay({ value, loading }: { value?: number; loading?: boolean 
   return <span className={`font-mono text-xs font-semibold ${colorClass}`}>{ms}ms</span>;
 }
 
-/** Animated pulse dot for live status */
 function LiveDot() {
   return (
     <span className="relative flex h-2 w-2">
@@ -172,8 +173,6 @@ function UptimeHistoryBar({
     </div>
   );
 }
-
-/* ─── Module-level constants & memoized sub-components ────────────── */
 
 const TIME_RANGE_OPTIONS = [
   { key: String(15 * 60 * 1000), label: "15分钟" },
@@ -340,6 +339,8 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
   const initialHistoryFetched = useRef(false);
   const [qualityLoading, setQualityLoading] = useState(false);
   const qualityTimerRef = useRef<number | null>(null);
+  const [monitorTunnelQualityEnabled, setMonitorTunnelQualityEnabled] =
+    useState(true);
 
   // Detail view state
   const [detailTunnelId, setDetailTunnelId] = useState<number | null>(null);
@@ -387,9 +388,25 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
     }
   }, []);
 
+  const loadMonitorTunnelQualityEnabled = useCallback(async () => {
+    try {
+      const response = await getConfigByName(
+        MONITOR_TUNNEL_QUALITY_ENABLED_CONFIG_KEY,
+      );
+      setMonitorTunnelQualityEnabled(
+        typeof response.data?.value === "string"
+          ? response.data.value === "true"
+          : true,
+      );
+    } catch {
+      setMonitorTunnelQualityEnabled(true);
+    }
+  }, []);
+
   useEffect(() => {
     void loadTunnels();
-  }, [loadTunnels]);
+    void loadMonitorTunnelQualityEnabled();
+  }, [loadMonitorTunnelQualityEnabled, loadTunnels]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -399,7 +416,32 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
     return () => window.clearInterval(timer);
   }, [loadTunnels]);
 
-  // --- Initial history load ---
+  useEffect(() => {
+    const handleMonitorTunnelQualityEnabledChanged = (event: Event) => {
+      const enabled = (event as CustomEvent<{ enabled?: boolean }>).detail?.enabled;
+      if (typeof enabled === "boolean") {
+        setMonitorTunnelQualityEnabled(enabled);
+        if (!enabled) {
+          setQualityLoading(false);
+        }
+      } else {
+        void loadMonitorTunnelQualityEnabled();
+      }
+    };
+
+    window.addEventListener(
+      MONITOR_TUNNEL_QUALITY_ENABLED_EVENT,
+      handleMonitorTunnelQualityEnabledChanged as EventListener,
+    );
+
+    return () => {
+      window.removeEventListener(
+        MONITOR_TUNNEL_QUALITY_ENABLED_EVENT,
+        handleMonitorTunnelQualityEnabledChanged as EventListener,
+      );
+    };
+  }, [loadMonitorTunnelQualityEnabled]);
+
   useEffect(() => {
     if (tunnels.length > 0 && !initialHistoryFetched.current) {
       initialHistoryFetched.current = true;
@@ -472,10 +514,22 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
   }, []);
 
   useEffect(() => {
+    if (!monitorTunnelQualityEnabled) {
+      return;
+    }
+
     void loadQuality();
-  }, [loadQuality]);
+  }, [loadQuality, monitorTunnelQualityEnabled]);
 
   useEffect(() => {
+    if (!monitorTunnelQualityEnabled) {
+      if (qualityTimerRef.current) {
+        window.clearInterval(qualityTimerRef.current);
+        qualityTimerRef.current = null;
+      }
+      return;
+    }
+
     qualityTimerRef.current = window.setInterval(() => {
       void loadQuality({ silent: true });
     }, QUALITY_POLL_INTERVAL);
@@ -483,9 +537,10 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
     return () => {
       if (qualityTimerRef.current) {
         window.clearInterval(qualityTimerRef.current);
+        qualityTimerRef.current = null;
       }
     };
-  }, [loadQuality]);
+  }, [loadQuality, monitorTunnelQualityEnabled]);
 
   // --- Load quality history for detail chart ---
   const loadQualityHistory = useCallback(
@@ -549,21 +604,35 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
 
   useEffect(() => {
     if (detailTunnelId) {
-      void loadQualityHistory(detailTunnelId);
       void loadTunnelMetrics(detailTunnelId);
+      if (monitorTunnelQualityEnabled) {
+        void loadQualityHistory(detailTunnelId);
+      }
     }
-  }, [detailTunnelId, loadQualityHistory, loadTunnelMetrics]);
+  }, [
+    detailTunnelId,
+    loadQualityHistory,
+    loadTunnelMetrics,
+    monitorTunnelQualityEnabled,
+  ]);
 
   // Auto-refresh detail charts
   useEffect(() => {
     if (!detailTunnelId) return;
     const timer = window.setInterval(() => {
-      void loadQualityHistory(detailTunnelId, { silent: true });
+      if (monitorTunnelQualityEnabled) {
+        void loadQualityHistory(detailTunnelId, { silent: true });
+      }
       void loadTunnelMetrics(detailTunnelId, { silent: true });
     }, 30_000);
 
     return () => window.clearInterval(timer);
-  }, [detailTunnelId, loadQualityHistory, loadTunnelMetrics]);
+  }, [
+    detailTunnelId,
+    loadQualityHistory,
+    loadTunnelMetrics,
+    monitorTunnelQualityEnabled,
+  ]);
 
   // Memoize chart data so React.memo sub-components see stable references
   const qualityChartData = useMemo(
@@ -607,10 +676,6 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
     return latest > 0 ? new Date(latest).toLocaleTimeString("zh-CN") : null;
   }, [qualityMap]);
 
-  // =====================
-  // RENDER
-  // =====================
-
   if (accessDenied) {
     return (
       <Card>
@@ -628,7 +693,6 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
     );
   }
 
-  // ===== DETAIL VIEW =====
   if (detailTunnelId && detailTunnel) {
     const quality = qualityMap[detailTunnelId];
 
@@ -693,8 +757,17 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
 
         {/* Auto-probe status */}
         <div className="flex items-center gap-2 text-xs text-default-500">
-          <LiveDot />
-          <span>自动探测中（每秒测试，30秒上报）</span>
+          {monitorTunnelQualityEnabled ? (
+            <>
+              <LiveDot />
+              <span>自动探测中（每秒测试，30秒上报）</span>
+            </>
+          ) : (
+            <>
+              <WifiOff className="w-3.5 h-3.5 text-warning" />
+              <span>实时隧道质量检测已关闭</span>
+            </>
+          )}
           {quality?.timestamp && (
             <span className="text-default-400">
               · 最近更新: {new Date(quality.timestamp).toLocaleTimeString("zh-CN")}
@@ -735,12 +808,26 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3 mb-1">
         <Chip color="primary" size="sm" variant="flat">隧道 {tunnelStats.enabled}/{tunnelStats.total}</Chip>
-        {lastQualityUpdate && (
+        {lastQualityUpdate ? (
           <div className="flex items-center gap-1.5 text-xs text-default-500">
-            <LiveDot />
-            <span>每秒探测 · 更新于 {lastQualityUpdate}</span>
+            {monitorTunnelQualityEnabled ? (
+              <>
+                <LiveDot />
+                <span>每秒探测 · 更新于 {lastQualityUpdate}</span>
+              </>
+            ) : (
+              <>
+                <WifiOff className="w-3.5 h-3.5 text-warning" />
+                <span>实时质量检测已关闭 · 最近更新于 {lastQualityUpdate}</span>
+              </>
+            )}
           </div>
-        )}
+        ) : !monitorTunnelQualityEnabled ? (
+          <div className="flex items-center gap-1.5 text-xs text-default-500">
+            <WifiOff className="w-3.5 h-3.5 text-warning" />
+            <span>实时质量检测已关闭</span>
+          </div>
+        ) : null}
         <div className="ml-auto">
           <Button isLoading={tunnelsLoading} size="sm" variant="flat" onPress={() => loadTunnels()}>
             <RefreshCw className="w-4 h-4 mr-1" />
@@ -812,11 +899,17 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
                       <span className="text-[11px] text-danger truncate">{quality.errorMessage}</span>
                     ) : quality?.timestamp ? (
                       <span className="text-[11px] text-default-500 flex items-center gap-1">
-                        <LiveDot />
+                        {monitorTunnelQualityEnabled ? (
+                          <LiveDot />
+                        ) : (
+                          <WifiOff className="w-3 h-3 text-warning" />
+                        )}
                         {new Date(quality.timestamp).toLocaleTimeString("zh-CN")}
                       </span>
                     ) : (
-                      <span className="text-[11px] text-default-400">等待探测...</span>
+                      <span className="text-[11px] text-default-400">
+                        {monitorTunnelQualityEnabled ? "等待探测..." : "实时检测已关闭"}
+                      </span>
                     )}
                   </div>
                 </CardBody>
@@ -870,11 +963,17 @@ export function TunnelMonitorView({ viewMode = "grid" }: TunnelMonitorViewProps)
                     <TableCell>
                       {quality?.timestamp ? (
                         <span className="text-xs text-default-500 flex items-center gap-1 whitespace-nowrap">
-                          <LiveDot />
+                          {monitorTunnelQualityEnabled ? (
+                            <LiveDot />
+                          ) : (
+                            <WifiOff className="w-3.5 h-3.5 text-warning" />
+                          )}
                           {new Date(quality.timestamp).toLocaleTimeString("zh-CN")}
                         </span>
                       ) : (
-                        <span className="text-xs text-default-400">-</span>
+                        <span className="text-xs text-default-400">
+                          {monitorTunnelQualityEnabled ? "-" : "实时检测已关闭"}
+                        </span>
                       )}
                     </TableCell>
                   </TableRow>

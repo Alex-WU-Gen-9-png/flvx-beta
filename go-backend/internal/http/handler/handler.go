@@ -46,6 +46,8 @@ type Handler struct {
 	qualityProber *tunnelQualityProber
 }
 
+const monitorTunnelQualityEnabledConfigKey = "monitor_tunnel_quality_enabled"
+
 type loginRequest struct {
 	Username  string `json:"username"`
 	Password  string `json:"password"`
@@ -886,9 +888,30 @@ func normalizeAndValidateConfigValue(key, value string) (string, error) {
 		}
 
 		return pngDataURLPrefix + payload, nil
+	case monitorTunnelQualityEnabledConfigKey:
+		normalized := strings.TrimSpace(strings.ToLower(value))
+		switch normalized {
+		case "true", "false":
+			return normalized, nil
+		default:
+			return "", fmt.Errorf("隧道质量检测开关配置值无效")
+		}
 	default:
 		return value, nil
 	}
+}
+
+func (h *Handler) isTunnelQualityMonitoringEnabled() bool {
+	if h == nil || h.repo == nil {
+		return true
+	}
+
+	cfg, err := h.repo.GetConfigByName(monitorTunnelQualityEnabledConfigKey)
+	if err != nil || cfg == nil {
+		return true
+	}
+
+	return strings.TrimSpace(strings.ToLower(cfg.Value)) != "false"
 }
 
 func (h *Handler) userPackage(w http.ResponseWriter, r *http.Request) {

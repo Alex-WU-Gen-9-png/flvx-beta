@@ -48,11 +48,8 @@ type tunnelQualityProber struct {
 
 // newTunnelQualityProber creates a new prober (not yet running).
 func newTunnelQualityProber(h *Handler) *tunnelQualityProber {
-	ctx, cancel := context.WithCancel(context.Background())
 	return &tunnelQualityProber{
 		handler:  h,
-		ctx:      ctx,
-		cancel:   cancel,
 		interval: tunnelQualityProbeInterval,
 	}
 }
@@ -66,6 +63,10 @@ func (p *tunnelQualityProber) Start(ctx context.Context) {
 
 // Stop halts the background probe loop.
 func (p *tunnelQualityProber) Stop() {
+	if p == nil || p.cancel == nil {
+		return
+	}
+
 	p.cancel()
 }
 
@@ -106,8 +107,20 @@ func (p *tunnelQualityProber) loop() {
 	}
 }
 
+func (p *tunnelQualityProber) isEnabled() bool {
+	if p == nil || p.handler == nil {
+		return true
+	}
+
+	return p.handler.isTunnelQualityMonitoringEnabled()
+}
+
 // maybePrune deletes old quality rows periodically (mirrors PruneServiceMonitorResults).
 func (p *tunnelQualityProber) maybePrune() {
+	if !p.isEnabled() {
+		return
+	}
+
 	now := time.Now().UnixMilli()
 	if p.lastPrune > 0 && now-p.lastPrune < int64(tunnelQualityPruneInterval/time.Millisecond) {
 		return
@@ -126,6 +139,10 @@ func (p *tunnelQualityProber) maybePrune() {
 }
 
 func (p *tunnelQualityProber) probeAll() {
+	if !p.isEnabled() {
+		return
+	}
+
 	// Skip if previous probe round is still running (interval < timeout guard)
 	if !atomic.CompareAndSwapInt32(&p.probing, 0, 1) {
 		return
