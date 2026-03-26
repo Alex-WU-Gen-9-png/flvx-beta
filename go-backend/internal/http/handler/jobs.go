@@ -66,9 +66,11 @@ func (h *Handler) runHealthChecks(ctx context.Context) {
 
 func (h *Handler) runTunnelQualityProber(ctx context.Context) {
 	defer h.jobsWG.Done()
-	if h.qualityProber != nil {
-		h.qualityProber.Start(ctx)
+	if h == nil || h.qualityProber == nil || !h.isTunnelQualityMonitoringEnabled() {
+		return
 	}
+
+	h.qualityProber.Start(ctx)
 }
 
 func (h *Handler) runHourlyStatsLoop(ctx context.Context) {
