@@ -3464,12 +3464,24 @@ func selectTunnelDialHost(fromNode, toNode *nodeRecord, ipPreference string, con
 			}
 		}
 	default:
+		// 同版本优先
 		if fromV4 && toV4 {
 			if host := pickNodeAddressV4(toNode); host != "" {
 				return host, nil
 			}
 		}
 		if fromV6 && toV6 {
+			if host := pickNodeAddressV6(toNode); host != "" {
+				return host, nil
+			}
+		}
+		// 跨版本支持：v6入v4出 / v4入v6出
+		if fromV6 && toV4 {
+			if host := pickNodeAddressV4(toNode); host != "" {
+				return host, nil
+			}
+		}
+		if fromV4 && toV6 {
 			if host := pickNodeAddressV6(toNode); host != "" {
 				return host, nil
 			}
