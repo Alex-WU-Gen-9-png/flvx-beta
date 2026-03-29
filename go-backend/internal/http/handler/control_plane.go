@@ -1261,7 +1261,7 @@ func (h *Handler) appendPathDiagnosis(results *[]map[string]interface{}, nodeCac
 	if fromNode.IsRemote == 1 {
 		pingData, pingErr = h.tcpPingViaRemoteNode(fromNode, targetIP, targetPort, options)
 	} else {
-		pingData, pingErr = h.tcpPingViaNode(fromNodeID, targetIP, targetPort, options)
+		pingData, pingErr = h.tcpPingViaNode(fromNode, targetIP, targetPort, options)
 	}
 	if pingErr != nil {
 		item["success"] = false
@@ -1357,19 +1357,26 @@ func (h *Handler) listChainNodesForTunnel(tunnelID int64) ([]chainNodeRecord, er
 	return h.repo.ListChainNodesForTunnel(tunnelID)
 }
 
-func (h *Handler) tcpPingViaNode(nodeID int64, ip string, port int, options diagnosisExecOptions) (map[string]interface{}, error) {
+func (h *Handler) tcpPingViaNode(node *nodeRecord, ip string, port int, options diagnosisExecOptions) (map[string]interface{}, error) {
+	if node == nil {
+		return nil, errors.New("节点不存在")
+	}
 	if options.commandTimeout <= 0 {
 		options.commandTimeout = diagnosisCommandTimeout
 	}
 	if options.pingTimeoutMS <= 0 {
 		options.pingTimeoutMS = int(diagnosisCommandTimeout / time.Millisecond)
 	}
-	res, err := h.sendNodeCommandWithTimeout(nodeID, "TcpPing", map[string]interface{}{
+	cmdData := map[string]interface{}{
 		"ip":      ip,
 		"port":    port,
 		"count":   4,
 		"timeout": options.pingTimeoutMS,
-	}, options.commandTimeout, false, false)
+	}
+	if ifaceName := strings.TrimSpace(node.InterfaceName); ifaceName != "" {
+		cmdData["interface"] = ifaceName
+	}
+	res, err := h.sendNodeCommandWithTimeout(node.ID, "TcpPing", cmdData, options.commandTimeout, false, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1397,10 +1404,11 @@ func (h *Handler) tcpPingViaRemoteNode(node *nodeRecord, ip string, port int, op
 
 	fc := client.NewFederationClientWithTimeout(options.commandTimeout)
 	return fc.Diagnose(remoteURL, remoteToken, h.federationLocalDomain(), client.RuntimeDiagnoseRequest{
-		IP:      strings.TrimSpace(ip),
-		Port:    port,
-		Count:   4,
-		Timeout: options.pingTimeoutMS,
+		IP:        strings.TrimSpace(ip),
+		Port:      port,
+		Count:     4,
+		Timeout:   options.pingTimeoutMS,
+		Interface: strings.TrimSpace(node.InterfaceName),
 	})
 }
 

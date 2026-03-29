@@ -111,6 +111,7 @@ type TcpPingRequest struct {
 	Port      int    `json:"port"`
 	Count     int    `json:"count"`
 	Timeout   int    `json:"timeout"` // 超时时间(毫秒)
+	Interface string `json:"interface,omitempty"` // 指定出口网络接口名称
 	RequestId string `json:"requestId,omitempty"`
 }
 
@@ -1652,8 +1653,7 @@ func (w *WebSocketReporter) handleTcpPing(data interface{}) (TcpPingResponse, er
 		req.Timeout = 5000 // 默认5秒超时
 	}
 
-	// 执行TCP ping操作
-	avgTime, packetLoss, err := tcpPingHost(req.IP, req.Port, req.Count, req.Timeout)
+	avgTime, packetLoss, err := tcpPingHost(req.IP, req.Port, req.Count, req.Timeout, req.Interface)
 
 	response := TcpPingResponse{
 		IP:        req.IP,
@@ -1877,22 +1877,43 @@ func icmpPing(target string, timeout time.Duration) (time.Duration, error) {
 	}
 }
 
-// tcpPingHost 执行TCP连接测试，返回平均连接时间和失败率
-func tcpPingHost(ip string, port int, count int, timeoutMs int) (float64, float64, error) {
+func tcpPingHost(ip string, port int, count int, timeoutMs int, ifaceName string) (float64, float64, error) {
 	var totalTime float64
 	var successCount int
 
 	timeout := time.Duration(timeoutMs) * time.Millisecond
-
-	// 使用net.JoinHostPort来正确处理IPv4、IPv6和域名
-	// 它会自动为IPv6地址添加方括号
 	target := net.JoinHostPort(ip, fmt.Sprintf("%d", port))
 
-	fmt.Printf("🔍 开始TCP ping测试: %s，次数: %d，超时: %dms\n", target, count, timeoutMs)
+	var localAddr net.Addr
+	if ifaceName != "" {
+		ife, err := net.InterfaceByName(ifaceName)
+		if err != nil {
+			return 0, 100.0, fmt.Errorf("获取网络接口 %s 失败: %v", ifaceName, err)
+		}
+		addrs, err := ife.Addrs()
+		if err != nil {
+			return 0, 100.0, fmt.Errorf("获取接口 %s 地址失败: %v", ifaceName, err)
+		}
+		if len(addrs) == 0 {
+			return 0, 100.0, fmt.Errorf("接口 %s 没有可用地址", ifaceName)
+		}
+		for _, addr := range addrs {
+			if ipNet, ok := addr.(*net.IPNet); ok && ipNet.IP.To4() != nil {
+				localAddr = &net.TCPAddr{IP: ipNet.IP, Port: 0}
+				break
+			}
+		}
+		if localAddr == nil {
+			if ipNet, ok := addrs[0].(*net.IPNet); ok {
+				localAddr = &net.TCPAddr{IP: ipNet.IP, Port: 0}
+			}
+		}
+		fmt.Printf("🔍 开始TCP ping测试: %s，次数: %d，超时: %dms，出口接口: %s (%v)\n", target, count, timeoutMs, ifaceName, localAddr)
+	} else {
+		fmt.Printf("🔍 开始TCP ping测试: %s，次数: %d，超时: %dms\n", target, count, timeoutMs)
+	}
 
-	// 如果是域名，先解析一次DNS，避免每次连接都重新解析导致延迟累加
 	if net.ParseIP(ip) == nil {
-		// 是域名，需要解析
 		fmt.Printf("🔍 检测到域名，正在解析DNS...\n")
 		dnsStart := time.Now()
 
@@ -1909,18 +1930,21 @@ func tcpPingHost(ip string, port int, count int, timeoutMs int) (float64, float6
 		fmt.Printf("✅ DNS解析完成 (%.2fms)，解析到 %d 个IP: %v\n",
 			dnsDuration.Seconds()*1000, len(addrs), addrs)
 
-		// 使用第一个解析到的IP进行测试
 		target = net.JoinHostPort(addrs[0], fmt.Sprintf("%d", port))
 		fmt.Printf("🎯 使用IP地址进行测试: %s\n", target)
 	} else {
 		fmt.Printf("🎯 使用IP地址进行测试: %s\n", target)
 	}
 
+	dialer := &net.Dialer{
+		Timeout:   timeout,
+		LocalAddr: localAddr,
+	}
+
 	for i := 0; i < count; i++ {
 		start := time.Now()
 
-		// 创建带超时的TCP连接
-		conn, err := net.DialTimeout("tcp", target, timeout)
+		conn, err := dialer.Dial("tcp", target)
 
 		elapsed := time.Since(start)
 
@@ -1929,11 +1953,10 @@ func tcpPingHost(ip string, port int, count int, timeoutMs int) (float64, float6
 		} else {
 			fmt.Printf("  第%d次连接成功: %.2fms\n", i+1, elapsed.Seconds()*1000)
 			conn.Close()
-			totalTime += elapsed.Seconds() * 1000 // 转换为毫秒
+			totalTime += elapsed.Seconds() * 1000
 			successCount++
 		}
 
-		// 如果不是最后一次，等待一下再进行下次测试
 		if i < count-1 {
 			time.Sleep(100 * time.Millisecond)
 		}

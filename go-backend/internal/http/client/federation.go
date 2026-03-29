@@ -71,10 +71,11 @@ type RuntimeReleaseRoleRequest struct {
 }
 
 type RuntimeDiagnoseRequest struct {
-	IP      string `json:"ip"`
-	Port    int    `json:"port"`
-	Count   int    `json:"count"`
-	Timeout int    `json:"timeout"`
+	IP        string `json:"ip"`
+	Port      int    `json:"port"`
+	Count     int    `json:"count"`
+	Timeout   int    `json:"timeout"`
+	Interface string `json:"interface,omitempty"`
 }
 
 type RuntimeNodeCommandRequest struct {
