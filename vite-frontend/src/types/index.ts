@@ -18,6 +18,18 @@ export interface User {
   createdTime?: number; // 创建时间戳
   inFlow?: number; // 下载流量(字节)
   outFlow?: number; // 上传流量(字节)
+  dailyQuotaGB?: number;
+  monthlyQuotaGB?: number;
+  dailyUsedBytes?: number;
+  monthlyUsedBytes?: number;
+  disabledByQuota?: number;
+  quotaDisabledAt?: number;
+}
+
+export interface UserGroup {
+  id: number;
+  name: string;
+  status: number;
 }
 
 export interface UserForm {
@@ -27,9 +39,12 @@ export interface UserForm {
   pwd?: string;
   status: number;
   flow: number;
+  dailyQuotaGB: number;
+  monthlyQuotaGB: number;
   num: number;
   expTime: Date | null;
   flowResetTime: number;
+  groupIds?: number[];
 }
 
 export interface UserTunnel {
@@ -81,7 +96,7 @@ export interface Tunnel {
 export interface SpeedLimit {
   id: number;
   name: string;
-  tunnelId: number;
+  speed?: number;
   uploadSpeed: number;
   downloadSpeed: number;
 }

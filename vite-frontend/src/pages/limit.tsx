@@ -1,56 +1,78 @@
-import { useState, useEffect } from "react";
-import { Card, CardBody, CardHeader } from "@heroui/card";
-import { Button } from "@heroui/button";
-import { Input } from "@heroui/input";
-import { Select, SelectItem } from "@heroui/select";
+import { useState, useEffect, useMemo } from "react";
+import toast from "react-hot-toast";
+
+import {
+  AnimatedPage,
+  StaggerList,
+  StaggerItem,
+} from "@/components/animated-page";
+import { SearchBar } from "@/components/search-bar";
+import { Card, CardBody, CardHeader } from "@/shadcn-bridge/heroui/card";
+import { Button } from "@/shadcn-bridge/heroui/button";
+import { Input } from "@/shadcn-bridge/heroui/input";
 import {
   Modal,
   ModalContent,
   ModalHeader,
   ModalBody,
   ModalFooter,
-} from "@heroui/modal";
-import { Chip } from "@heroui/chip";
-import { Spinner } from "@heroui/spinner";
-import toast from "react-hot-toast";
-
+} from "@/shadcn-bridge/heroui/modal";
+import { Chip } from "@/shadcn-bridge/heroui/chip";
+import { LayoutGrid, List } from "lucide-react";
+import {
+  Table,
+  TableHeader,
+  TableColumn,
+  TableBody,
+  TableRow,
+  TableCell,
+} from "@/shadcn-bridge/heroui/table";
 import {
   createSpeedLimit,
   getSpeedLimitList,
   updateSpeedLimit,
   deleteSpeedLimit,
-  getTunnelList,
 } from "@/api";
+import { PageLoadingState } from "@/components/page-state";
+import { useLocalStorageState } from "@/hooks/use-local-storage-state";
 
 interface SpeedLimitRule {
   id: number;
   name: string;
   speed: number;
   status: number;
-  tunnelId: number;
-  tunnelName: string;
   createdTime: string;
   updatedTime: string;
-}
-
-interface Tunnel {
-  id: number;
-  name: string;
 }
 
 interface SpeedLimitForm {
   id?: number;
   name: string;
   speed: number;
-  tunnelId: number | null;
-  tunnelName: string;
   status: number;
 }
 
 export default function LimitPage() {
   const [loading, setLoading] = useState(true);
   const [rules, setRules] = useState<SpeedLimitRule[]>([]);
-  const [tunnels, setTunnels] = useState<Tunnel[]>([]);
+  const [searchKeyword, setSearchKeyword] = useLocalStorageState(
+    "limit-search-keyword",
+    "",
+  );
+  const [isSearchVisible, setIsSearchVisible] = useState(false);
+  const [viewMode, setViewMode] = useLocalStorageState<"list" | "grid">(
+    "limit-view-mode",
+    "grid",
+  );
+
+  const filteredRules = useMemo(() => {
+    if (!searchKeyword.trim()) return rules;
+    const lowerKeyword = searchKeyword.toLowerCase();
+
+    return rules.filter(
+      (r) => r.name && r.name.toLowerCase().includes(lowerKeyword),
+    );
+  }, [rules, searchKeyword]);
 
   // 模态框状态
   const [modalOpen, setModalOpen] = useState(false);
@@ -64,8 +86,6 @@ export default function LimitPage() {
   const [form, setForm] = useState<SpeedLimitForm>({
     name: "",
     speed: 100,
-    tunnelId: null,
-    tunnelName: "",
     status: 1,
   });
 
@@ -80,20 +100,12 @@ export default function LimitPage() {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [rulesRes, tunnelsRes] = await Promise.all([
-        getSpeedLimitList(),
-        getTunnelList(),
-      ]);
+      const rulesRes = await getSpeedLimitList();
 
       if (rulesRes.code === 0) {
         setRules(rulesRes.data || []);
       } else {
         toast.error(rulesRes.msg || "获取限速规则失败");
-      }
-
-      if (tunnelsRes.code === 0) {
-        setTunnels(tunnelsRes.data || []);
-      } else {
       }
     } catch {
       toast.error("加载数据失败");
@@ -116,10 +128,6 @@ export default function LimitPage() {
       newErrors.speed = "请输入有效的速度限制（≥1 Mbps）";
     }
 
-    if (!form.tunnelId) {
-      newErrors.tunnelId = "请选择要绑定的隧道";
-    }
-
     setErrors(newErrors);
 
     return Object.keys(newErrors).length === 0;
@@ -131,8 +139,6 @@ export default function LimitPage() {
     setForm({
       name: "",
       speed: 100,
-      tunnelId: null,
-      tunnelName: "",
       status: 1,
     });
     setErrors({});
@@ -146,8 +152,6 @@ export default function LimitPage() {
       id: rule.id,
       name: rule.name,
       speed: rule.speed,
-      tunnelId: rule.tunnelId,
-      tunnelName: rule.tunnelName,
       status: rule.status,
     });
     setErrors({});
@@ -188,14 +192,22 @@ export default function LimitPage() {
 
     setSubmitLoading(true);
     try {
-      let res;
+      let res: { code: number; msg: string };
+      const payload = {
+        id: form.id,
+        name: form.name,
+        speed: form.speed,
+        status: form.status,
+      };
 
       if (isEdit) {
-        res = await updateSpeedLimit(form);
+        res = await updateSpeedLimit(payload);
       } else {
-        const createData = { ...form };
-
-        delete createData.id;
+        const createData = {
+          name: payload.name,
+          speed: payload.speed,
+          status: payload.status,
+        };
 
         res = await createSpeedLimit(createData);
       }
@@ -215,157 +227,199 @@ export default function LimitPage() {
   };
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="flex items-center gap-3">
-          <Spinner size="sm" />
-          <span className="text-default-600">正在加载...</span>
-        </div>
-      </div>
-    );
+    return <PageLoadingState message="正在加载..." />;
   }
 
   return (
-    <div className="px-3 lg:px-6 py-8">
-      {/* 页面头部 */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex-1" />
+    <AnimatedPage className="px-3 lg:px-6 py-8">
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between mb-6 gap-3">
+        <div className="flex-1 max-w-sm flex items-center gap-2">
+          <SearchBar
+            isVisible={isSearchVisible}
+            placeholder="搜索规则名称"
+            value={searchKeyword}
+            onChange={setSearchKeyword}
+            onClose={() => setIsSearchVisible(false)}
+            onOpen={() => setIsSearchVisible(true)}
+          />
+        </div>
 
-        <Button color="primary" size="sm" variant="flat" onPress={handleAdd}>
-          新增
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            isIconOnly
+            size="sm"
+            variant="flat"
+            onPress={() => setViewMode(viewMode === "list" ? "grid" : "list")}
+          >
+            {viewMode === "list" ? <LayoutGrid className="w-4 h-4" /> : <List className="w-4 h-4" />}
+          </Button>
+          <Button color="primary" size="sm" variant="flat" onPress={handleAdd}>
+            新增
+          </Button>
+        </div>
       </div>
 
       {/* 统一卡片网格 */}
-      {rules.length > 0 ? (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
-          {rules.map((rule) => (
-            <Card
-              key={rule.id}
-              className="shadow-sm border border-gray-200 dark:border-gray-700"
-            >
-              <CardHeader className="pb-3">
-                <div className="flex justify-between items-start w-full">
-                  <div>
-                    <h3 className="font-semibold text-foreground">
-                      {rule.name}
-                    </h3>
-                  </div>
-                  <Chip
-                    color={rule.status === 1 ? "success" : "danger"}
-                    size="sm"
-                    variant="flat"
-                  >
-                    {rule.status === 1 ? "运行" : "异常"}
-                  </Chip>
-                </div>
-              </CardHeader>
-              <CardBody className="pt-0">
-                <div className="space-y-3">
-                  <div className="flex justify-between items-center">
-                    <span className="text-small text-default-600">
-                      速度限制
-                    </span>
-                    <Chip color="secondary" size="sm" variant="flat">
+      {filteredRules.length > 0 ? (
+        viewMode === "list" ? (
+          <Card>
+          <Table
+            aria-label="限速规则列表"
+            className="overflow-x-auto min-w-full"
+            classNames={{
+              th: "bg-default-100/50 text-default-600 font-semibold text-sm border-b border-divider py-3 uppercase tracking-wider",
+              td: "py-3 border-b border-divider/50 group-data-[last=true]:border-b-0",
+              tr: "hover:bg-default-50/50 transition-colors",
+            }}
+          >
+            <TableHeader>
+              <TableColumn>规则名称</TableColumn>
+              <TableColumn>速度限制</TableColumn>
+              <TableColumn>操作</TableColumn>
+            </TableHeader>
+            <TableBody items={filteredRules}>
+              {(rule) => (
+                <TableRow key={rule.id}>
+                  <TableCell>
+                    <div className="flex items-center gap-2">
+                       <div
+                         className={`shrink-0 w-2 h-2 rounded-full ${
+                           rule.status === 1 ? "bg-success" : "bg-danger"
+                         }`}
+                       />
+                       <span className="font-medium text-foreground text-sm">
+                         {rule.name}
+                       </span>
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <span className="text-sm font-mono text-default-600">
                       {rule.speed} Mbps
+                    </span>
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex flex-wrap items-center gap-1.5 min-w-max">
+                      <Button
+                        className="h-6 px-2 min-w-0 text-xs bg-indigo-50 text-indigo-600 hover:bg-indigo-100 dark:bg-indigo-950/30 dark:text-indigo-400"
+                        size="sm"
+                        variant="flat"
+                        onPress={() => handleEdit(rule)}
+                      >
+                        编辑
+                      </Button>
+                      <Button
+                        className="h-6 px-2 min-w-0 text-xs bg-rose-50 text-rose-600 hover:bg-rose-100 dark:bg-rose-950/30 dark:text-rose-400"
+                        size="sm"
+                        variant="flat"
+                        onPress={() => handleDelete(rule)}
+                      >
+                        删除
+                      </Button>
+                    </div>
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+          </Card>
+        ) : (
+        <StaggerList className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
+          {filteredRules.map((rule) => (
+            <StaggerItem key={rule.id}>
+              <Card className="shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden h-full">
+                <CardHeader className="pb-2 md:pb-2">
+                  <div className="flex justify-between items-start w-full">
+                    <div>
+                      <h3 className="font-semibold text-foreground">
+                        {rule.name}
+                      </h3>
+                    </div>
+                    <Chip
+                      color={rule.status === 1 ? "success" : "danger"}
+                      size="sm"
+                      variant="flat"
+                    >
+                      {rule.status === 1 ? "运行" : "异常"}
                     </Chip>
                   </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-small text-default-600">
-                      绑定隧道
-                    </span>
-                    {rule.tunnelName ? (
-                      <Chip color="primary" size="sm" variant="flat">
-                        {rule.tunnelName}
-                      </Chip>
-                    ) : (
-                      <span className="text-default-400 text-small">
-                        未绑定
+                </CardHeader>
+                <CardBody className="pt-0 pb-3 md:pt-0 md:pb-3">
+                  <div className="space-y-3">
+                    <div className="flex justify-between items-center">
+                      <span className="text-small text-default-600">
+                        速度限制
                       </span>
-                    )}
+                      <Chip color="secondary" size="sm" variant="flat">
+                        {rule.speed} Mbps
+                      </Chip>
+                    </div>
                   </div>
-                </div>
 
-                <div className="flex gap-2 mt-4">
-                  <Button
-                    className="flex-1"
-                    color="primary"
-                    size="sm"
-                    startContent={
-                      <svg
-                        className="w-4 h-4"
-                        fill="currentColor"
-                        viewBox="0 0 20 20"
-                      >
-                        <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
-                      </svg>
-                    }
-                    variant="flat"
-                    onPress={() => handleEdit(rule)}
-                  >
-                    编辑
-                  </Button>
-                  <Button
-                    className="flex-1"
-                    color="danger"
-                    size="sm"
-                    startContent={
-                      <svg
-                        className="w-4 h-4"
-                        fill="currentColor"
-                        viewBox="0 0 20 20"
-                      >
-                        <path
-                          clipRule="evenodd"
-                          d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z"
-                          fillRule="evenodd"
-                        />
-                        <path
-                          clipRule="evenodd"
-                          d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 012 0v4a1 1 0 11-2 0V7zM12 7a1 1 0 012 0v4a1 1 0 11-2 0V7z"
-                          fillRule="evenodd"
-                        />
-                      </svg>
-                    }
-                    variant="flat"
-                    onPress={() => handleDelete(rule)}
-                  >
-                    删除
-                  </Button>
-                </div>
-              </CardBody>
-            </Card>
+                  <div className="flex gap-2 mt-4">
+                    <Button
+                      className="flex-1"
+                      color="primary"
+                      size="sm"
+                      startContent={
+                        <svg
+                          aria-hidden="true"
+                          className="w-4 h-4"
+                          fill="currentColor"
+                          viewBox="0 0 20 20"
+                        >
+                          <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
+                        </svg>
+                      }
+                      variant="flat"
+                      onPress={() => handleEdit(rule)}
+                    >
+                      编辑
+                    </Button>
+                    <Button
+                      className="flex-1"
+                      color="danger"
+                      size="sm"
+                      startContent={
+                        <svg
+                          aria-hidden="true"
+                          className="w-4 h-4"
+                          fill="currentColor"
+                          viewBox="0 0 20 20"
+                        >
+                          <path
+                            clipRule="evenodd"
+                            d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z"
+                            fillRule="evenodd"
+                          />
+                          <path
+                            clipRule="evenodd"
+                            d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 012 0v4a1 1 0 11-2 0V7zM12 7a1 1 0 012 0v4a1 1 0 11-2 0V7z"
+                            fillRule="evenodd"
+                          />
+                        </svg>
+                      }
+                      variant="flat"
+                      onPress={() => handleDelete(rule)}
+                    >
+                      删除
+                    </Button>
+                  </div>
+                </CardBody>
+              </Card>
+            </StaggerItem>
           ))}
-        </div>
+        </StaggerList>
+        )
       ) : (
         /* 空状态 */
-        <Card className="shadow-sm border border-gray-200 dark:border-gray-700">
-          <CardBody className="text-center py-16">
-            <div className="flex flex-col items-center gap-4">
-              <div className="w-16 h-16 bg-default-100 rounded-full flex items-center justify-center">
-                <svg
-                  className="w-8 h-8 text-default-400"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    d="M12 6v6l4 2m6-6a9 9 0 11-18 0 9 9 0 0118 0z"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={1.5}
-                  />
-                </svg>
-              </div>
-              <div>
-                <h3 className="text-lg font-semibold text-foreground">
-                  暂无限速规则
-                </h3>
-                <p className="text-default-500 text-sm mt-1">
-                  还没有创建任何限速规则，点击上方按钮开始创建
-                </p>
-              </div>
-            </div>
+        <Card className="shadow-sm border border-gray-200 dark:border-gray-700 bg-default-50/50">
+          <CardBody className="text-center py-20 flex flex-col items-center justify-center min-h-[240px]">
+            <h3 className="text-xl font-medium text-foreground tracking-tight mb-2">
+              暂无限速规则
+            </h3>
+            <p className="text-default-500 text-sm max-w-xs mx-auto leading-relaxed">
+              还没有创建任何限速规则，点击上方按钮开始创建
+            </p>
           </CardBody>
         </Card>
       )}
@@ -373,6 +427,9 @@ export default function LimitPage() {
       {/* 新增/编辑模态框 */}
       <Modal
         backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={modalOpen}
         placement="center"
         scrollBehavior="outside"
@@ -387,9 +444,7 @@ export default function LimitPage() {
                   {isEdit ? "编辑限速规则" : "新增限速规则"}
                 </h2>
                 <p className="text-small text-default-500">
-                  {isEdit
-                    ? "修改现有限速规则的配置信息"
-                    : "创建新的限速规则并绑定到隧道"}
+                  {isEdit ? "修改现有限速规则的配置信息" : "创建新的限速规则"}
                 </p>
               </ModalHeader>
               <ModalBody>
@@ -428,44 +483,6 @@ export default function LimitPage() {
                       }))
                     }
                   />
-
-                  <Select
-                    description={isEdit ? "编辑时无法修改绑定隧道" : undefined}
-                    errorMessage={errors.tunnelId}
-                    isDisabled={isEdit}
-                    isInvalid={!!errors.tunnelId}
-                    label="绑定隧道"
-                    placeholder="请选择要绑定的隧道"
-                    selectedKeys={
-                      form.tunnelId ? [form.tunnelId.toString()] : []
-                    }
-                    variant="bordered"
-                    onSelectionChange={(keys) => {
-                      const selectedKey = Array.from(keys)[0] as string;
-
-                      if (selectedKey) {
-                        const selectedTunnel = tunnels.find(
-                          (tunnel) => tunnel.id === parseInt(selectedKey),
-                        );
-
-                        setForm((prev) => ({
-                          ...prev,
-                          tunnelId: parseInt(selectedKey),
-                          tunnelName: selectedTunnel?.name || "",
-                        }));
-                      } else {
-                        setForm((prev) => ({
-                          ...prev,
-                          tunnelId: null,
-                          tunnelName: "",
-                        }));
-                      }
-                    }}
-                  >
-                    {tunnels.map((tunnel) => (
-                      <SelectItem key={tunnel.id}>{tunnel.name}</SelectItem>
-                    ))}
-                  </Select>
                 </div>
               </ModalBody>
               <ModalFooter>
@@ -488,6 +505,9 @@ export default function LimitPage() {
       {/* 删除确认模态框 */}
       <Modal
         backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={deleteModalOpen}
         placement="center"
         scrollBehavior="outside"
@@ -528,6 +548,6 @@ export default function LimitPage() {
           )}
         </ModalContent>
       </Modal>
-    </div>
+    </AnimatedPage>
   );
 }

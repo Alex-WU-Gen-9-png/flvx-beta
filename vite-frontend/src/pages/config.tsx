@@ -1,24 +1,45 @@
 import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Button } from "@heroui/button";
-import { Card, CardBody, CardHeader } from "@heroui/card";
-import { Input } from "@heroui/input";
-import { Textarea } from "@heroui/input";
-import { Spinner } from "@heroui/spinner";
-import { Divider } from "@heroui/divider";
-import { Switch } from "@heroui/switch";
-import { Select, SelectItem } from "@heroui/select";
-import { Checkbox, CheckboxGroup } from "@heroui/checkbox";
 import toast from "react-hot-toast";
 
-import { updateConfigs, exportBackup, importBackup, getAnnouncement, updateAnnouncement, type AnnouncementData } from "@/api";
-import { SettingsIcon } from "@/components/icons";
-import { isAdmin } from "@/utils/auth";
+import { Button } from "@/shadcn-bridge/heroui/button";
+import { Card, CardBody, CardHeader } from "@/shadcn-bridge/heroui/card";
+import { Input } from "@/shadcn-bridge/heroui/input";
+import { Textarea } from "@/shadcn-bridge/heroui/input";
+import { Spinner } from "@/shadcn-bridge/heroui/spinner";
+import { Divider } from "@/shadcn-bridge/heroui/divider";
+import { Switch } from "@/shadcn-bridge/heroui/switch";
+import { Select, SelectItem } from "@/shadcn-bridge/heroui/select";
+import { Checkbox } from "@/shadcn-bridge/heroui/checkbox";
 import {
-  getCachedConfigs,
-  clearConfigCache,
-  updateSiteConfig,
-} from "@/config/site";
+  Modal,
+  ModalBody,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
+} from "@/shadcn-bridge/heroui/modal";
+import {
+  updateConfigs,
+  exportBackup,
+  importBackup,
+  getAnnouncement,
+  updateAnnouncement,
+  type AnnouncementData,
+} from "@/api";
+import { BackIcon, SettingsIcon } from "@/components/icons";
+import { ThemeSettings } from "@/components/theme-settings";
+import { isAdmin } from "@/utils/auth";
+import { getCachedConfigs, configCache, updateSiteConfig } from "@/config/site";
+import {
+  type UpdateReleaseChannel,
+  getUpdateReleaseChannel,
+  setUpdateReleaseChannel,
+} from "@/utils/version-update";
+import {
+  convertBrandAssetToPngDataURL,
+  isPngDataURL,
+  type BrandAssetKind,
+} from "@/utils/brand-asset";
 
 // 简单的保存图标组件
 const SaveIcon = ({ className }: { className?: string }) => (
@@ -48,6 +69,19 @@ interface ConfigItem {
   dependsValue?: string; // 依赖的配置项值
 }
 
+const BRAND_PREVIEW_KEYS = ["app_logo", "app_favicon"] as const;
+
+type BrandPreviewKey = (typeof BRAND_PREVIEW_KEYS)[number];
+
+const isBrandPreviewKey = (key: string): key is BrandPreviewKey =>
+  BRAND_PREVIEW_KEYS.includes(key as BrandPreviewKey);
+
+const BRAND_FILE_ACCEPT = "image/png,image/jpeg,image/webp,image/svg+xml";
+
+const toBrandAssetKind = (key: BrandPreviewKey): BrandAssetKind => {
+  return key === "app_logo" ? "logo" : "favicon";
+};
+
 // 网站配置项定义
 const CONFIG_ITEMS: ConfigItem[] = [
   {
@@ -55,7 +89,7 @@ const CONFIG_ITEMS: ConfigItem[] = [
     label: "面板后端地址",
     placeholder: "请输入面板后端IP:PORT",
     description:
-      "格式“ip:port”,用于对接节点时使用,ip是你安装面板服务器的公网ip,端口是安装脚本内输入的后端端口。不要套CDN,不支持https,通讯数据有加密",
+      '格式"ip:port"或"domain:port",用于对接节点时使用。支持套CDN和HTTPS,通讯数据有加密',
     type: "input",
   },
   {
@@ -71,6 +105,30 @@ const CONFIG_ITEMS: ConfigItem[] = [
     placeholder: "请输入应用名称",
     description: "在浏览器标签页和导航栏显示的应用名称",
     type: "input",
+  },
+  {
+    key: "app_logo",
+    label: "网页角标 Logo",
+    description: "用于页面左上角导航角标，上传后会自动转换为 PNG 并持久化保存",
+    type: "input",
+  },
+  {
+    key: "app_favicon",
+    label: "浏览器缩略图标",
+    description: "用于浏览器标签页图标，上传后会自动转换为 PNG 并持久化保存",
+    type: "input",
+  },
+  {
+    key: "forward_compact_mode",
+    label: "规则页面精简模式",
+    description: "开启后，规则页面列表使用 2.1.6-alpha8 样式（全局配置）",
+    type: "switch",
+  },
+  {
+    key: "monitor_tunnel_quality_enabled",
+    label: "实时隧道质量检测",
+    description: "关闭后，前端停止自动刷新，后端停止实时隧道质量探测（全局配置）",
+    type: "switch",
   },
   {
     key: "captcha_enabled",
@@ -98,6 +156,21 @@ const CONFIG_ITEMS: ConfigItem[] = [
   },
 ];
 
+const BACKUP_TYPE_OPTIONS = [
+  { value: "users", label: "用户" },
+  { value: "nodes", label: "节点" },
+  { value: "tunnels", label: "隧道" },
+  { value: "forwards", label: "规则" },
+  { value: "userTunnels", label: "用户隧道权限" },
+  { value: "speedLimits", label: "限速规则" },
+  { value: "tunnelGroups", label: "隧道分组" },
+  { value: "userGroups", label: "用户分组" },
+  { value: "permissions", label: "分组权限" },
+  { value: "configs", label: "系统配置" },
+] as const;
+
+const BACKUP_TYPE_VALUES = BACKUP_TYPE_OPTIONS.map((option) => option.value);
+
 // 初始化时从缓存读取配置，避免闪烁
 const getInitialConfigs = (): Record<string, string> => {
   if (typeof window === "undefined") return {};
@@ -107,8 +180,12 @@ const getInitialConfigs = (): Record<string, string> => {
     "captcha_enabled",
     "cloudflare_site_key",
     "cloudflare_secret_key",
+    "forward_compact_mode",
+    "monitor_tunnel_quality_enabled",
     "ip",
     "panel_domain",
+    "app_logo",
+    "app_favicon",
   ];
   const initialConfigs: Record<string, string> = {};
 
@@ -142,8 +219,12 @@ export default function ConfigPage() {
   const [importTypes, setImportTypes] = useState<string[]>([]);
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [exportSelectorOpen, setExportSelectorOpen] = useState(false);
+  const [importSelectorOpen, setImportSelectorOpen] = useState(false);
   const [importFileName, setImportFileName] = useState("");
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const backupFileInputRef = useRef<HTMLInputElement>(null);
+  const logoFileInputRef = useRef<HTMLInputElement>(null);
+  const faviconFileInputRef = useRef<HTMLInputElement>(null);
 
   const [announcement, setAnnouncement] = useState<AnnouncementData>({
     content: "",
@@ -151,6 +232,30 @@ export default function ConfigPage() {
   });
   const [announcementLoading, setAnnouncementLoading] = useState(true);
   const [announcementSaving, setAnnouncementSaving] = useState(false);
+  const [updateChannel, setUpdateChannel] = useState<UpdateReleaseChannel>(
+    getUpdateReleaseChannel(),
+  );
+  const [previewLoadFailed, setPreviewLoadFailed] = useState<
+    Partial<Record<BrandPreviewKey, boolean>>
+  >({});
+  const [brandUploading, setBrandUploading] = useState<
+    Partial<Record<BrandPreviewKey, boolean>>
+  >({});
+
+  const canGoBack =
+    typeof window !== "undefined" &&
+    typeof window.history.state?.idx === "number" &&
+    window.history.state.idx > 0;
+
+  const handleBack = () => {
+    if (canGoBack) {
+      navigate(-1);
+
+      return;
+    }
+
+    navigate("/profile", { replace: true });
+  };
 
   // 权限检查
   useEffect(() => {
@@ -212,8 +317,7 @@ export default function ConfigPage() {
       if (res.code === 0 && res.data) {
         setAnnouncement(res.data);
       }
-    } catch (error) {
-      console.error("Failed to load announcement:", error);
+    } catch {
     } finally {
       setAnnouncementLoading(false);
     }
@@ -236,10 +340,22 @@ export default function ConfigPage() {
     }
   };
 
+  const handleUpdateChannelChange = (channel: UpdateReleaseChannel) => {
+    setUpdateChannel(channel);
+    setUpdateReleaseChannel(channel);
+    toast.success(
+      `更新通道已切换为${channel === "stable" ? "稳定版" : "开发版"}`,
+    );
+  };
+
   const handleConfigChange = (key: string, value: string) => {
     const newConfigs = { ...configs, [key]: value };
 
     setConfigs(newConfigs);
+
+    if (isBrandPreviewKey(key)) {
+      setPreviewLoadFailed((prev) => ({ ...prev, [key]: false }));
+    }
 
     const hasChangesNow =
       Object.keys(newConfigs).some(
@@ -256,25 +372,40 @@ export default function ConfigPage() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      const response = await updateConfigs(configs);
+      const changedKeys = Object.keys(configs).filter(
+        (key) => configs[key] !== originalConfigs[key],
+      );
+
+      if (changedKeys.length === 0) {
+        setHasChanges(false);
+
+        return;
+      }
+
+      const changedPayload: Record<string, string> = {};
+
+      changedKeys.forEach((key) => {
+        changedPayload[key] = configs[key] || "";
+      });
+
+      const response = await updateConfigs(changedPayload);
 
       if (response.code === 0) {
         toast.success("配置保存成功");
 
-        // 清除所有配置缓存，强制下次重新获取
-        clearConfigCache();
-
-        // 获取变更的配置项
-        const changedKeys = Object.keys(configs).filter(
-          (key) => configs[key] !== originalConfigs[key],
-        );
+        Object.entries(configs).forEach(([key, value]) => {
+          configCache.set(key, value);
+        });
 
         setOriginalConfigs({ ...configs });
         setHasChanges(false);
 
-        // 如果应用名称发生变化，立即更新网站配置
-        if (changedKeys.includes("app_name")) {
-          await updateSiteConfig();
+        if (
+          changedKeys.some((key) =>
+            ["app_name", "app_logo", "app_favicon"].includes(key),
+          )
+        ) {
+          await updateSiteConfig(configs);
         }
 
         // 触发配置更新事件，通知其他组件
@@ -283,6 +414,15 @@ export default function ConfigPage() {
             detail: { changedKeys },
           }),
         );
+
+        // 如果隧道质量检测开关变更，通知 tunnel-monitor-view
+        if (changedKeys.includes("monitor_tunnel_quality_enabled")) {
+          window.dispatchEvent(
+            new CustomEvent("monitorTunnelQualityEnabledChanged", {
+              detail: { enabled: configs["monitor_tunnel_quality_enabled"] === "true" },
+            }),
+          );
+        }
       } else {
         toast.error("保存配置失败: " + response.msg);
       }
@@ -302,6 +442,196 @@ export default function ConfigPage() {
     return configs[item.dependsOn] === item.dependsValue;
   };
 
+  const getBrandInputRef = (key: BrandPreviewKey) => {
+    return key === "app_logo" ? logoFileInputRef : faviconFileInputRef;
+  };
+
+  const triggerBrandFilePicker = (key: BrandPreviewKey) => {
+    if (brandUploading[key]) {
+      return;
+    }
+
+    getBrandInputRef(key).current?.click();
+  };
+
+  const clearBrandAsset = (key: BrandPreviewKey) => {
+    handleConfigChange(key, "");
+    setPreviewLoadFailed((prev) => ({ ...prev, [key]: false }));
+  };
+
+  const handleBrandFileChange = async (
+    key: BrandPreviewKey,
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.target.files?.[0];
+
+    if (!file) {
+      return;
+    }
+
+    setBrandUploading((prev) => ({ ...prev, [key]: true }));
+
+    try {
+      const pngDataURL = await convertBrandAssetToPngDataURL(
+        file,
+        toBrandAssetKind(key),
+      );
+
+      handleConfigChange(key, pngDataURL);
+      toast.success(key === "app_logo" ? "Logo 上传成功" : "Favicon 上传成功");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "图片处理失败，请重试";
+
+      toast.error(message);
+    } finally {
+      setBrandUploading((prev) => ({ ...prev, [key]: false }));
+      event.target.value = "";
+    }
+  };
+
+  const renderBrandPreview = (key: BrandPreviewKey) => {
+    const previewUrl = (configs[key] || "").trim();
+    const appNamePreview = (configs.app_name || "").trim() || "应用名称";
+    const failed = previewLoadFailed[key] === true;
+    const showImage = previewUrl.length > 0 && !failed;
+
+    return (
+      <div className="mt-3 rounded-lg border border-default-200 dark:border-default-100/30 bg-default-50/60 dark:bg-default-100/10 p-3">
+        <p className="text-xs text-default-500">实时预览</p>
+        <div className="mt-2 rounded-md border border-default-200 dark:border-default-100/30 bg-white dark:bg-black px-3 py-2">
+          {key === "app_logo" ? (
+            <div className="flex h-10 items-center gap-2">
+              {showImage ? (
+                <img
+                  alt="logo preview"
+                  className="h-7 w-7 rounded-sm border border-default-200 object-cover dark:border-default-100/30"
+                  src={previewUrl}
+                  onError={() =>
+                    setPreviewLoadFailed((prev) => ({ ...prev, [key]: true }))
+                  }
+                  onLoad={() =>
+                    setPreviewLoadFailed((prev) => ({ ...prev, [key]: false }))
+                  }
+                />
+              ) : (
+                <div className="flex h-7 w-7 items-center justify-center rounded-sm bg-default-200 text-[10px] font-semibold text-default-600 dark:bg-default-700 dark:text-default-200">
+                  LOGO
+                </div>
+              )}
+              <span className="truncate text-sm font-semibold text-foreground">
+                {appNamePreview}
+              </span>
+            </div>
+          ) : (
+            <div className="flex h-7 max-w-[260px] items-center gap-2 rounded border border-default-200 bg-default-100/70 px-2 dark:border-default-100/30 dark:bg-default-100/20">
+              {showImage ? (
+                <img
+                  alt="favicon preview"
+                  className="h-4 w-4 rounded-sm object-contain"
+                  src={previewUrl}
+                  onError={() =>
+                    setPreviewLoadFailed((prev) => ({ ...prev, [key]: true }))
+                  }
+                  onLoad={() =>
+                    setPreviewLoadFailed((prev) => ({ ...prev, [key]: false }))
+                  }
+                />
+              ) : (
+                <div className="h-4 w-4 rounded-sm bg-default-300 dark:bg-default-600" />
+              )}
+              <span className="truncate text-xs text-default-700 dark:text-default-300">
+                {appNamePreview}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {previewUrl.length === 0 ? (
+          <p className="mt-2 text-xs text-default-500">
+            上传图片后会实时显示预览
+          </p>
+        ) : null}
+
+        {previewUrl.length > 0 && failed ? (
+          <p className="mt-2 text-xs text-danger">图片加载失败，请重新上传</p>
+        ) : null}
+
+        {previewUrl.length > 0 && !isPngDataURL(previewUrl) ? (
+          <p className="mt-2 text-xs text-warning-600 dark:text-warning-400">
+            当前是旧版 URL 配置，建议重新上传图片以启用无闪烁加载
+          </p>
+        ) : null}
+      </div>
+    );
+  };
+
+  const renderBrandAssetUploader = (
+    key: BrandPreviewKey,
+    isChanged: boolean,
+  ) => {
+    const value = (configs[key] || "").trim();
+    const uploading = brandUploading[key] === true;
+    const isLogo = key === "app_logo";
+
+    return (
+      <div
+        className={`rounded-lg border p-3 ${
+          isChanged
+            ? "border-warning-300"
+            : "border-default-200 dark:border-default-100/30"
+        }`}
+      >
+        <input
+          ref={getBrandInputRef(key)}
+          accept={BRAND_FILE_ACCEPT}
+          className="hidden"
+          type="file"
+          onChange={(event) => {
+            void handleBrandFileChange(key, event);
+          }}
+        />
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            color="primary"
+            isLoading={uploading}
+            size="sm"
+            variant="flat"
+            onPress={() => triggerBrandFilePicker(key)}
+          >
+            {value.length > 0
+              ? isLogo
+                ? "替换 Logo"
+                : "替换 Favicon"
+              : isLogo
+                ? "上传 Logo"
+                : "上传 Favicon"}
+          </Button>
+          <Button
+            isDisabled={value.length === 0 || uploading}
+            size="sm"
+            variant="light"
+            onPress={() => clearBrandAsset(key)}
+          >
+            清除
+          </Button>
+          <span className="text-xs text-default-500">
+            仅支持图片文件，自动转换为 PNG
+          </span>
+        </div>
+
+        <p className="mt-2 text-xs text-default-500">
+          {isLogo
+            ? "建议上传方形图片，系统会统一转换为 96x96 PNG"
+            : "建议上传方形图片，系统会统一转换为 64x64 PNG"}
+        </p>
+
+        {renderBrandPreview(key)}
+      </div>
+    );
+  };
+
   // 渲染不同类型的配置项
   const renderConfigItem = (item: ConfigItem) => {
     const isChanged =
@@ -309,6 +639,10 @@ export default function ConfigPage() {
 
     switch (item.type) {
       case "input":
+        if (isBrandPreviewKey(item.key)) {
+          return renderBrandAssetUploader(item.key, isChanged);
+        }
+
         return (
           <Input
             classNames={{
@@ -387,11 +721,23 @@ export default function ConfigPage() {
     try {
       await exportBackup(exportTypes);
       toast.success("导出成功");
+      setExportSelectorOpen(false);
     } catch {
       toast.error("导出失败，请重试");
     } finally {
       setExporting(false);
     }
+  };
+
+  const triggerImportFilePicker = () => {
+    if (importTypes.length === 0) {
+      toast.error("请先选择要导入的数据类型");
+
+      return;
+    }
+
+    setImportSelectorOpen(false);
+    requestAnimationFrame(() => backupFileInputRef.current?.click());
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -428,10 +774,96 @@ export default function ConfigPage() {
       toast.error("导入失败，请检查文件格式");
     } finally {
       setImporting(false);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
+      if (backupFileInputRef.current) {
+        backupFileInputRef.current.value = "";
       }
     }
+  };
+
+  const toggleTypeSelection = (
+    type: string,
+    setTypes: React.Dispatch<React.SetStateAction<string[]>>,
+  ) => {
+    setTypes((prev) =>
+      prev.includes(type)
+        ? prev.filter((item) => item !== type)
+        : [...prev, type],
+    );
+  };
+
+  const isAllTypesSelected = (types: string[]) =>
+    BACKUP_TYPE_VALUES.every((type) => types.includes(type));
+
+  const renderTypeSelection = (
+    label: string,
+    selectedTypes: string[],
+    setTypes: React.Dispatch<React.SetStateAction<string[]>>,
+  ) => {
+    const allSelected = isAllTypesSelected(selectedTypes);
+
+    return (
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-sm font-medium text-default-700 dark:text-default-300">
+            {label}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="flat"
+              onPress={() =>
+                setTypes(allSelected ? [] : [...BACKUP_TYPE_VALUES])
+              }
+            >
+              {allSelected ? "取消全选" : "全选"}
+            </Button>
+            <Button size="sm" variant="light" onPress={() => setTypes([])}>
+              清空
+            </Button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {BACKUP_TYPE_OPTIONS.map((option) => {
+            const isSelected = selectedTypes.includes(option.value);
+
+            return (
+              <button
+                key={option.value}
+                aria-pressed={isSelected}
+                className={`w-full px-4 py-3 rounded-lg border transition-all duration-200 cursor-pointer text-left ${
+                  isSelected
+                    ? "bg-primary-50 dark:bg-primary-900/20 border-primary-300 dark:border-primary-500/50 shadow-sm"
+                    : "bg-white dark:bg-default-50 border-default-200 dark:border-default-100/30 hover:border-primary-200 dark:hover:border-primary-500/30 hover:shadow-sm"
+                }`}
+                type="button"
+                onClick={() => toggleTypeSelection(option.value, setTypes)}
+              >
+                <div className="flex items-center gap-3">
+                  <Checkbox
+                    classNames={{
+                      base: "pointer-events-none",
+                    }}
+                    color="primary"
+                    isSelected={isSelected}
+                    size="md"
+                  />
+                  <span
+                    className={`font-medium ${
+                      isSelected
+                        ? "text-default-900 dark:text-default-100"
+                        : "text-default-700 dark:text-default-500"
+                    }`}
+                  >
+                    {option.label}
+                  </span>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
   };
 
   if (loading) {
@@ -446,6 +878,16 @@ export default function ConfigPage() {
     <div className="p-6 max-w-4xl mx-auto">
       {/* 页面标题 */}
       <div className="flex items-center gap-3 mb-6">
+        <Button
+          isIconOnly
+          aria-label="返回上一页"
+          className="min-w-0 w-9 h-9"
+          size="sm"
+          variant="flat"
+          onPress={handleBack}
+        >
+          <BackIcon className="w-5 h-5" />
+        </Button>
         <SettingsIcon className="w-8 h-8 text-primary" />
         <div>
           <h1 className="text-2xl font-bold">网站配置</h1>
@@ -456,31 +898,20 @@ export default function ConfigPage() {
       </div>
 
       <Card className="shadow-md">
-        <CardHeader className="pb-4">
-          <div className="flex justify-between items-center w-full">
+        <CardHeader className="pb-6">
+          <div className="flex items-center w-full">
             <div>
               <h2 className="text-xl font-semibold">基本设置</h2>
               <p className="text-sm text-gray-600 dark:text-gray-400">
                 配置网站的基本信息，这些设置会影响网站的显示效果
               </p>
             </div>
-            <div className="flex gap-2">
-              <Button
-                color="primary"
-                disabled={!hasChanges}
-                isLoading={saving}
-                startContent={<SaveIcon className="w-4 h-4" />}
-                onClick={handleSave}
-              >
-                {saving ? "保存中..." : "保存配置"}
-              </Button>
-            </div>
           </div>
         </CardHeader>
 
         <Divider />
 
-        <CardBody className="space-y-6 pt-6">
+        <CardBody className="space-y-6 pt-8 md:pt-8">
           {CONFIG_ITEMS.map((item, index) => {
             // 检查配置项是否应该显示
             if (!shouldShowItem(item)) {
@@ -514,24 +945,75 @@ export default function ConfigPage() {
               </div>
             );
           })}
+
+          <Divider className="my-2" />
+
+          <div className="space-y-3">
+            <div className="flex flex-col gap-1">
+              <p className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                更新通道
+              </p>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                稳定版仅匹配纯数字版本；开发版仅匹配包含 alpha / beta / rc
+                的版本。
+              </p>
+            </div>
+
+            <Select
+              selectedKeys={[updateChannel]}
+              size="md"
+              variant="bordered"
+              onSelectionChange={(keys) => {
+                const selected =
+                  (Array.from(keys)[0] as UpdateReleaseChannel) || "stable";
+
+                handleUpdateChannelChange(selected);
+              }}
+            >
+              <SelectItem key="stable" description="仅纯数字版本，如 2.1.4">
+                稳定版
+              </SelectItem>
+              <SelectItem
+                key="dev"
+                description="仅 alpha / beta / rc 关键字版本"
+              >
+                开发版
+              </SelectItem>
+            </Select>
+          </div>
+
+          <div className="flex justify-end pt-6 border-t border-divider/50 mt-4">
+            <Button
+              color="primary"
+              disabled={!hasChanges}
+              isLoading={saving}
+              startContent={<SaveIcon className="w-4 h-4" />}
+              onPress={handleSave}
+            >
+              {saving ? "保存中..." : "保存配置"}
+            </Button>
+          </div>
         </CardBody>
       </Card>
 
+      {/* 主题设置 */}
+      <div className="mt-6">
+        <ThemeSettings />
+      </div>
+
       {hasChanges && (
-        <Card className="mt-4 bg-warning-50 dark:bg-warning-900/20 border-warning-200 dark:border-warning-800">
-          <CardBody className="py-3">
-            <div className="flex items-center gap-2 text-warning-700 dark:text-warning-300">
-              <div className="w-2 h-2 bg-warning-500 rounded-full animate-pulse" />
-              <span className="text-sm">
-                检测到配置变更，请记得保存您的修改
-              </span>
-            </div>
-          </CardBody>
+        <Card className="mt-4 bg-warning-50 dark:bg-warning-900/20 border-warning-200 dark:border-warning-800 shadow-sm overflow-hidden">
+          <div className="h-10 flex items-center justify-center gap-2 text-warning-700 dark:text-warning-300">
+            <div className="w-2 h-2 bg-warning-500 rounded-full animate-pulse flex-shrink-0" />
+            <span className="text-sm font-medium leading-none">
+              检测到配置变更，请记得保存您的修改
+            </span>
+          </div>
         </Card>
       )}
 
       <Card className="mt-6 shadow-md">
-        <CardHeader className="pb-4">
+        <CardHeader className="pb-6">
           <div className="flex justify-between items-center w-full">
             <div>
               <h2 className="text-xl font-semibold">公告管理</h2>
@@ -544,7 +1026,7 @@ export default function ConfigPage() {
 
         <Divider />
 
-        <CardBody className="space-y-4 pt-6">
+        <CardBody className="space-y-4 pt-8 md:pt-8">
           {announcementLoading ? (
             <div className="flex justify-center py-8">
               <Spinner size="lg" />
@@ -555,7 +1037,10 @@ export default function ConfigPage() {
                 <Switch
                   isSelected={announcement.enabled === 1}
                   onValueChange={(checked) =>
-                    setAnnouncement({ ...announcement, enabled: checked ? 1 : 0 })
+                    setAnnouncement({
+                      ...announcement,
+                      enabled: checked ? 1 : 0,
+                    })
                   }
                 >
                   <span className="text-sm text-gray-700 dark:text-gray-300">
@@ -569,21 +1054,24 @@ export default function ConfigPage() {
 
               <Textarea
                 label="公告内容"
-                placeholder="请输入公告内容"
+                minRows={4}
+                placeholder="支持 Markdown，例如：**加粗**、[链接](https://example.com)、- 列表"
                 value={announcement.content}
                 variant="bordered"
-                minRows={4}
                 onChange={(e) =>
                   setAnnouncement({ ...announcement, content: e.target.value })
                 }
               />
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                公告支持 Markdown 语法，链接会在新标签页打开
+              </p>
 
-              <div className="flex justify-end">
+              <div className="flex justify-end mt-4 pt-4 border-t border-divider/50">
                 <Button
                   color="primary"
                   isLoading={announcementSaving}
                   startContent={<SaveIcon className="w-4 h-4" />}
-                  onClick={saveAnnouncement}
+                  onPress={saveAnnouncement}
                 >
                   保存公告
                 </Button>
@@ -595,7 +1083,7 @@ export default function ConfigPage() {
 
       {/* 备份与恢复 */}
       <Card className="mt-6 shadow-md">
-        <CardHeader className="pb-4">
+        <CardHeader className="pb-6">
           <div className="flex justify-between items-center w-full">
             <div>
               <h2 className="text-xl font-semibold">数据备份与恢复</h2>
@@ -608,64 +1096,24 @@ export default function ConfigPage() {
 
         <Divider />
 
-        <CardBody className="space-y-6 pt-6">
+        <CardBody className="space-y-6 pt-8 md:pt-8">
           {/* 导出部分 */}
           <div className="space-y-4">
             <h3 className="text-lg font-medium">导出数据</h3>
             <p className="text-sm text-gray-600 dark:text-gray-400">
               选择要导出的数据类型，导出为 JSON 格式文件
             </p>
+            <p className="text-xs text-default-500">
+              当前已选 {exportTypes.length} / {BACKUP_TYPE_VALUES.length}
+            </p>
 
-            <CheckboxGroup
-              classNames={{
-                wrapper: "gap-4",
-              }}
-              label="选择导出内容"
-              orientation="horizontal"
-              value={exportTypes}
-              onValueChange={(values) => setExportTypes(values as string[])}
-            >
-              <Checkbox value="users">用户</Checkbox>
-              <Checkbox value="nodes">节点</Checkbox>
-              <Checkbox value="tunnels">隧道</Checkbox>
-              <Checkbox value="forwards">转发</Checkbox>
-              <Checkbox value="userTunnels">用户隧道权限</Checkbox>
-              <Checkbox value="speedLimits">限速规则</Checkbox>
-              <Checkbox value="tunnelGroups">隧道分组</Checkbox>
-              <Checkbox value="userGroups">用户分组</Checkbox>
-              <Checkbox value="permissions">分组权限</Checkbox>
-              <Checkbox value="configs">系统配置</Checkbox>
-            </CheckboxGroup>
-
-            <div className="flex gap-3">
+            <div className="flex justify-end gap-3 pt-4">
               <Button
                 color="primary"
                 isLoading={exporting}
-                onPress={handleExport}
+                onPress={() => setExportSelectorOpen(true)}
               >
-                {exporting ? "导出中..." : "导出数据"}
-              </Button>
-              <Button
-                variant="bordered"
-                onPress={() => {
-                  setExportTypes([
-                    "users",
-                    "nodes",
-                    "tunnels",
-                    "forwards",
-                    "userTunnels",
-                    "speedLimits",
-                    "tunnelGroups",
-                    "userGroups",
-                    "permissions",
-                    "configs",
-                  ]);
-                }}
-              >
-                全选
-              </Button>
-              <Button variant="flat" onPress={() => setExportTypes([])}>
-                清空
+                {exporting ? "导出中..." : "选择并导出"}
               </Button>
             </div>
           </div>
@@ -678,44 +1126,26 @@ export default function ConfigPage() {
             <p className="text-sm text-gray-600 dark:text-gray-400">
               选择要导入的数据类型，支持从备份文件恢复数据
             </p>
-
-            <CheckboxGroup
-              classNames={{
-                wrapper: "gap-4",
-              }}
-              label="选择导入内容"
-              orientation="horizontal"
-              value={importTypes}
-              onValueChange={(values) => setImportTypes(values as string[])}
-            >
-              <Checkbox value="users">用户</Checkbox>
-              <Checkbox value="nodes">节点</Checkbox>
-              <Checkbox value="tunnels">隧道</Checkbox>
-              <Checkbox value="forwards">转发</Checkbox>
-              <Checkbox value="userTunnels">用户隧道权限</Checkbox>
-              <Checkbox value="speedLimits">限速规则</Checkbox>
-              <Checkbox value="tunnelGroups">隧道分组</Checkbox>
-              <Checkbox value="userGroups">用户分组</Checkbox>
-              <Checkbox value="permissions">分组权限</Checkbox>
-              <Checkbox value="configs">系统配置</Checkbox>
-            </CheckboxGroup>
+            <p className="text-xs text-default-500">
+              当前已选 {importTypes.length} / {BACKUP_TYPE_VALUES.length}
+            </p>
 
             <input
-              ref={fileInputRef}
+              ref={backupFileInputRef}
               accept=".json"
               className="hidden"
               type="file"
               onChange={handleFileChange}
             />
 
-            <div className="flex gap-3">
+            <div className="flex justify-end gap-3 pt-4">
               <Button
                 color="primary"
                 isLoading={importing}
                 variant="flat"
-                onPress={() => fileInputRef.current?.click()}
+                onPress={() => setImportSelectorOpen(true)}
               >
-                {importing ? "导入中..." : "选择文件导入"}
+                {importing ? "导入中..." : "选择并导入"}
               </Button>
               {importFileName && (
                 <span className="self-center text-sm text-gray-600 dark:text-gray-400">
@@ -726,6 +1156,70 @@ export default function ConfigPage() {
           </div>
         </CardBody>
       </Card>
+
+      <Modal
+        backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
+        isOpen={exportSelectorOpen}
+        onOpenChange={setExportSelectorOpen}
+      >
+        <ModalContent>
+          {(onClose) => (
+            <>
+              <ModalHeader>选择导出内容</ModalHeader>
+              <ModalBody>
+                {renderTypeSelection("导出内容", exportTypes, setExportTypes)}
+              </ModalBody>
+              <ModalFooter>
+                <Button variant="light" onPress={onClose}>
+                  取消
+                </Button>
+                <Button
+                  color="primary"
+                  isLoading={exporting}
+                  onPress={handleExport}
+                >
+                  {exporting ? "导出中..." : "确认导出"}
+                </Button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
+
+      <Modal
+        backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
+        isOpen={importSelectorOpen}
+        onOpenChange={setImportSelectorOpen}
+      >
+        <ModalContent>
+          {(onClose) => (
+            <>
+              <ModalHeader>选择导入内容</ModalHeader>
+              <ModalBody>
+                {renderTypeSelection("导入内容", importTypes, setImportTypes)}
+              </ModalBody>
+              <ModalFooter>
+                <Button variant="light" onPress={onClose}>
+                  取消
+                </Button>
+                <Button
+                  color="primary"
+                  isDisabled={importTypes.length === 0}
+                  onPress={triggerImportFilePicker}
+                >
+                  下一步选择文件
+                </Button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
     </div>
   );
 }

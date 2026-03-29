@@ -25,6 +25,7 @@ import (
 func TestCaptchaVerifyLoginContract(t *testing.T) {
 	secret := "contract-jwt-secret"
 	router, r := setupContractRouter(t, secret)
+	verifiedToken := ""
 
 	if err := r.DB().Exec(`
 		INSERT INTO vite_config(name, value, time)
@@ -34,7 +35,7 @@ func TestCaptchaVerifyLoginContract(t *testing.T) {
 		t.Fatalf("enable captcha: %v", err)
 	}
 
-	t.Run("login denied without verified captcha token", func(t *testing.T) {
+	t.Run("login allowed when cloudflare keys are missing", func(t *testing.T) {
 		body := bytes.NewBufferString(`{"username":"admin_user","password":"admin_user","captchaId":""}`)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/user/login", body)
 		req.Header.Set("Content-Type", "application/json")
@@ -42,10 +43,10 @@ func TestCaptchaVerifyLoginContract(t *testing.T) {
 
 		router.ServeHTTP(resp, req)
 
-		assertCodeMsg(t, resp, -1, "验证码校验失败")
+		assertCode(t, resp, 0)
 	})
 
-	t.Run("captcha token is one-time and consumed by login", func(t *testing.T) {
+	t.Run("captcha verify remains compatible without cloudflare secret", func(t *testing.T) {
 		verifyReq := httptest.NewRequest(http.MethodPost, "/api/v1/captcha/verify", bytes.NewBufferString(`{"id":"captcha-token-1","data":"ok"}`))
 		verifyReq.Header.Set("Content-Type", "application/json")
 		verifyResp := httptest.NewRecorder()
@@ -65,14 +66,60 @@ func TestCaptchaVerifyLoginContract(t *testing.T) {
 			t.Fatalf("unexpected captcha verify payload: success=%v token=%q", verifyOut.Success, verifyOut.Data.ValidToken)
 		}
 
-		loginBody := bytes.NewBufferString(`{"username":"admin_user","password":"admin_user","captchaId":"captcha-token-1"}`)
+		verifiedToken = verifyOut.Data.ValidToken
+	})
+
+	if err := r.DB().Exec(`
+		INSERT INTO vite_config(name, value, time)
+		VALUES(?, ?, ?)
+		ON CONFLICT(name) DO UPDATE SET value = excluded.value, time = excluded.time
+	`, "cloudflare_site_key", "test-site-key", time.Now().UnixMilli()).Error; err != nil {
+		t.Fatalf("set cloudflare site key: %v", err)
+	}
+	if err := r.DB().Exec(`
+		INSERT INTO vite_config(name, value, time)
+		VALUES(?, ?, ?)
+		ON CONFLICT(name) DO UPDATE SET value = excluded.value, time = excluded.time
+	`, "cloudflare_secret_key", "test-secret-key", time.Now().UnixMilli()).Error; err != nil {
+		t.Fatalf("set cloudflare secret key: %v", err)
+	}
+
+	t.Run("login denied without verified captcha token", func(t *testing.T) {
+		body := bytes.NewBufferString(`{"username":"admin_user","password":"admin_user","captchaId":""}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/user/login", body)
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+
+		router.ServeHTTP(resp, req)
+
+		assertCodeMsg(t, resp, -1, "验证码校验失败")
+	})
+
+	t.Run("whmcs api client bypasses captcha", func(t *testing.T) {
+		body := bytes.NewBufferString(`{"username":"admin_user","password":"admin_user","captchaId":""}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/user/login", body)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-FLVX-API-Client", "whmcs")
+		resp := httptest.NewRecorder()
+
+		router.ServeHTTP(resp, req)
+
+		assertCode(t, resp, 0)
+	})
+
+	t.Run("captcha token is one-time and consumed by login", func(t *testing.T) {
+		if strings.TrimSpace(verifiedToken) == "" {
+			t.Fatalf("expected verified token from compatibility captcha verify")
+		}
+
+		loginBody := bytes.NewBufferString(`{"username":"admin_user","password":"admin_user","captchaId":"` + verifiedToken + `"}`)
 		loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/user/login", loginBody)
 		loginReq.Header.Set("Content-Type", "application/json")
 		loginResp := httptest.NewRecorder()
 		router.ServeHTTP(loginResp, loginReq)
 		assertCode(t, loginResp, 0)
 
-		replayBody := bytes.NewBufferString(`{"username":"admin_user","password":"admin_user","captchaId":"captcha-token-1"}`)
+		replayBody := bytes.NewBufferString(`{"username":"admin_user","password":"admin_user","captchaId":"` + verifiedToken + `"}`)
 		replayReq := httptest.NewRequest(http.MethodPost, "/api/v1/user/login", replayBody)
 		replayReq.Header.Set("Content-Type", "application/json")
 		replayResp := httptest.NewRecorder()
@@ -162,39 +209,24 @@ func TestOpenAPISubStoreContracts(t *testing.T) {
 	})
 }
 
-func TestSpeedLimitTunnelsRouteAlias(t *testing.T) {
+func TestSpeedLimitTunnelsRouteRemoved(t *testing.T) {
 	secret := "contract-jwt-secret"
 	router, _ := setupContractRouter(t, secret)
 
-	t.Run("missing token blocked", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/speed-limit/tunnels", nil)
-		resp := httptest.NewRecorder()
+	token, err := auth.GenerateToken(1, "admin_user", 0, secret)
+	if err != nil {
+		t.Fatalf("generate token: %v", err)
+	}
 
-		router.ServeHTTP(resp, req)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/speed-limit/tunnels", nil)
+	req.Header.Set("Authorization", token)
+	resp := httptest.NewRecorder()
 
-		assertCodeMsg(t, resp, 401, "未登录或token已过期")
-	})
+	router.ServeHTTP(resp, req)
 
-	t.Run("admin token receives success envelope", func(t *testing.T) {
-		token, err := auth.GenerateToken(1, "admin_user", 0, secret)
-		if err != nil {
-			t.Fatalf("generate token: %v", err)
-		}
-
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/speed-limit/tunnels", nil)
-		req.Header.Set("Authorization", token)
-		resp := httptest.NewRecorder()
-
-		router.ServeHTTP(resp, req)
-
-		var out response.R
-		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-			t.Fatalf("decode response: %v", err)
-		}
-		if out.Code != 0 {
-			t.Fatalf("expected code 0, got %d (%s)", out.Code, out.Msg)
-		}
-	})
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404 after route removal, got %d", resp.Code)
+	}
 }
 
 func TestBackupExportImportRestoreContracts(t *testing.T) {
@@ -652,15 +684,107 @@ func TestOpenMigratesLegacyNodeDualStackColumns(t *testing.T) {
 
 	columns := readTableColumns(t, r.DB(), "node")
 
-	for _, required := range []string{"server_ip_v4", "server_ip_v6", "inx"} {
+	for _, required := range []string{"server_ip_v4", "server_ip_v6", "inx", "extra_ips"} {
 		if !columns[required] {
 			t.Fatalf("expected node column %q to exist after migration", required)
 		}
 	}
 
 	tunnelColumns := readTableColumns(t, r.DB(), "tunnel")
-	if !tunnelColumns["inx"] {
-		t.Fatalf("expected tunnel column %q to exist after migration", "inx")
+	for _, required := range []string{"inx", "ip_preference"} {
+		if !tunnelColumns[required] {
+			t.Fatalf("expected tunnel column %q to exist after migration", required)
+		}
+	}
+}
+
+func TestOpenMigratesVeryLegacyNodeAndTunnelColumns(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy-1.x.db")
+	legacyDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open legacy sqlite: %v", err)
+	}
+
+	t.Cleanup(func() {
+		_ = legacyDB.Close()
+	})
+
+	if _, err := legacyDB.Exec(`
+		CREATE TABLE IF NOT EXISTS node (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name VARCHAR(100) NOT NULL,
+			secret VARCHAR(100) NOT NULL,
+			server_ip VARCHAR(100) NOT NULL,
+			port TEXT NOT NULL,
+			interface_name VARCHAR(200),
+			version VARCHAR(100),
+			http INTEGER NOT NULL DEFAULT 0,
+			tls INTEGER NOT NULL DEFAULT 0,
+			socks INTEGER NOT NULL DEFAULT 0,
+			created_time INTEGER NOT NULL,
+			updated_time INTEGER,
+			status INTEGER NOT NULL
+		)
+	`); err != nil {
+		t.Fatalf("create very legacy node table: %v", err)
+	}
+
+	if _, err := legacyDB.Exec(`
+		CREATE TABLE IF NOT EXISTS tunnel (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name VARCHAR(100) NOT NULL,
+			traffic_ratio REAL NOT NULL DEFAULT 1.0,
+			type INTEGER NOT NULL,
+			protocol VARCHAR(10) NOT NULL DEFAULT 'tls',
+			flow INTEGER NOT NULL,
+			created_time INTEGER NOT NULL,
+			updated_time INTEGER NOT NULL,
+			status INTEGER NOT NULL,
+			in_ip TEXT
+		)
+	`); err != nil {
+		t.Fatalf("create very legacy tunnel table: %v", err)
+	}
+
+	now := time.Now().UnixMilli()
+	if _, err := legacyDB.Exec(`
+		INSERT INTO node(name, secret, server_ip, port, interface_name, version, http, tls, socks, created_time, updated_time, status)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "legacy-node", "legacy-secret", "10.10.0.1", "10000-10010", "eth0", "v-old", 1, 1, 1, now, now, 1); err != nil {
+		t.Fatalf("seed legacy node row: %v", err)
+	}
+
+	r, err := repo.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open migrated sqlite: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = r.Close()
+	})
+
+	columns := readTableColumns(t, r.DB(), "node")
+	for _, required := range []string{
+		"server_ip_v4",
+		"server_ip_v6",
+		"extra_ips",
+		"tcp_listen_addr",
+		"udp_listen_addr",
+		"inx",
+		"is_remote",
+		"remote_url",
+		"remote_token",
+		"remote_config",
+	} {
+		if !columns[required] {
+			t.Fatalf("expected node column %q to exist after migration", required)
+		}
+	}
+
+	tunnelColumns := readTableColumns(t, r.DB(), "tunnel")
+	for _, required := range []string{"inx", "ip_preference"} {
+		if !tunnelColumns[required] {
+			t.Fatalf("expected tunnel column %q to exist after migration", required)
+		}
 	}
 }
 

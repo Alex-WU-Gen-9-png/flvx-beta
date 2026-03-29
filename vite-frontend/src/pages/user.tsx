@@ -1,7 +1,16 @@
-import { useState, useEffect } from "react";
-import { Button } from "@heroui/button";
-import { Card, CardBody, CardHeader } from "@heroui/card";
-import { Input } from "@heroui/input";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import toast from "react-hot-toast";
+import { parseDate } from "@internationalized/date";
+import { LayoutGrid, List } from "lucide-react";
+
+import {
+  AnimatedPage,
+  StaggerList,
+  StaggerItem,
+} from "@/components/animated-page";
+import { Button } from "@/shadcn-bridge/heroui/button";
+import { Card, CardBody, CardHeader } from "@/shadcn-bridge/heroui/card";
+import { Input } from "@/shadcn-bridge/heroui/input";
 import {
   Table,
   TableHeader,
@@ -9,7 +18,7 @@ import {
   TableBody,
   TableRow,
   TableCell,
-} from "@heroui/table";
+} from "@/shadcn-bridge/heroui/table";
 import {
   Modal,
   ModalContent,
@@ -17,20 +26,19 @@ import {
   ModalBody,
   ModalFooter,
   useDisclosure,
-} from "@heroui/modal";
-import { Chip } from "@heroui/chip";
-import { Select, SelectItem } from "@heroui/select";
-import { RadioGroup, Radio } from "@heroui/radio";
-import { Checkbox } from "@heroui/checkbox";
-import { DatePicker } from "@heroui/date-picker";
-import { Spinner } from "@heroui/spinner";
-import { Progress } from "@heroui/progress";
-import toast from "react-hot-toast";
-import { parseDate } from "@internationalized/date";
-
+} from "@/shadcn-bridge/heroui/modal";
+import { Chip } from "@/shadcn-bridge/heroui/chip";
+import { Select, SelectItem } from "@/shadcn-bridge/heroui/select";
+import { RadioGroup, Radio } from "@/shadcn-bridge/heroui/radio";
+import { Checkbox } from "@/shadcn-bridge/heroui/checkbox";
+import { Switch } from "@/shadcn-bridge/heroui/switch";
+import { DatePicker } from "@/shadcn-bridge/heroui/date-picker";
+import { Spinner } from "@/shadcn-bridge/heroui/spinner";
+import { Progress } from "@/shadcn-bridge/heroui/progress";
 import {
   User,
   UserForm,
+  UserGroup,
   UserTunnel,
   TunnelAssignItem,
   Tunnel,
@@ -49,14 +57,22 @@ import {
   updateUserTunnel,
   getSpeedLimitList,
   resetUserFlow,
+  resetUserQuota,
+  getUserGroupList,
+  getUserGroups,
+  getMonitorPermissionList,
+  assignMonitorPermission,
+  removeMonitorPermission,
 } from "@/api";
 import {
-  SearchIcon,
   EditIcon,
   DeleteIcon,
-  UserIcon,
   SettingsIcon,
+  SearchIcon,
 } from "@/components/icons";
+import { PageLoadingState } from "@/components/page-state";
+import { useLocalStorageState } from "@/hooks/use-local-storage-state";
+import { removeItemsById, replaceItemById } from "@/utils/list-state";
 
 // 工具函数
 const formatFlow = (value: number, unit: string = "bytes"): string => {
@@ -71,6 +87,16 @@ const formatFlow = (value: number, unit: string = "bytes"): string => {
 
     return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
   }
+};
+
+const formatQuotaLimit = (value?: number): string => {
+  const limit = Number(value ?? 0);
+
+  if (!Number.isFinite(limit) || limit <= 0) {
+    return "不限";
+  }
+
+  return `${limit} GB`;
 };
 
 const formatDate = (timestamp: number): string => {
@@ -113,16 +139,68 @@ const calculateTunnelUsedFlow = (tunnel: UserTunnel): number => {
   return inFlow + outFlow;
 };
 
+const USER_SEARCH_DEBOUNCE_MS = 250;
+
+const normalizeUserItem = (item: Partial<User>): User => {
+  return {
+    id: Number(item.id ?? 0),
+    name: item.name,
+    user: String(item.user ?? ""),
+    status: Number(item.status ?? 0),
+    flow: Number(item.flow ?? 0),
+    num: Number(item.num ?? 0),
+    expTime: item.expTime,
+    flowResetTime: item.flowResetTime ?? 0,
+    createdTime: item.createdTime,
+    inFlow: Number(item.inFlow ?? 0),
+    outFlow: Number(item.outFlow ?? 0),
+    dailyQuotaGB: Number(item.dailyQuotaGB ?? 0),
+    monthlyQuotaGB: Number(item.monthlyQuotaGB ?? 0),
+    dailyUsedBytes: Number(item.dailyUsedBytes ?? 0),
+    monthlyUsedBytes: Number(item.monthlyUsedBytes ?? 0),
+    disabledByQuota: Number(item.disabledByQuota ?? 0),
+    quotaDisabledAt: Number(item.quotaDisabledAt ?? 0),
+  };
+};
+
+const normalizeUserTunnelItem = (item: Partial<UserTunnel>): UserTunnel => {
+  return {
+    id: Number(item.id ?? 0),
+    userId: Number(item.userId ?? 0),
+    tunnelId: Number(item.tunnelId ?? 0),
+    tunnelName: String(item.tunnelName ?? ""),
+    status: Number(item.status ?? 0),
+    flow: Number(item.flow ?? 0),
+    num: Number(item.num ?? 0),
+    expTime: Number(item.expTime ?? 0),
+    flowResetTime: Number(item.flowResetTime ?? 0),
+    speedId: item.speedId ?? null,
+    speedLimitName: item.speedLimitName,
+    inFlow: Number(item.inFlow ?? 0),
+    outFlow: Number(item.outFlow ?? 0),
+    tunnelFlow: item.tunnelFlow,
+  };
+};
+
 export default function UserPage() {
   // 状态管理
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(false);
-  const [searchKeyword, setSearchKeyword] = useState("");
+  const [searchKeyword, setSearchKeyword] = useLocalStorageState(
+    "user-search-keyword",
+    "",
+  );
+  const [isSearchVisible, setIsSearchVisible] = useState(false);
+  const [viewMode, setViewMode] = useLocalStorageState<"list" | "grid">(
+    "user-view-mode",
+    "grid",
+  );
   const [pagination, setPagination] = useState<PaginationType>({
     current: 1,
     size: 10,
     total: 0,
   });
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 用户表单相关状态
   const {
@@ -135,12 +213,23 @@ export default function UserPage() {
     user: "",
     pwd: "",
     status: 1,
-    flow: 100,
+    flow: 1000,
+    dailyQuotaGB: 0,
+    monthlyQuotaGB: 0,
     num: 10,
     expTime: null,
     flowResetTime: 0,
   });
   const [userFormLoading, setUserFormLoading] = useState(false);
+  const [quotaResetLoading, setQuotaResetLoading] = useState(false);
+
+  const editingUser = useMemo(
+    () =>
+      userForm.id
+        ? users.find((item) => item.id === userForm.id) || null
+        : null,
+    [userForm.id, users],
+  );
 
   // 隧道权限管理相关状态
   const {
@@ -149,6 +238,13 @@ export default function UserPage() {
     onClose: onTunnelModalClose,
   } = useDisclosure();
   const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [monitorPermissionUserIds, setMonitorPermissionUserIds] = useState<
+    Set<number>
+  >(new Set());
+  const [monitorPermissionLoading, setMonitorPermissionLoading] =
+    useState(false);
+  const [monitorPermissionMutatingUserId, setMonitorPermissionMutatingUserId] =
+    useState<number | null>(null);
   const [userTunnels, setUserTunnels] = useState<UserTunnel[]>([]);
   const [tunnelListLoading, setTunnelListLoading] = useState(false);
 
@@ -204,65 +300,154 @@ export default function UserPage() {
   // 其他数据
   const [tunnels, setTunnels] = useState<Tunnel[]>([]);
   const [speedLimits, setSpeedLimits] = useState<SpeedLimit[]>([]);
+  const [userGroups, setUserGroups] = useState<UserGroup[]>([]);
 
-  // 生命周期
-  useEffect(() => {
-    loadUsers();
-    loadTunnels();
-    loadSpeedLimits();
-  }, [pagination.current, pagination.size, searchKeyword]);
+  const noLimitSpeedLimitIds = useMemo(() => {
+    return new Set(
+      speedLimits
+        .filter((speedLimit) => speedLimit.name.trim() === "不限速")
+        .map((speedLimit) => speedLimit.id),
+    );
+  }, [speedLimits]);
 
-  // 数据加载函数
-  const loadUsers = async () => {
-    setLoading(true);
-    try {
-      const response = await getAllUsers({
-        current: pagination.current,
-        size: pagination.size,
-        keyword: searchKeyword,
-      });
+  const speedLimitIds = useMemo(() => {
+    return new Set(speedLimits.map((speedLimit) => speedLimit.id));
+  }, [speedLimits]);
 
-      if (response.code === 0) {
-        const data = response.data || {};
-
-        setUsers(data || []);
-      } else {
-        toast.error(response.msg || "获取用户列表失败");
-      }
-    } catch {
-      toast.error("获取用户列表失败");
-    } finally {
-      setLoading(false);
+  const normalizeSpeedId = (speedId?: number | null): number | null => {
+    if (speedId === null || speedId === undefined) {
+      return null;
     }
+
+    if (noLimitSpeedLimitIds.has(speedId)) {
+      return null;
+    }
+
+    if (speedLimits.length > 0 && !speedLimitIds.has(speedId)) {
+      return null;
+    }
+
+    return speedId;
   };
 
-  const loadTunnels = async () => {
+  const isMissingSpeedLimit = (speedId?: number | null): boolean => {
+    if (speedId === null || speedId === undefined) {
+      return false;
+    }
+
+    if (speedLimits.length === 0 || noLimitSpeedLimitIds.has(speedId)) {
+      return false;
+    }
+
+    return !speedLimitIds.has(speedId);
+  };
+
+  // 数据加载函数
+  const loadUsers = useCallback(
+    async (keywordOverride?: string) => {
+      setLoading(true);
+      try {
+        const keyword = keywordOverride ?? searchKeyword;
+        const response = await getAllUsers({
+          current: pagination.current,
+          size: pagination.size,
+          keyword,
+        });
+
+        if (response.code === 0) {
+          const nextUsers = Array.isArray(response.data)
+            ? response.data.map((item) => normalizeUserItem(item))
+            : [];
+
+          setUsers(nextUsers);
+          setPagination((prev) => ({ ...prev, total: nextUsers.length }));
+        } else {
+          toast.error(response.msg || "获取用户列表失败");
+        }
+      } catch {
+        toast.error("获取用户列表失败");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [pagination.current, pagination.size],
+  );
+
+  const loadTunnels = useCallback(async () => {
     try {
       const response = await getTunnelList();
 
       if (response.code === 0) {
-        setTunnels(response.data || []);
+        setTunnels(Array.isArray(response.data) ? response.data : []);
       }
     } catch {}
-  };
+  }, []);
 
-  const loadSpeedLimits = async () => {
+  const loadSpeedLimits = useCallback(async () => {
     try {
       const response = await getSpeedLimitList();
 
       if (response.code === 0) {
-        setSpeedLimits(response.data || []);
+        const speedLimitList = Array.isArray(response.data)
+          ? response.data.map((item) => ({
+              ...item,
+              uploadSpeed: item.uploadSpeed ?? item.speed ?? 0,
+              downloadSpeed: item.downloadSpeed ?? item.speed ?? 0,
+            }))
+          : [];
+
+        setSpeedLimits(speedLimitList);
       }
     } catch {}
-  };
+  }, []);
 
-  const loadUserTunnels = async (userId: number) => {
+  const loadUserGroups = useCallback(async () => {
+    try {
+      const response = await getUserGroupList();
+
+      if (response.code === 0) {
+        setUserGroups(Array.isArray(response.data) ? response.data : []);
+      }
+    } catch {}
+  }, []);
+
+  const loadMonitorPermissions = useCallback(async () => {
+    setMonitorPermissionLoading(true);
+    try {
+      const response = await getMonitorPermissionList();
+
+      if (response.code === 0) {
+        const ids = new Set<number>();
+
+        if (Array.isArray(response.data)) {
+          response.data.forEach((item: any) => {
+            const id = Number(item?.userId ?? 0);
+
+            if (id > 0) ids.add(id);
+          });
+        }
+        setMonitorPermissionUserIds(ids);
+      } else if (response.code !== 403) {
+        toast.error(response.msg || "获取监控权限失败");
+      }
+    } catch {
+      // ignore
+    } finally {
+      setMonitorPermissionLoading(false);
+    }
+  }, []);
+
+  const loadUserTunnels = useCallback(async (userId: number) => {
     setTunnelListLoading(true);
     try {
       const response = await getUserTunnelList({ userId });
 
       if (response.code === 0) {
-        setUserTunnels(response.data || []);
+        setUserTunnels(
+          Array.isArray(response.data)
+            ? response.data.map((item) => normalizeUserTunnelItem(item))
+            : [],
+        );
       } else {
         toast.error(response.msg || "获取隧道权限列表失败");
       }
@@ -271,12 +456,54 @@ export default function UserPage() {
     } finally {
       setTunnelListLoading(false);
     }
-  };
+  }, []);
+
+  // 生命周期
+  useEffect(() => {
+    void loadTunnels();
+    void loadSpeedLimits();
+    void loadUserGroups();
+    void loadMonitorPermissions();
+  }, [loadMonitorPermissions, loadSpeedLimits, loadTunnels, loadUserGroups]);
+
+  useEffect(() => {
+    void loadUsers();
+  }, [loadUsers]);
+
+  useEffect(() => {
+    if (searchDebounceRef.current) {
+      clearTimeout(searchDebounceRef.current);
+    }
+
+    searchDebounceRef.current = setTimeout(() => {
+      setPagination((prev) => {
+        if (prev.current === 1) {
+          void loadUsers(searchKeyword);
+
+          return prev;
+        }
+
+        return { ...prev, current: 1 };
+      });
+    }, USER_SEARCH_DEBOUNCE_MS);
+
+    return () => {
+      if (searchDebounceRef.current) {
+        clearTimeout(searchDebounceRef.current);
+        searchDebounceRef.current = null;
+      }
+    };
+  }, [loadUsers, searchKeyword]);
 
   // 用户管理操作
   const handleSearch = () => {
+    if (searchDebounceRef.current) {
+      clearTimeout(searchDebounceRef.current);
+      searchDebounceRef.current = null;
+    }
+
     setPagination((prev) => ({ ...prev, current: 1 }));
-    loadUsers();
+    void loadUsers(searchKeyword);
   };
 
   const handleAdd = () => {
@@ -285,16 +512,29 @@ export default function UserPage() {
       user: "",
       pwd: "",
       status: 1,
-      flow: 100,
+      flow: 1000,
+      dailyQuotaGB: 0,
+      monthlyQuotaGB: 0,
       num: 10,
       expTime: null,
       flowResetTime: 0,
+      groupIds: [],
     });
     onUserModalOpen();
   };
 
-  const handleEdit = (user: User) => {
+  const handleEdit = async (user: User) => {
     setIsEdit(true);
+    let currentGroupIds: number[] = [];
+
+    try {
+      const groupRes = await getUserGroups(user.id);
+
+      if (groupRes.code === 0) {
+        currentGroupIds = groupRes.data || [];
+      }
+    } catch {}
+
     setUserForm({
       id: user.id,
       name: user.name,
@@ -302,9 +542,12 @@ export default function UserPage() {
       pwd: "",
       status: user.status,
       flow: user.flow,
+      dailyQuotaGB: user.dailyQuotaGB ?? 0,
+      monthlyQuotaGB: user.monthlyQuotaGB ?? 0,
       num: user.num,
       expTime: user.expTime ? new Date(user.expTime) : null,
       flowResetTime: user.flowResetTime ?? 0,
+      groupIds: currentGroupIds,
     });
     onUserModalOpen();
   };
@@ -322,9 +565,17 @@ export default function UserPage() {
 
       if (response.code === 0) {
         toast.success("删除成功");
-        loadUsers();
         onDeleteModalClose();
+        setUsers((prev) => removeItemsById(prev, [userToDelete.id]));
+        setPagination((prev) => ({
+          ...prev,
+          total: Math.max(prev.total - 1, 0),
+        }));
         setUserToDelete(null);
+        if (currentUser?.id === userToDelete.id) {
+          setCurrentUser(null);
+          setUserTunnels([]);
+        }
       } else {
         toast.error(response.msg || "删除失败");
       }
@@ -345,6 +596,7 @@ export default function UserPage() {
       const submitData: any = {
         ...userForm,
         expTime: userForm.expTime.getTime(),
+        groupIds: userForm.groupIds ?? [],
       };
 
       if (isEdit && !submitData.pwd) {
@@ -358,7 +610,26 @@ export default function UserPage() {
       if (response.code === 0) {
         toast.success(isEdit ? "更新成功" : "创建成功");
         onUserModalClose();
-        loadUsers();
+        const responseUser = normalizeUserItem((response as any).data || {});
+
+        if (
+          isEdit &&
+          responseUser.id > 0 &&
+          pagination.current === 1 &&
+          !searchKeyword.trim()
+        ) {
+          setUsers((prev) => replaceItemById(prev, responseUser));
+        } else if (
+          !isEdit &&
+          responseUser.id > 0 &&
+          pagination.current === 1 &&
+          !searchKeyword.trim()
+        ) {
+          setUsers((prev) => [responseUser, ...prev].slice(0, pagination.size));
+          setPagination((prev) => ({ ...prev, total: prev.total + 1 }));
+        } else {
+          await loadUsers();
+        }
       } else {
         toast.error(response.msg || (isEdit ? "更新失败" : "创建失败"));
       }
@@ -368,6 +639,63 @@ export default function UserPage() {
       setUserFormLoading(false);
     }
   };
+
+  const setUserMonitorPermission = useCallback(
+    async (userId: number, enabled: boolean) => {
+      if (userId <= 0) return;
+      if (monitorPermissionMutatingUserId === userId) return;
+
+      const prevEnabled = monitorPermissionUserIds.has(userId);
+
+      if (prevEnabled === enabled) return;
+
+      setMonitorPermissionMutatingUserId(userId);
+
+      // Optimistic update for better UX.
+      setMonitorPermissionUserIds((prev) => {
+        const next = new Set(prev);
+
+        if (enabled) {
+          next.add(userId);
+        } else {
+          next.delete(userId);
+        }
+
+        return next;
+      });
+
+      try {
+        const response = enabled
+          ? await assignMonitorPermission(userId)
+          : await removeMonitorPermission(userId);
+
+        if (response.code === 0) {
+          toast.success(enabled ? "已授权监控" : "已撤销监控");
+
+          return;
+        }
+
+        toast.error(response.msg || "操作失败");
+        throw new Error("mutation failed");
+      } catch {
+        // Revert optimistic update on failure.
+        setMonitorPermissionUserIds((prev) => {
+          const next = new Set(prev);
+
+          if (prevEnabled) {
+            next.add(userId);
+          } else {
+            next.delete(userId);
+          }
+
+          return next;
+        });
+      } finally {
+        setMonitorPermissionMutatingUserId(null);
+      }
+    },
+    [monitorPermissionMutatingUserId, monitorPermissionUserIds],
+  );
 
   // 隧道权限管理操作
   const handleManageTunnels = (user: User) => {
@@ -386,9 +714,21 @@ export default function UserPage() {
 
     setAssignLoading(true);
     try {
+      let speedLimitAutoCleared = false;
       const tunnelsToAssign: TunnelAssignItem[] = Array.from(
         batchTunnelSelections.entries(),
-      ).map(([tunnelId, speedId]) => ({ tunnelId, speedId }));
+      ).map(([tunnelId, speedId]) => ({
+        tunnelId,
+        speedId: (() => {
+          const cleared = normalizeSpeedId(speedId);
+
+          if (isMissingSpeedLimit(speedId)) {
+            speedLimitAutoCleared = true;
+          }
+
+          return cleared;
+        })(),
+      }));
 
       const response = await batchAssignUserTunnel({
         userId: currentUser.id,
@@ -396,9 +736,15 @@ export default function UserPage() {
       });
 
       if (response.code === 0) {
+        if (speedLimitAutoCleared) {
+          toast("所选限速规则不存在，已自动清除为不限速", {
+            icon: "⚠️",
+            duration: 5000,
+          });
+        }
         toast.success(response.msg || "分配成功");
         setBatchTunnelSelections(new Map());
-        loadUserTunnels(currentUser.id);
+        await loadUserTunnels(currentUser.id);
       } else {
         toast.error(response.msg || "分配失败");
       }
@@ -412,6 +758,7 @@ export default function UserPage() {
   const handleEditTunnel = (userTunnel: UserTunnel) => {
     setEditTunnelForm({
       ...userTunnel,
+      speedId: normalizeSpeedId(userTunnel.speedId),
       expTime: userTunnel.expTime,
     });
     onEditTunnelModalOpen();
@@ -422,21 +769,41 @@ export default function UserPage() {
 
     setEditTunnelLoading(true);
     try {
+      const speedLimitAutoCleared = isMissingSpeedLimit(editTunnelForm.speedId);
       const response = await updateUserTunnel({
         id: editTunnelForm.id,
         flow: editTunnelForm.flow,
         num: editTunnelForm.num,
         expTime: editTunnelForm.expTime,
         flowResetTime: editTunnelForm.flowResetTime,
-        speedId: editTunnelForm.speedId,
+        speedId: normalizeSpeedId(editTunnelForm.speedId),
         status: editTunnelForm.status,
       });
 
       if (response.code === 0) {
+        if (speedLimitAutoCleared) {
+          toast("所选限速规则不存在，已自动清除为不限速", {
+            icon: "⚠️",
+            duration: 5000,
+          });
+        }
         toast.success("更新成功");
         onEditTunnelModalClose();
         if (currentUser) {
-          loadUserTunnels(currentUser.id);
+          const nextTunnel = normalizeUserTunnelItem({
+            ...editTunnelForm,
+            speedId: normalizeSpeedId(editTunnelForm.speedId),
+            speedLimitName:
+              normalizeSpeedId(editTunnelForm.speedId) !== null
+                ? speedLimits.find(
+                    (speedLimit) =>
+                      speedLimit.id ===
+                      normalizeSpeedId(editTunnelForm.speedId),
+                  )?.name
+                : undefined,
+          });
+
+          setUserTunnels((prev) => replaceItemById(prev, nextTunnel));
         }
       } else {
         toast.error(response.msg || "更新失败");
@@ -462,7 +829,7 @@ export default function UserPage() {
       if (response.code === 0) {
         toast.success("删除成功");
         if (currentUser) {
-          loadUserTunnels(currentUser.id);
+          setUserTunnels((prev) => removeItemsById(prev, [tunnelToDelete.id]));
         }
         onDeleteTunnelModalClose();
         setTunnelToDelete(null);
@@ -493,8 +860,16 @@ export default function UserPage() {
       if (response.code === 0) {
         toast.success("流量重置成功");
         onResetFlowModalClose();
+        const targetUserId = userToReset.id;
+
+        setUsers((prev) =>
+          prev.map((user) =>
+            user.id === targetUserId
+              ? { ...user, inFlow: 0, outFlow: 0 }
+              : user,
+          ),
+        );
         setUserToReset(null);
-        loadUsers(); // 重新加载用户列表
       } else {
         toast.error(response.msg || "重置失败");
       }
@@ -502,6 +877,30 @@ export default function UserPage() {
       toast.error("重置失败");
     } finally {
       setResetFlowLoading(false);
+    }
+  };
+
+  const handleQuotaReset = async (scope: "daily" | "monthly" | "all") => {
+    const userId = userForm.id;
+
+    if (!userId) {
+      return;
+    }
+
+    setQuotaResetLoading(true);
+    try {
+      const response = await resetUserQuota({ userId, scope });
+
+      if (response.code === 0) {
+        toast.success("用户配额已重置");
+        await loadUsers(searchKeyword);
+      } else {
+        toast.error(response.msg || "重置用户配额失败");
+      }
+    } catch {
+      toast.error("重置用户配额失败");
+    } finally {
+      setQuotaResetLoading(false);
     }
   };
 
@@ -524,10 +923,16 @@ export default function UserPage() {
       if (response.code === 0) {
         toast.success("隧道流量重置成功");
         onResetTunnelFlowModalClose();
+        const targetTunnelId = tunnelToReset.id;
+
+        setUserTunnels((prev) =>
+          prev.map((userTunnel) =>
+            userTunnel.id === targetTunnelId
+              ? { ...userTunnel, inFlow: 0, outFlow: 0 }
+              : userTunnel,
+          ),
+        );
         setTunnelToReset(null);
-        if (currentUser) {
-          loadUserTunnels(currentUser.id); // 重新加载隧道权限列表
-        }
       } else {
         toast.error(response.msg || "重置失败");
       }
@@ -539,12 +944,16 @@ export default function UserPage() {
   };
 
   const editAvailableSpeedLimits = speedLimits.filter(
-    (speedLimit) => speedLimit.tunnelId === editTunnelForm?.tunnelId,
+    (speedLimit) => !noLimitSpeedLimitIds.has(speedLimit.id),
   );
 
-  const getSpeedLimitsForTunnel = (tunnelId: number) => {
-    return speedLimits.filter((sl) => sl.tunnelId === tunnelId);
+  const getSpeedLimitsForTunnel = (_tunnelId: number) => {
+    return speedLimits.filter(
+      (speedLimit) => !noLimitSpeedLimitIds.has(speedLimit.id),
+    );
   };
+
+  const editTunnelSelectedSpeedId = normalizeSpeedId(editTunnelForm?.speedId);
 
   const toggleTunnelSelection = (tunnelId: number) => {
     setBatchTunnelSelections((prev) => {
@@ -575,39 +984,81 @@ export default function UserPage() {
   };
 
   return (
-    <div className="px-3 lg:px-6 py-8">
+    <AnimatedPage className="px-3 lg:px-6 py-8">
       {/* 页面头部 */}
-      <div className="flex flex-col gap-4 mb-6">
-        <div className="flex items-center gap-3" />
-
-        <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center justify-between">
-          <div className="flex items-center gap-3 flex-1 max-w-md">
-            <Input
-              className="flex-1"
-              classNames={{
-                base: "bg-default-100",
-                input: "bg-transparent",
-                inputWrapper:
-                  "bg-default-100 border-2 border-default-200 hover:border-default-300 focus-within:border-primary data-[hover=true]:border-default-300",
-              }}
-              placeholder="搜索用户名"
-              startContent={<SearchIcon className="w-4 h-4 text-default-400" />}
-              value={searchKeyword}
-              onChange={(e) => setSearchKeyword(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-            />
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between mb-6 gap-3">
+        <div className="flex-1 max-w-sm flex items-center gap-2">
+          {!isSearchVisible ? (
             <Button
               isIconOnly
-              className="min-h-10 w-10"
-              color="primary"
-              variant="solid"
-              onClick={handleSearch}
+              aria-label="搜索"
+              className="text-default-600"
+              color="default"
+              size="sm"
+              variant="flat"
+              onPress={() => setIsSearchVisible(true)}
             >
               <SearchIcon className="w-4 h-4" />
             </Button>
-          </div>
+          ) : (
+            <div className="flex w-full items-center gap-2 animate-appearance-in">
+              <Input
+                classNames={{
+                  base: "bg-default-100",
+                  input: "bg-transparent",
+                  inputWrapper:
+                    "bg-default-100 border-2 border-default-200 hover:border-default-300 data-[hover=true]:border-default-300",
+                }}
+                placeholder="搜索用户名"
+                value={searchKeyword}
+                onChange={(e) => setSearchKeyword(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+              />
+              <Button
+                isIconOnly
+                aria-label="关闭搜索"
+                className="text-default-600 shrink-0"
+                color="default"
+                size="sm"
+                variant="light"
+                onPress={() => {
+                  setIsSearchVisible(false);
+                  setSearchKeyword("");
+                }}
+              >
+                <svg
+                  aria-hidden="true"
+                  className="w-4 h-4"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    d="M6 18L18 6M6 6l12 12"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                  />
+                </svg>
+              </Button>
+            </div>
+          )}
+        </div>
 
-          <Button color="primary" variant="flat" onPress={handleAdd}>
+        <div className="flex items-center gap-2">
+          <Button
+            isIconOnly
+            size="sm"
+            variant="flat"
+            onPress={() => setViewMode(viewMode === "list" ? "grid" : "list")}
+          >
+            {viewMode === "list" ? (
+              <LayoutGrid className="w-4 h-4" />
+            ) : (
+              <List className="w-4 h-4" />
+            )}
+          </Button>
+          <Button color="primary" size="sm" variant="flat" onPress={handleAdd}>
             新增
           </Button>
         </div>
@@ -615,32 +1066,176 @@ export default function UserPage() {
 
       {/* 用户列表 */}
       {loading ? (
-        <div className="flex items-center justify-center h-64">
-          <div className="flex items-center gap-3">
-            <Spinner size="sm" />
-            <span className="text-default-600">正在加载...</span>
-          </div>
-        </div>
+        <PageLoadingState message="正在加载..." />
       ) : users.length === 0 ? (
-        <Card className="shadow-sm border border-gray-200 dark:border-gray-700">
-          <CardBody className="text-center py-16">
-            <div className="flex flex-col items-center gap-4">
-              <div className="w-16 h-16 bg-default-100 rounded-full flex items-center justify-center">
-                <UserIcon className="w-8 h-8 text-default-400" />
-              </div>
-              <div>
-                <h3 className="text-lg font-semibold text-foreground">
-                  暂无用户数据
-                </h3>
-                <p className="text-default-500 text-sm mt-1">
-                  还没有创建任何用户，点击上方按钮开始创建
-                </p>
-              </div>
-            </div>
+        <Card className="shadow-sm border border-gray-200 dark:border-gray-700 bg-default-50/50">
+          <CardBody className="text-center py-20 flex flex-col items-center justify-center min-h-[240px]">
+            <h3 className="text-xl font-medium text-foreground tracking-tight mb-2">
+              暂无用户数据
+            </h3>
+            <p className="text-default-500 text-sm max-w-xs mx-auto leading-relaxed">
+              还没有创建任何用户，点击上方按钮开始创建
+            </p>
           </CardBody>
         </Card>
+      ) : viewMode === "list" ? (
+        <Card>
+          <Table
+            aria-label="用户列表"
+            className="overflow-x-auto min-w-full"
+            classNames={{
+              th: "bg-default-100/50 text-default-600 font-semibold text-sm border-b border-divider py-3 uppercase tracking-wider",
+              td: "py-3 border-b border-divider/50 group-data-[last=true]:border-b-0",
+              tr: "hover:bg-default-50/50 transition-colors",
+            }}
+          >
+            <TableHeader>
+              <TableColumn>用户名</TableColumn>
+              <TableColumn>流量统计</TableColumn>
+              <TableColumn>配额限制</TableColumn>
+              <TableColumn>规则数量</TableColumn>
+              <TableColumn>到期时间</TableColumn>
+              <TableColumn>操作</TableColumn>
+            </TableHeader>
+            <TableBody items={users}>
+              {(user) => {
+                const userStatus = getUserStatus(user);
+                const expStatus = user.expTime
+                  ? getExpireStatus(user.expTime)
+                  : null;
+                const usedFlow = calculateUserTotalUsedFlow(user);
+
+                return (
+                  <TableRow key={user.id}>
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        <div
+                          className={`shrink-0 w-2 h-2 rounded-full ${
+                            userStatus.color === "success"
+                              ? "bg-success"
+                              : "bg-danger"
+                          }`}
+                        />
+                        <div className="flex flex-col">
+                          <span className="font-medium text-foreground text-sm">
+                            {user.name || user.user}
+                          </span>
+                          <span className="text-xs text-default-500">
+                            @{user.user}
+                          </span>
+                        </div>
+                        {user.disabledByQuota && (
+                          <Chip className="text-[10px] h-4 px-1 ml-1" color="danger" size="sm" variant="flat">
+                            超额
+                          </Chip>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-col gap-0.5">
+                        <div className="flex items-center gap-1 text-xs">
+                          <span className="text-default-500">已用:</span>
+                          <span className="text-danger font-medium whitespace-nowrap">
+                            {formatFlow(usedFlow)}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1 text-xs">
+                          <span className="text-default-500">限制:</span>
+                          <span className="text-default-700 font-medium whitespace-nowrap">
+                            {formatFlow(user.flow, "gb")}
+                          </span>
+                        </div>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-col gap-0.5 whitespace-nowrap text-[11px]">
+                        {((user.dailyQuotaGB ?? 0) > 0 || (user.monthlyQuotaGB ?? 0) > 0) ? (
+                            <>
+                              <div className="flex gap-1 justify-between">
+                                <span className="text-default-500">日配额:</span>
+                                <span>{formatFlow(user.dailyUsedBytes ?? 0)} / {formatQuotaLimit(user.dailyQuotaGB)}</span>
+                              </div>
+                              <div className="flex gap-1 justify-between">
+                                <span className="text-default-500">月配额:</span>
+                                <span>{formatFlow(user.monthlyUsedBytes ?? 0)} / {formatQuotaLimit(user.monthlyQuotaGB)}</span>
+                              </div>
+                            </>
+                        ) : (
+                          <span className="text-default-400">无配额</span>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <span className="text-sm font-medium">{user.num}</span>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-col gap-1 items-start whitespace-nowrap">
+                        {user.expTime ? (
+                          <>
+                            <span className="text-sm">
+                              {new Date(user.expTime).toLocaleString()}
+                            </span>
+                            {expStatus && (
+                              <Chip
+                                color={expStatus.color}
+                                size="sm"
+                                variant="flat"
+                                className="h-5 px-1 text-[10px]"
+                              >
+                                {expStatus.text}
+                              </Chip>
+                            )}
+                          </>
+                        ) : (
+                          <span className="text-default-400 text-sm">无限期</span>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap items-center gap-1.5 min-w-max">
+                        <Button
+                          size="sm"
+                          variant="flat"
+                          className="h-6 px-2 min-w-0 text-xs bg-emerald-50 text-emerald-600 hover:bg-emerald-100 dark:bg-emerald-950/30 dark:text-emerald-400"
+                          onPress={() => handleManageTunnels(user)}
+                        >
+                          权限
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="flat"
+                          className="h-6 px-2 min-w-0 text-xs bg-amber-50 text-amber-600 hover:bg-amber-100 dark:bg-amber-950/30 dark:text-amber-400"
+                          title="重置流量"
+                          onPress={() => handleResetFlow(user)}
+                        >
+                          重置
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="flat"
+                          className="h-6 px-2 min-w-0 text-xs bg-indigo-50 text-indigo-600 hover:bg-indigo-100 dark:bg-indigo-950/30 dark:text-indigo-400"
+                          onPress={() => handleEdit(user)}
+                        >
+                          编辑
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="flat"
+                          className="h-6 px-2 min-w-0 text-xs bg-rose-50 text-rose-600 hover:bg-rose-100 dark:bg-rose-950/30 dark:text-rose-400"
+                          onPress={() => handleDelete(user)}
+                        >
+                          删除
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+              }}
+            </TableBody>
+          </Table>
+        </Card>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
+        <StaggerList className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
           {users.map((user) => {
             const userStatus = getUserStatus(user);
             const expStatus = user.expTime
@@ -656,173 +1251,208 @@ export default function UserPage() {
                 : 0;
 
             return (
-              <Card
-                key={user.id}
-                className="shadow-sm border border-divider hover:shadow-md transition-shadow duration-200"
-              >
-                <CardHeader className="pb-2">
-                  <div className="flex justify-between items-start w-full">
-                    <div className="flex-1 min-w-0">
-                      <h3 className="font-semibold text-foreground truncate text-sm">
-                        {user.name || user.user}
-                      </h3>
-                      <p className="text-xs text-default-500 truncate">
-                        @{user.user}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-1.5 ml-2">
-                      <Chip
-                        className="text-xs"
-                        color={userStatus.color}
-                        size="sm"
-                        variant="flat"
-                      >
-                        {userStatus.text}
-                      </Chip>
-                    </div>
-                  </div>
-                </CardHeader>
-
-                <CardBody className="pt-0 pb-3">
-                  <div className="space-y-2">
-                    {/* 流量信息 */}
-                    <div className="space-y-1.5">
-                      <div className="flex justify-between text-sm">
-                        <span className="text-default-600">流量限制</span>
-                        <span className="font-medium text-xs">
-                          {formatFlow(user.flow, "gb")}
-                        </span>
+              <StaggerItem key={user.id}>
+                <Card className="shadow-sm border border-divider hover:shadow-md transition-shadow duration-200 overflow-hidden h-full">
+                  <CardHeader className="pb-2 md:pb-2">
+                    <div className="flex justify-between items-start w-full">
+                      <div className="flex-1 min-w-0">
+                        <h3 className="font-semibold text-foreground truncate text-sm">
+                          {user.name || user.user}
+                        </h3>
+                        <p className="text-xs text-default-500 truncate">
+                          @{user.user}
+                        </p>
                       </div>
-                      <div className="flex justify-between text-sm">
-                        <span className="text-default-600">已使用</span>
-                        <span className="font-medium text-xs text-danger">
-                          {formatFlow(usedFlow)}
-                        </span>
-                      </div>
-                      <Progress
-                        aria-label={`流量使用 ${flowPercent.toFixed(1)}%`}
-                        className="mt-1"
-                        color={
-                          flowPercent > 90
-                            ? "danger"
-                            : flowPercent > 70
-                              ? "warning"
-                              : "success"
-                        }
-                        size="sm"
-                        value={flowPercent}
-                      />
-                    </div>
-
-                    {/* 其他信息 */}
-                    <div className="space-y-1.5 pt-2 border-t border-divider">
-                      <div className="flex justify-between text-sm">
-                        <span className="text-default-600">转发数量</span>
-                        <span className="font-medium text-xs">{user.num}</span>
-                      </div>
-                      <div className="flex justify-between text-sm">
-                        <span className="text-default-600">重置日期</span>
-                        <span className="text-xs">
-                          {user.flowResetTime === 0
-                            ? "不重置"
-                            : `每月${user.flowResetTime}号`}
-                        </span>
-                      </div>
-                      {user.expTime && (
-                        <div className="flex justify-between text-sm">
-                          <span className="text-default-600">过期时间</span>
-                          <div className="text-right">
-                            {expStatus && expStatus.color === "success" ? (
-                              <div className="text-xs">
-                                {formatDate(user.expTime)}
-                              </div>
-                            ) : (
-                              <Chip
-                                className="text-xs"
-                                color={expStatus?.color || "default"}
-                                size="sm"
-                                variant="flat"
-                              >
-                                {expStatus?.text || "未知状态"}
-                              </Chip>
-                            )}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="space-y-1.5 mt-3">
-                    {/* 第一行：编辑和重置 */}
-                    <div className="flex gap-1.5">
-                      <Button
-                        className="flex-1 min-h-8"
-                        color="primary"
-                        size="sm"
-                        startContent={<EditIcon className="w-3 h-3" />}
-                        variant="flat"
-                        onPress={() => handleEdit(user)}
-                      >
-                        编辑
-                      </Button>
-                      <Button
-                        className="flex-1 min-h-8"
-                        color="warning"
-                        size="sm"
-                        startContent={
-                          <svg
-                            className="w-3 h-3"
-                            fill="currentColor"
-                            viewBox="0 0 20 20"
+                      <div className="flex items-center gap-1.5 ml-2">
+                        <Chip
+                          className="text-xs"
+                          color={userStatus.color}
+                          size="sm"
+                          variant="flat"
+                        >
+                          {userStatus.text}
+                        </Chip>
+                        {user.disabledByQuota ? (
+                          <Chip
+                            className="text-xs"
+                            color="danger"
+                            size="sm"
+                            variant="flat"
                           >
-                            <path
-                              clipRule="evenodd"
-                              d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z"
-                              fillRule="evenodd"
-                            />
-                          </svg>
-                        }
-                        variant="flat"
-                        onPress={() => handleResetFlow(user)}
-                      >
-                        重置
-                      </Button>
+                            配额超额
+                          </Chip>
+                        ) : null}
+                      </div>
+                    </div>
+                  </CardHeader>
+
+                  <CardBody className="pt-0 pb-3 md:pt-0 md:pb-3">
+                    <div className="space-y-2">
+                      {/* 流量信息 */}
+                      <div className="space-y-1.5">
+                        <div className="flex justify-between text-sm">
+                          <span className="text-default-600">流量限制</span>
+                          <span className="font-medium text-xs">
+                            {formatFlow(user.flow, "gb")}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-default-600">已使用</span>
+                          <span className="font-medium text-xs text-danger">
+                            {formatFlow(usedFlow)}
+                          </span>
+                        </div>
+                        <Progress
+                          aria-label={`流量使用 ${flowPercent.toFixed(1)}%`}
+                          className="mt-1"
+                          color={
+                            flowPercent > 90
+                              ? "danger"
+                              : flowPercent > 70
+                                ? "warning"
+                                : "success"
+                          }
+                          size="sm"
+                          value={flowPercent}
+                        />
+                      </div>
+
+                      {/* 其他信息 */}
+                      <div className="space-y-1.5 pt-2 border-t border-divider">
+                        {(user.dailyQuotaGB ?? 0) > 0 ||
+                        (user.monthlyQuotaGB ?? 0) > 0 ||
+                        (user.disabledByQuota ?? 0) > 0 ? (
+                          <>
+                            <div className="flex justify-between text-sm">
+                              <span className="text-default-600">每日配额</span>
+                              <span className="font-medium text-xs">
+                                {formatFlow(Number(user.dailyUsedBytes ?? 0))} /{" "}
+                                {formatQuotaLimit(user.dailyQuotaGB)}
+                              </span>
+                            </div>
+                            <div className="flex justify-between text-sm">
+                              <span className="text-default-600">每月配额</span>
+                              <span className="font-medium text-xs">
+                                {formatFlow(Number(user.monthlyUsedBytes ?? 0))}{" "}
+                                / {formatQuotaLimit(user.monthlyQuotaGB)}
+                              </span>
+                            </div>
+                          </>
+                        ) : null}
+                        <div className="flex justify-between text-sm">
+                          <span className="text-default-600">规则数量</span>
+                          <span className="font-medium text-xs">
+                            {user.num}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-default-600">重置日期</span>
+                          <span className="text-xs">
+                            {user.flowResetTime === 0
+                              ? "不重置"
+                              : `每月${user.flowResetTime}号`}
+                          </span>
+                        </div>
+                        {user.expTime && (
+                          <div className="flex justify-between text-sm">
+                            <span className="text-default-600">过期时间</span>
+                            <div className="text-right">
+                              {expStatus && expStatus.color === "success" ? (
+                                <div className="text-xs">
+                                  {formatDate(user.expTime)}
+                                </div>
+                              ) : (
+                                <Chip
+                                  className="text-xs"
+                                  color={expStatus?.color || "default"}
+                                  size="sm"
+                                  variant="flat"
+                                >
+                                  {expStatus?.text || "未知状态"}
+                                </Chip>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     </div>
 
-                    {/* 第二行：权限和删除 */}
-                    <div className="flex gap-1.5">
-                      <Button
-                        className="flex-1 min-h-8"
-                        color="success"
-                        size="sm"
-                        startContent={<SettingsIcon className="w-3 h-3" />}
-                        variant="flat"
-                        onPress={() => handleManageTunnels(user)}
-                      >
-                        权限
-                      </Button>
-                      <Button
-                        className="flex-1 min-h-8"
-                        color="danger"
-                        size="sm"
-                        startContent={<DeleteIcon className="w-3 h-3" />}
-                        variant="flat"
-                        onPress={() => handleDelete(user)}
-                      >
-                        删除
-                      </Button>
+                    <div className="space-y-1.5 mt-3">
+                      {/* 第一行：编辑和重置 */}
+                      <div className="flex gap-1.5">
+                        <Button
+                          className="flex-1 min-h-8"
+                          color="primary"
+                          size="sm"
+                          startContent={<EditIcon className="w-3 h-3" />}
+                          variant="flat"
+                          onPress={() => handleEdit(user)}
+                        >
+                          编辑
+                        </Button>
+                        <Button
+                          className="flex-1 min-h-8"
+                          color="warning"
+                          size="sm"
+                          startContent={
+                            <svg
+                              aria-hidden="true"
+                              className="w-3 h-3"
+                              fill="currentColor"
+                              viewBox="0 0 20 20"
+                            >
+                              <path
+                                clipRule="evenodd"
+                                d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z"
+                                fillRule="evenodd"
+                              />
+                            </svg>
+                          }
+                          variant="flat"
+                          onPress={() => handleResetFlow(user)}
+                        >
+                          重置
+                        </Button>
+                      </div>
+
+                      {/* 第二行：权限和删除 */}
+                      <div className="flex gap-1.5">
+                        <Button
+                          className="flex-1 min-h-8"
+                          color="success"
+                          size="sm"
+                          startContent={<SettingsIcon className="w-3 h-3" />}
+                          variant="flat"
+                          onPress={() => handleManageTunnels(user)}
+                        >
+                          权限
+                        </Button>
+                        <Button
+                          className="flex-1 min-h-8"
+                          color="danger"
+                          size="sm"
+                          startContent={<DeleteIcon className="w-3 h-3" />}
+                          variant="flat"
+                          onPress={() => handleDelete(user)}
+                        >
+                          删除
+                        </Button>
+                      </div>
                     </div>
-                  </div>
-                </CardBody>
-              </Card>
+                  </CardBody>
+                </Card>
+              </StaggerItem>
             );
           })}
-        </div>
+        </StaggerList>
       )}
 
       {/* 用户表单模态框 */}
       <Modal
         backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl",
+        }}
         isOpen={isUserModalOpen}
         placement="center"
         scrollBehavior="outside"
@@ -869,7 +1499,7 @@ export default function UserPage() {
               />
               <Input
                 isRequired
-                label="转发数量"
+                label="规则数量"
                 max="99999"
                 min="1"
                 type="number"
@@ -912,7 +1542,6 @@ export default function UserPage() {
               <DatePicker
                 isRequired
                 showMonthAndYearPickers
-                className="cursor-pointer"
                 label="过期时间"
                 value={
                   userForm.expTime
@@ -940,6 +1569,81 @@ export default function UserPage() {
               />
             </div>
 
+            {isEdit &&
+              editingUser &&
+              ((editingUser.dailyQuotaGB ?? 0) > 0 ||
+                (editingUser.monthlyQuotaGB ?? 0) > 0 ||
+                (editingUser.disabledByQuota ?? 0) > 0) && (
+                <div className="space-y-3 rounded-xl border border-default-200 bg-default-50/60 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-semibold text-foreground">
+                        当前配额状态
+                      </h3>
+                      <p className="text-xs text-default-500">
+                        配额超额后会自动暂停该用户的转发，重置后可恢复
+                      </p>
+                    </div>
+                    {editingUser.disabledByQuota ? (
+                      <Chip color="danger" size="sm" variant="flat">
+                        配额已触发禁用
+                      </Chip>
+                    ) : (
+                      <Chip color="success" size="sm" variant="flat">
+                        配额正常
+                      </Chip>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                    <div className="rounded-lg bg-background p-3">
+                      <div className="text-xs text-default-500">每日用量</div>
+                      <div className="mt-1 text-sm font-semibold text-foreground">
+                        {formatFlow(Number(editingUser.dailyUsedBytes ?? 0))} /{" "}
+                        {formatQuotaLimit(editingUser.dailyQuotaGB)}
+                      </div>
+                    </div>
+                    <div className="rounded-lg bg-background p-3">
+                      <div className="text-xs text-default-500">每月用量</div>
+                      <div className="mt-1 text-sm font-semibold text-foreground">
+                        {formatFlow(Number(editingUser.monthlyUsedBytes ?? 0))}{" "}
+                        / {formatQuotaLimit(editingUser.monthlyQuotaGB)}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      color="warning"
+                      isLoading={quotaResetLoading}
+                      size="sm"
+                      variant="flat"
+                      onPress={() => handleQuotaReset("daily")}
+                    >
+                      重置每日配额
+                    </Button>
+                    <Button
+                      color="warning"
+                      isLoading={quotaResetLoading}
+                      size="sm"
+                      variant="flat"
+                      onPress={() => handleQuotaReset("monthly")}
+                    >
+                      重置每月配额
+                    </Button>
+                    <Button
+                      color="primary"
+                      isLoading={quotaResetLoading}
+                      size="sm"
+                      variant="flat"
+                      onPress={() => handleQuotaReset("all")}
+                    >
+                      全部重置并恢复
+                    </Button>
+                  </div>
+                </div>
+              )}
+
             <RadioGroup
               label="状态"
               orientation="horizontal"
@@ -951,6 +1655,26 @@ export default function UserPage() {
               <Radio value="1">正常</Radio>
               <Radio value="0">禁用</Radio>
             </RadioGroup>
+
+            {userGroups.length > 0 && (
+              <Select
+                label="用户分组（可选）"
+                placeholder="选择要加入的分组"
+                selectedKeys={new Set((userForm.groupIds ?? []).map(String))}
+                selectionMode="multiple"
+                onSelectionChange={(keys) => {
+                  const selected = Array.from(keys as Set<string>).map(Number);
+
+                  setUserForm((prev) => ({ ...prev, groupIds: selected }));
+                }}
+              >
+                {userGroups.map((g) => (
+                  <SelectItem key={g.id.toString()} textValue={g.name}>
+                    {g.name}
+                  </SelectItem>
+                ))}
+              </Select>
+            )}
           </ModalBody>
           <ModalFooter>
             <Button onPress={onUserModalClose}>取消</Button>
@@ -979,15 +1703,49 @@ export default function UserPage() {
         onClose={onTunnelModalClose}
       >
         <ModalContent>
-          <ModalHeader>用户 {currentUser?.user} 的隧道权限管理</ModalHeader>
+          <ModalHeader>用户 {currentUser?.user} 的权限管理</ModalHeader>
           <ModalBody>
             <div className="space-y-6">
+              {/* 监控权限部分 */}
+              <div>
+                <h3 className="text-lg font-semibold mb-4">监控权限</h3>
+                <div className="flex items-center justify-between gap-4 bg-default-100 dark:bg-default-50 p-4 rounded-lg border border-default-200 dark:border-default-100/30">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-foreground">
+                      允许访问监控功能
+                    </div>
+                    <div className="text-xs text-default-500 mt-1">
+                      授予后，该用户可以访问监控页面并管理服务监控（TCP/ICMP）。
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {monitorPermissionLoading ? <Spinner size="sm" /> : null}
+                    <Switch
+                      isDisabled={
+                        !currentUser ||
+                        monitorPermissionLoading ||
+                        monitorPermissionMutatingUserId === currentUser.id
+                      }
+                      isSelected={
+                        currentUser
+                          ? monitorPermissionUserIds.has(currentUser.id)
+                          : false
+                      }
+                      onValueChange={(v) =>
+                        currentUser &&
+                        void setUserMonitorPermission(currentUser.id, v)
+                      }
+                    />
+                  </div>
+                </div>
+              </div>
+
               {/* 分配新权限部分 */}
               <div>
                 <h3 className="text-lg font-semibold mb-4">分配新权限</h3>
                 <div className="space-y-4">
                   <div className="text-sm text-default-500 bg-default-100 dark:bg-default-50 p-3 rounded-lg border border-default-200 dark:border-default-100/30">
-                    流量限制、转发数量、到期时间、流量重置时间将自动继承用户设置
+                    流量限制、规则数量、到期时间、流量重置时间将自动继承用户设置
                   </div>
 
                   <div className="grid gap-2 max-h-72 overflow-y-auto pr-1">
@@ -1031,13 +1789,12 @@ export default function UserPage() {
                           <div className="flex items-center justify-between gap-4">
                             <div className="flex items-center gap-3 flex-1 min-w-0">
                               <Checkbox
-                                classNames={{
-                                  base: "pointer-events-none",
-                                }}
                                 color="primary"
                                 isDisabled={isAssigned}
                                 isSelected={isSelected}
                                 size="md"
+                                onClick={(event) => event.stopPropagation()}
+                                onKeyDown={(event) => event.stopPropagation()}
                                 onValueChange={() =>
                                   toggleTunnelSelection(tunnel.id)
                                 }
@@ -1066,7 +1823,7 @@ export default function UserPage() {
                                   classNames={{
                                     trigger: "min-h-10 h-10",
                                   }}
-                                  label="限速规则"
+                                  placeholder="不限速"
                                   selectedKeys={
                                     batchTunnelSelections.get(tunnel.id) !==
                                       null &&
@@ -1077,32 +1834,29 @@ export default function UserPage() {
                                             .get(tunnel.id)!
                                             .toString(),
                                         ]
-                                      : ["null"]
+                                      : []
                                   }
                                   size="sm"
                                   onClick={(e) => e.stopPropagation()}
                                   onSelectionChange={(keys) => {
-                                    const value = Array.from(keys)[0] as string;
+                                    const selectedKey = Array.from(keys)[0] as
+                                      | string
+                                      | undefined;
 
                                     updateTunnelSpeedLimit(
                                       tunnel.id,
-                                      value === "null" ? null : Number(value),
+                                      selectedKey ? Number(selectedKey) : null,
                                     );
                                   }}
                                 >
-                                  {[
-                                    <SelectItem key="null" textValue="不限速">
-                                      不限速
-                                    </SelectItem>,
-                                    ...tunnelSpeedLimits.map((sl) => (
-                                      <SelectItem
-                                        key={sl.id.toString()}
-                                        textValue={sl.name}
-                                      >
-                                        {sl.name}
-                                      </SelectItem>
-                                    )),
-                                  ]}
+                                  {tunnelSpeedLimits.map((sl) => (
+                                    <SelectItem
+                                      key={sl.id.toString()}
+                                      textValue={sl.name}
+                                    >
+                                      {sl.name}
+                                    </SelectItem>
+                                  ))}
                                 </Select>
                               </div>
                             )}
@@ -1117,17 +1871,22 @@ export default function UserPage() {
                     )}
                   </div>
 
-                  <Button
-                    className="w-full sm:w-auto"
-                    color="primary"
-                    isDisabled={batchTunnelSelections.size === 0}
-                    isLoading={assignLoading}
-                    onPress={handleBatchAssignTunnel}
-                  >
-                    分配权限{" "}
-                    {batchTunnelSelections.size > 0 &&
-                      `(${batchTunnelSelections.size}个隧道)`}
-                  </Button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      className="w-full sm:w-auto"
+                      color="primary"
+                      isDisabled={batchTunnelSelections.size === 0}
+                      isLoading={assignLoading}
+                      onPress={handleBatchAssignTunnel}
+                    >
+                      分配权限
+                    </Button>
+                    {batchTunnelSelections.size > 0 && (
+                      <Chip color="primary" size="sm" variant="flat">
+                        已选 {batchTunnelSelections.size} 个隧道
+                      </Chip>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -1137,14 +1896,15 @@ export default function UserPage() {
                 <Table
                   aria-label="用户隧道权限列表"
                   classNames={{
-                    wrapper: "shadow-none",
-                    th: "bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300 font-medium",
+                    th: "bg-default-100/50 text-default-600 font-semibold text-sm border-b border-divider py-3 uppercase tracking-wider",
+                    td: "py-3 border-b border-divider/50 group-data-[last=true]:border-b-0",
+                    tr: "hover:bg-default-50/50 transition-colors",
                   }}
                 >
                   <TableHeader>
                     <TableColumn>隧道名称</TableColumn>
                     <TableColumn>流量统计</TableColumn>
-                    <TableColumn>转发数量</TableColumn>
+                    <TableColumn>规则数量</TableColumn>
                     <TableColumn>状态</TableColumn>
                     <TableColumn>限速规则</TableColumn>
                     <TableColumn>重置时间</TableColumn>
@@ -1211,22 +1971,25 @@ export default function UserPage() {
                           <div className="flex items-center gap-2">
                             <Button
                               isIconOnly
+                              aria-label="编辑隧道权限"
                               color="primary"
                               size="sm"
                               variant="flat"
-                              onClick={() => handleEditTunnel(userTunnel)}
+                              onPress={() => handleEditTunnel(userTunnel)}
                             >
                               <EditIcon className="w-4 h-4" />
                             </Button>
                             <Button
                               isIconOnly
+                              aria-label="重置隧道流量"
                               color="warning"
                               size="sm"
                               title="重置流量"
                               variant="flat"
-                              onClick={() => handleResetTunnelFlow(userTunnel)}
+                              onPress={() => handleResetTunnelFlow(userTunnel)}
                             >
                               <svg
+                                aria-hidden="true"
                                 className="w-4 h-4"
                                 fill="currentColor"
                                 viewBox="0 0 20 20"
@@ -1240,10 +2003,11 @@ export default function UserPage() {
                             </Button>
                             <Button
                               isIconOnly
+                              aria-label="删除隧道权限"
                               color="danger"
                               size="sm"
                               variant="flat"
-                              onClick={() => handleRemoveTunnel(userTunnel)}
+                              onPress={() => handleRemoveTunnel(userTunnel)}
                             >
                               <DeleteIcon className="w-4 h-4" />
                             </Button>
@@ -1265,6 +2029,9 @@ export default function UserPage() {
       {/* 编辑隧道权限模态框 */}
       <Modal
         backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl",
+        }}
         isDismissable={false}
         isOpen={isEditTunnelModalOpen}
         placement="center"
@@ -1297,7 +2064,7 @@ export default function UserPage() {
                   />
 
                   <Input
-                    label="转发数量"
+                    label="规则数量"
                     max="99999"
                     min="1"
                     type="number"
@@ -1316,37 +2083,35 @@ export default function UserPage() {
 
                   <Select
                     label="限速规则"
+                    placeholder="不限速"
                     selectedKeys={
-                      editTunnelForm.speedId
-                        ? [editTunnelForm.speedId.toString()]
-                        : ["null"]
+                      editTunnelSelectedSpeedId !== null
+                        ? [editTunnelSelectedSpeedId.toString()]
+                        : []
                     }
                     onSelectionChange={(keys) => {
-                      const value = Array.from(keys)[0] as string;
+                      const selectedKey = Array.from(keys)[0] as
+                        | string
+                        | undefined;
 
                       setEditTunnelForm((prev) =>
                         prev
                           ? {
                               ...prev,
-                              speedId: value === "null" ? null : Number(value),
+                              speedId: selectedKey ? Number(selectedKey) : null,
                             }
                           : null,
                       );
                     }}
                   >
-                    {[
-                      <SelectItem key="null" textValue="不限速">
-                        不限速
-                      </SelectItem>,
-                      ...editAvailableSpeedLimits.map((speedLimit) => (
-                        <SelectItem
-                          key={speedLimit.id.toString()}
-                          textValue={speedLimit.name}
-                        >
-                          {speedLimit.name}
-                        </SelectItem>
-                      )),
-                    ]}
+                    {editAvailableSpeedLimits.map((speedLimit) => (
+                      <SelectItem
+                        key={speedLimit.id.toString()}
+                        textValue={speedLimit.name}
+                      >
+                        {speedLimit.name}
+                      </SelectItem>
+                    ))}
                   </Select>
 
                   <Select
@@ -1380,7 +2145,6 @@ export default function UserPage() {
                   <DatePicker
                     isRequired
                     showMonthAndYearPickers
-                    className="cursor-pointer"
                     label="到期时间"
                     value={
                       editTunnelForm.expTime
@@ -1446,6 +2210,9 @@ export default function UserPage() {
       {/* 删除确认对话框 */}
       <Modal
         backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl",
+        }}
         isOpen={isDeleteModalOpen}
         placement="center"
         scrollBehavior="outside"
@@ -1489,6 +2256,9 @@ export default function UserPage() {
       {/* 删除隧道权限确认对话框 */}
       <Modal
         backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl",
+        }}
         isOpen={isDeleteTunnelModalOpen}
         placement="center"
         scrollBehavior="outside"
@@ -1515,7 +2285,7 @@ export default function UserPage() {
                   的权限吗？
                 </p>
                 <p className="text-small text-default-500 mt-1">
-                  删除后该用户将无法使用此隧道创建转发，此操作不可撤销。
+                  删除后该用户将无法使用此隧道创建规则，此操作不可撤销。{" "}
                 </p>
               </div>
             </div>
@@ -1534,6 +2304,9 @@ export default function UserPage() {
       {/* 重置流量确认对话框 */}
       <Modal
         backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl",
+        }}
         isOpen={isResetFlowModalOpen}
         placement="center"
         scrollBehavior="outside"
@@ -1548,6 +2321,7 @@ export default function UserPage() {
             <div className="flex items-center gap-4">
               <div className="w-12 h-12 bg-warning-100 rounded-full flex items-center justify-center">
                 <svg
+                  aria-hidden="true"
                   className="w-6 h-6 text-warning"
                   fill="currentColor"
                   viewBox="0 0 20 20"
@@ -1622,6 +2396,9 @@ export default function UserPage() {
       {/* 重置隧道流量确认对话框 */}
       <Modal
         backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl",
+        }}
         isOpen={isResetTunnelFlowModalOpen}
         placement="center"
         scrollBehavior="outside"
@@ -1636,6 +2413,7 @@ export default function UserPage() {
             <div className="flex items-center gap-4">
               <div className="w-12 h-12 bg-warning-100 rounded-full flex items-center justify-center">
                 <svg
+                  aria-hidden="true"
                   className="w-6 h-6 text-warning"
                   fill="currentColor"
                   viewBox="0 0 20 20"
@@ -1708,6 +2486,6 @@ export default function UserPage() {
           </ModalFooter>
         </ModalContent>
       </Modal>
-    </div>
+    </AnimatedPage>
   );
 }

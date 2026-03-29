@@ -1,18 +1,18 @@
 import { useState, useEffect, useCallback } from "react";
-import { Button } from "@heroui/button";
-import { Card, CardBody, CardHeader } from "@heroui/card";
-import { Tabs, Tab } from "@heroui/tabs";
-import { Input } from "@heroui/input";
+import { toast } from "react-hot-toast";
+
+import { Button } from "@/shadcn-bridge/heroui/button";
+import { Card, CardBody, CardHeader } from "@/shadcn-bridge/heroui/card";
+import { Tabs, Tab } from "@/shadcn-bridge/heroui/tabs";
+import { Input } from "@/shadcn-bridge/heroui/input";
 import {
   Modal,
   ModalContent,
   ModalHeader,
   ModalBody,
   ModalFooter,
-} from "@heroui/modal";
-import { Select, SelectItem } from "@heroui/select";
-import { toast } from "react-hot-toast";
-
+} from "@/shadcn-bridge/heroui/modal";
+import { Select, SelectItem } from "@/shadcn-bridge/heroui/select";
 import {
   getNodeList,
   createPeerShare,
@@ -131,7 +131,9 @@ export default function PanelSharingPage() {
       const res = await getPeerShareList();
 
       if (res.code === 0) {
-        setShares(res.data || []);
+        setShares(
+          Array.isArray(res.data) ? (res.data as unknown as PeerShare[]) : [],
+        );
       } else {
         toast.error(res.msg || "加载分享列表失败");
       }
@@ -145,9 +147,9 @@ export default function PanelSharingPage() {
       const res = await getNodeList();
 
       if (res.code === 0) {
-        const localNodes: Node[] = (res.data || []).filter(
-          (node: Node) => (node?.isRemote ?? 0) !== 1,
-        );
+        const localNodes: Node[] = (
+          Array.isArray(res.data) ? (res.data as Node[]) : []
+        ).filter((node: Node) => (node?.isRemote ?? 0) !== 1);
 
         setNodes(localNodes);
         setShareForm((prev) => {
@@ -172,7 +174,11 @@ export default function PanelSharingPage() {
       const res = await getPeerRemoteUsageList();
 
       if (res.code === 0) {
-        setRemoteUsageNodes(res.data || []);
+        setRemoteUsageNodes(
+          Array.isArray(res.data)
+            ? (res.data as unknown as RemoteUsageNode[])
+            : [],
+        );
       } else {
         toast.error(res.msg || "加载远程占用端口失败");
       }
@@ -369,6 +375,9 @@ export default function PanelSharingPage() {
   };
 
   const formatChainType = (chainType: number, hopInx: number) => {
+    if (chainType === 1) {
+      return "入口节点";
+    }
     if (chainType === 2) {
       return `中继跳点 #${hopInx}`;
     }
@@ -391,11 +400,31 @@ export default function PanelSharingPage() {
         selectedKey={selectedTab}
         onSelectionChange={(k) => setSelectedTab(k as string)}
       >
-        <Tab key="my-shares" title="我分享的 (Provider)">
+        <Tab
+          key="my-shares"
+          title={
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold text-foreground">
+                Provider
+              </span>
+              <span className="text-xs text-default-500">我分享的</span>
+            </div>
+          }
+        >
           <Card>
-            <CardBody>
-              <div className="mb-4">
+            <CardBody className="space-y-5">
+              <div className="mt-4 flex flex-col gap-4 rounded-lg border border-divider bg-default-50/60 dark:bg-default-100/20 p-4 md:flex-row md:items-center md:justify-between">
+                <div className="space-y-1">
+                  <h2 className="text-lg font-semibold text-foreground">
+                    Provider 共享
+                  </h2>
+                  <p className="text-sm text-default-500">
+                    将本地节点分享给其他面板，统一管理
+                    Token、端口范围和到期策略。
+                  </p>
+                </div>
                 <Button
+                  className="self-start md:self-auto"
                   color="primary"
                   onPress={() => setCreateShareOpen(true)}
                 >
@@ -404,9 +433,27 @@ export default function PanelSharingPage() {
               </div>
 
               {loading ? (
-                <div className="text-center py-10 text-gray-500">加载中...</div>
+                <div className="text-center py-12 text-default-500">
+                  加载中...
+                </div>
               ) : shares.length === 0 ? (
-                <div className="text-center py-10 text-gray-500">暂无分享</div>
+                <div className="rounded-lg border border-dashed border-divider bg-default-50/60 dark:bg-default-100/20 px-6 py-10 text-center">
+                  <p className="text-base font-semibold text-foreground">
+                    暂无分享
+                  </p>
+                  <p className="mt-2 text-sm text-default-500">
+                    先创建一个分享，把本地节点开放给其他面板使用。
+                  </p>
+                  <div className="mt-5 flex justify-center">
+                    <Button
+                      color="primary"
+                      variant="flat"
+                      onPress={() => setCreateShareOpen(true)}
+                    >
+                      创建第一个分享
+                    </Button>
+                  </div>
+                </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {shares.map((share) => (
@@ -414,7 +461,7 @@ export default function PanelSharingPage() {
                       key={share.id}
                       className="border border-divider shadow-sm"
                     >
-                      <CardHeader className="flex justify-between">
+                      <CardHeader className="flex justify-between pb-2 md:pb-2">
                         <h3 className="font-bold">{share.name}</h3>
                         <div className="flex gap-2">
                           <Button
@@ -441,7 +488,7 @@ export default function PanelSharingPage() {
                           </Button>
                         </div>
                       </CardHeader>
-                      <CardBody className="text-sm space-y-2">
+                      <CardBody className="text-sm space-y-2 pt-0 md:pt-0">
                         <p>
                           端口范围: {share.portRangeStart} -{" "}
                           {share.portRangeEnd}
@@ -501,11 +548,30 @@ export default function PanelSharingPage() {
             </CardBody>
           </Card>
         </Tab>
-        <Tab key="remote-nodes" title="远程节点 (Consumer)">
+        <Tab
+          key="remote-nodes"
+          title={
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold text-foreground">
+                Consumer
+              </span>
+              <span className="text-xs text-default-500">远程节点</span>
+            </div>
+          }
+        >
           <Card>
-            <CardBody>
-              <div className="mb-4">
+            <CardBody className="space-y-5">
+              <div className="mt-4 flex flex-col gap-4 rounded-lg border border-divider bg-default-50/60 dark:bg-default-100/20 p-4 md:flex-row md:items-center md:justify-between">
+                <div className="space-y-1">
+                  <h2 className="text-lg font-semibold text-foreground">
+                    Consumer 接入
+                  </h2>
+                  <p className="text-sm text-default-500">
+                    导入远程节点后，可在这里查看端口占用和同步状态。
+                  </p>
+                </div>
                 <Button
+                  className="self-start md:self-auto"
                   color="secondary"
                   onPress={() => setImportNodeOpen(true)}
                 >
@@ -514,13 +580,26 @@ export default function PanelSharingPage() {
               </div>
 
               {remoteUsageLoading ? (
-                <div className="text-center py-10 text-gray-500">加载中...</div>
+                <div className="text-center py-12 text-default-500">
+                  加载中...
+                </div>
               ) : remoteUsageNodes.length === 0 ? (
-                <div className="text-center py-10 text-gray-500">
-                  <p>暂无远程节点占用记录。</p>
-                  <p className="mt-2">
+                <div className="rounded-lg border border-dashed border-divider bg-default-50/60 dark:bg-default-100/20 px-6 py-10 text-center">
+                  <p className="text-base font-semibold text-foreground">
+                    暂无远程节点占用记录
+                  </p>
+                  <p className="mt-2 text-sm text-default-500">
                     导入远程节点并创建隧道后，这里会显示远端端口占用情况。
                   </p>
+                  <div className="mt-5 flex justify-center">
+                    <Button
+                      color="secondary"
+                      variant="flat"
+                      onPress={() => setImportNodeOpen(true)}
+                    >
+                      去导入远程节点
+                    </Button>
+                  </div>
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -529,13 +608,13 @@ export default function PanelSharingPage() {
                       key={node.nodeId}
                       className="border border-divider shadow-sm"
                     >
-                      <CardHeader className="flex justify-between">
+                      <CardHeader className="flex justify-between pb-2 md:pb-2">
                         <h3 className="font-bold">{node.nodeName}</h3>
                         <span className="text-xs text-default-500">
                           绑定 {node.activeBindingNum || 0}
                         </span>
                       </CardHeader>
-                      <CardBody className="text-sm space-y-2">
+                      <CardBody className="text-sm space-y-2 pt-0 md:pt-0">
                         {node.syncError && (
                           <div className="px-2 py-1.5 rounded-md bg-warning-50 dark:bg-warning-100/10 text-warning-700 dark:text-warning-400 text-xs">
                             {node.syncError === "provider_share_deleted"
@@ -598,7 +677,15 @@ export default function PanelSharingPage() {
       </Tabs>
 
       {/* Create Share Modal */}
-      <Modal isOpen={createShareOpen} onClose={() => setCreateShareOpen(false)}>
+      <Modal
+        backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
+        isOpen={createShareOpen}
+        scrollBehavior="inside"
+        onClose={() => setCreateShareOpen(false)}
+      >
         <ModalContent>
           <ModalHeader>创建分享</ModalHeader>
           <ModalBody>
@@ -701,7 +788,15 @@ export default function PanelSharingPage() {
       </Modal>
 
       {/* Edit Share Modal */}
-      <Modal isOpen={editShareOpen} onClose={() => setEditShareOpen(false)}>
+      <Modal
+        backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
+        isOpen={editShareOpen}
+        scrollBehavior="inside"
+        onClose={() => setEditShareOpen(false)}
+      >
         <ModalContent>
           <ModalHeader>编辑分享</ModalHeader>
           <ModalBody>
@@ -796,7 +891,14 @@ export default function PanelSharingPage() {
       </Modal>
 
       {/* Import Node Modal */}
-      <Modal isOpen={importNodeOpen} onClose={() => setImportNodeOpen(false)}>
+      <Modal
+        backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
+        isOpen={importNodeOpen}
+        onClose={() => setImportNodeOpen(false)}
+      >
         <ModalContent>
           <ModalHeader>导入远程节点</ModalHeader>
           <ModalBody>

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,7 +18,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync" // 新增：用于管理连接状态的互斥锁
+	"sync"
 	"time"
 
 	"github.com/go-gost/x/config"
@@ -25,34 +26,67 @@ import (
 	"github.com/go-gost/x/service"
 	"github.com/gorilla/websocket"
 	"github.com/shirou/gopsutil/v3/cpu"
+	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
+	"github.com/shirou/gopsutil/v3/load"
 	"github.com/shirou/gopsutil/v3/mem"
 	psnet "github.com/shirou/gopsutil/v3/net"
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 )
 
 // SystemInfo 系统信息结构体
 type SystemInfo struct {
-	Uptime           uint64  `json:"uptime"`            // 开机时间	（秒）
-	BytesReceived    uint64  `json:"bytes_received"`    // 接收字节数
-	BytesTransmitted uint64  `json:"bytes_transmitted"` // 发送字节数
-	CPUUsage         float64 `json:"cpu_usage"`         // CPU使用率（百分比）
-	MemoryUsage      float64 `json:"memory_usage"`      // 内存使用率（百分比）
+	Uptime           uint64  `json:"uptime"`
+	BytesReceived    uint64  `json:"bytes_received"`
+	BytesTransmitted uint64  `json:"bytes_transmitted"`
+	CPUUsage         float64 `json:"cpu_usage"`
+	MemoryUsage      float64 `json:"memory_usage"`
+	DiskUsage        float64 `json:"disk_usage"`
+	Load1            float64 `json:"load1"`
+	Load5            float64 `json:"load5"`
+	Load15           float64 `json:"load15"`
+	TCPConns         int64   `json:"tcp_conns"`
+	UDPConns         int64   `json:"udp_conns"`
+	NetInSpeed       int64   `json:"net_in_speed"`
+	NetOutSpeed      int64   `json:"net_out_speed"`
 }
 
 // NetworkStats 网络统计信息
 type NetworkStats struct {
-	BytesReceived    uint64 `json:"bytes_received"`    // 接收字节数
-	BytesTransmitted uint64 `json:"bytes_transmitted"` // 发送字节数
+	BytesReceived    uint64 `json:"bytes_received"`
+	BytesTransmitted uint64 `json:"bytes_transmitted"`
+	BytesRecvDelta   uint64 `json:"bytes_recv_delta"`
+	BytesSentDelta   uint64 `json:"bytes_sent_delta"`
 }
 
 // CPUInfo CPU信息
 type CPUInfo struct {
-	Usage float64 `json:"usage"` // CPU使用率（百分比）
+	Usage float64 `json:"usage"`
 }
 
 // MemoryInfo 内存信息
 type MemoryInfo struct {
-	Usage float64 `json:"usage"` // 内存使用率（百分比）
+	Usage float64 `json:"usage"`
+}
+
+// DiskInfo 磁盘信息
+type DiskInfo struct {
+	Usage float64 `json:"usage"`
+}
+
+// LoadInfo 负载信息
+type LoadInfo struct {
+	Load1  float64 `json:"load1"`
+	Load5  float64 `json:"load5"`
+	Load15 float64 `json:"load15"`
+}
+
+// ConnectionInfo 连接信息
+type ConnectionInfo struct {
+	TCPConns int64 `json:"tcp_conns"`
+	UDPConns int64 `json:"udp_conns"`
 }
 
 // CommandMessage 命令消息结构体
@@ -91,26 +125,53 @@ type TcpPingResponse struct {
 	RequestId    string  `json:"requestId,omitempty"`
 }
 
+// ServiceMonitorCheckRequest service monitor check request.
+type ServiceMonitorCheckRequest struct {
+	MonitorID  int64  `json:"monitorId"`
+	Type       string `json:"type"` // tcp|icmp
+	Target     string `json:"target"`
+	TimeoutSec int    `json:"timeoutSec"`
+}
+
+// ServiceMonitorCheckResult node-executed check output.
+// CommandResponse.Success indicates command execution status.
+// Actual check success is represented by this struct.
+type ServiceMonitorCheckResult struct {
+	MonitorID    int64   `json:"monitorId"`
+	Success      bool    `json:"success"`
+	LatencyMs    float64 `json:"latencyMs"`
+	StatusCode   int     `json:"statusCode,omitempty"`
+	ErrorMessage string  `json:"errorMessage,omitempty"`
+}
+
 const (
 	reporterReadWait  = 60 * time.Second
 	reporterWriteWait = 5 * time.Second
+	wsPingInterval    = 20 * time.Second // 独立 WebSocket ping 间隔
+	initialBackoff    = 2 * time.Second  // 重连初始退避
+	maxBackoff        = 2 * time.Minute  // 重连最大退避
 )
 
 type WebSocketReporter struct {
-	url            string
-	addr           string // 保存服务器地址
-	secret         string // 保存密钥
-	version        string // 保存版本号
-	conn           *websocket.Conn
-	reconnectTime  time.Duration
-	pingInterval   time.Duration
-	configInterval time.Duration
-	ctx            context.Context
-	cancel         context.CancelFunc
-	connected      bool
-	connecting     bool              // 新增：正在连接状态
-	connMutex      sync.Mutex        // 新增：连接状态锁
-	aesCrypto      *crypto.AESCrypto // 新增：AES加密器
+	url               string
+	addr              string // 保存服务器地址
+	secret            string // 保存密钥
+	version           string // 保存版本号
+	preferredWSScheme string
+	conn              *websocket.Conn
+	curBackoff        time.Duration // 当前重连退避间隔
+	pingInterval      time.Duration
+	configInterval    time.Duration
+	ctx               context.Context
+	cancel            context.CancelFunc
+	connected         bool
+	connecting        bool              // 正在连接状态
+	connMutex         sync.Mutex        // 连接状态锁
+	aesCrypto         *crypto.AESCrypto // AES加密器
+}
+
+var wsDial = func(dialer *websocket.Dialer, rawURL string) (*websocket.Conn, *http.Response, error) {
+	return dialer.Dial(rawURL, nil)
 }
 
 // NewWebSocketReporter 创建一个新的WebSocket报告器
@@ -128,8 +189,8 @@ func NewWebSocketReporter(serverURL string, secret string) *WebSocketReporter {
 
 	return &WebSocketReporter{
 		url:            serverURL,
-		reconnectTime:  5 * time.Second,  // 重连间隔
-		pingInterval:   2 * time.Second,  // 发送间隔改为2秒
+		curBackoff:     initialBackoff,   // 当前退避间隔
+		pingInterval:   1 * time.Second,  // 指标上报间隔（每秒采集）
 		configInterval: 10 * time.Minute, // 配置上报间隔
 		ctx:            ctx,
 		cancel:         cancel,
@@ -147,10 +208,17 @@ func (w *WebSocketReporter) Start() {
 // Stop 停止WebSocket报告器
 func (w *WebSocketReporter) Stop() {
 	w.cancel()
+	w.connMutex.Lock()
 	if w.conn != nil {
 		w.conn.Close()
 	}
+	w.connMutex.Unlock()
+}
 
+// backoffWithJitter 返回带随机抖动的退避时间（±25%）
+func backoffWithJitter(base time.Duration) time.Duration {
+	jitter := time.Duration(float64(base) * (0.75 + rand.Float64()*0.5))
+	return jitter
 }
 
 // run 主运行循环
@@ -167,23 +235,32 @@ func (w *WebSocketReporter) run() {
 
 			if needConnect {
 				if err := w.connect(); err != nil {
-					fmt.Printf("❌ WebSocket连接失败: %v，%v后重试\n", err, w.reconnectTime)
+					wait := backoffWithJitter(w.curBackoff)
+					fmt.Printf("❌ WebSocket连接失败: %v，%v后重试\n", err, wait)
+					// 指数退避：翻倍当前退避间隔，上限 maxBackoff
+					w.curBackoff *= 2
+					if w.curBackoff > maxBackoff {
+						w.curBackoff = maxBackoff
+					}
 					select {
-					case <-time.After(w.reconnectTime):
+					case <-time.After(wait):
 						continue
 					case <-w.ctx.Done():
 						return
 					}
 				}
+				// 连接成功：重置退避
+				w.curBackoff = initialBackoff
 			}
 
 			// 连接成功，开始发送消息
 			if w.connected {
 				w.handleConnection()
 			} else {
+				wait := backoffWithJitter(w.curBackoff)
 				// 如果连接失败，等待重试
 				select {
-				case <-time.After(w.reconnectTime):
+				case <-time.After(wait):
 					continue
 				case <-w.ctx.Done():
 					return
@@ -223,21 +300,14 @@ func (w *WebSocketReporter) connect() error {
 		json.Unmarshal(b, &cfg)
 	}
 
-	// 使用最新的配置重新构建 URL
-	currentURL := "ws://" + w.addr + "/system-info?type=1&secret=" + w.secret + "&version=" + w.version +
-		"&http=" + strconv.Itoa(cfg.Http) + "&tls=" + strconv.Itoa(cfg.Tls) + "&socks=" + strconv.Itoa(cfg.Socks)
-
-	u, err := url.Parse(currentURL)
-	if err != nil {
-		return fmt.Errorf("解析URL失败: %v", err)
-	}
+	candidates := buildWebSocketCandidates(w.addr, w.secret, w.version, cfg.Http, cfg.Tls, cfg.Socks, w.preferredWSScheme)
 
 	dialer := websocket.DefaultDialer
 	dialer.HandshakeTimeout = 10 * time.Second
 
-	conn, _, err := dialer.Dial(u.String(), nil)
+	conn, usedURL, err := dialWebSocketWithFallback(dialer, candidates)
 	if err != nil {
-		return fmt.Errorf("连接WebSocket失败: %v", err)
+		return err
 	}
 
 	// 如果在连接过程中已经有连接了，关闭新连接
@@ -248,6 +318,9 @@ func (w *WebSocketReporter) connect() error {
 
 	w.conn = conn
 	w.connected = true
+	if scheme := detectWebSocketScheme(usedURL); scheme != "" {
+		w.preferredWSScheme = scheme
+	}
 	_ = conn.SetReadDeadline(time.Now().Add(reporterReadWait))
 	conn.SetPingHandler(func(appData string) error {
 		_ = conn.SetReadDeadline(time.Now().Add(reporterReadWait))
@@ -265,8 +338,143 @@ func (w *WebSocketReporter) connect() error {
 		return nil
 	})
 
-	fmt.Printf("✅ WebSocket连接建立成功 (http=%d, tls=%d, socks=%d)\n", cfg.Http, cfg.Tls, cfg.Socks)
+	fmt.Printf("✅ WebSocket连接建立成功 (%s, http=%d, tls=%d, socks=%d)\n", sanitizeWebSocketURL(usedURL), cfg.Http, cfg.Tls, cfg.Socks)
 	return nil
+}
+
+func buildWebSocketCandidates(addr string, secret string, version string, http int, tls int, socks int, preferredScheme string) []string {
+	normalizedAddr, explicitScheme := normalizeReporterAddress(addr)
+	if normalizedAddr == "" {
+		normalizedAddr = strings.TrimSpace(addr)
+	}
+
+	query := "/system-info?type=1&secret=" + url.QueryEscape(secret) + "&version=" + url.QueryEscape(version) +
+		"&http=" + strconv.Itoa(http) + "&tls=" + strconv.Itoa(tls) + "&socks=" + strconv.Itoa(socks)
+
+	schemes := []string{"wss", "ws"}
+	if mappedScheme := mapToWebSocketScheme(explicitScheme); mappedScheme != "" {
+		if mappedScheme == "ws" {
+			schemes = []string{"ws", "wss"}
+		}
+	} else if preferredScheme == "ws" {
+		schemes = []string{"ws", "wss"}
+	}
+
+	return []string{
+		schemes[0] + "://" + normalizedAddr + query,
+		schemes[1] + "://" + normalizedAddr + query,
+	}
+}
+
+func normalizeReporterAddress(addr string) (string, string) {
+	raw := strings.TrimSpace(addr)
+	if raw == "" {
+		return "", ""
+	}
+
+	scheme := ""
+	if idx := strings.Index(raw, "://"); idx > 0 {
+		scheme = strings.ToLower(strings.TrimSpace(raw[:idx]))
+		if parsed, err := url.Parse(raw); err == nil {
+			if host := strings.TrimSpace(parsed.Host); host != "" {
+				return host, scheme
+			}
+		}
+		raw = raw[idx+3:]
+	}
+
+	if idx := strings.IndexAny(raw, "/?#"); idx >= 0 {
+		raw = raw[:idx]
+	}
+	return strings.TrimSpace(raw), scheme
+}
+
+func mapToWebSocketScheme(scheme string) string {
+	switch strings.ToLower(strings.TrimSpace(scheme)) {
+	case "wss", "https":
+		return "wss"
+	case "ws", "http":
+		return "ws"
+	default:
+		return ""
+	}
+}
+
+func detectWebSocketScheme(rawURL string) string {
+	if strings.HasPrefix(rawURL, "wss://") {
+		return "wss"
+	}
+	if strings.HasPrefix(rawURL, "ws://") {
+		return "ws"
+	}
+	return ""
+}
+
+func dialWebSocketWithFallback(dialer *websocket.Dialer, candidates []string) (*websocket.Conn, string, error) {
+	if len(candidates) == 0 {
+		return nil, "", fmt.Errorf("WebSocket候选地址为空")
+	}
+
+	var errs []string
+	for i, targetURL := range candidates {
+		conn, resp, err := wsDial(dialer, targetURL)
+		if err == nil {
+			if i > 0 {
+				fmt.Printf("↪️ WebSocket已自动回退成功: %s\n", sanitizeWebSocketURL(targetURL))
+			}
+			return conn, targetURL, nil
+		}
+		errMsg := formatWebSocketDialError(err, resp)
+		errs = append(errs, fmt.Sprintf("%s => %s", sanitizeWebSocketURL(targetURL), errMsg))
+		if i < len(candidates)-1 {
+			fmt.Printf(
+				"⚠️ WebSocket连接失败，准备从 %s 回退到 %s: %s\n",
+				strings.ToUpper(detectWebSocketScheme(targetURL)),
+				strings.ToUpper(detectWebSocketScheme(candidates[i+1])),
+				errMsg,
+			)
+		}
+	}
+
+	return nil, "", fmt.Errorf("连接WebSocket失败（已尝试%d种协议）: %s", len(candidates), strings.Join(errs, " | "))
+}
+
+func sanitizeWebSocketURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+
+	q := u.Query()
+	if q.Get("secret") != "" {
+		q.Set("secret", "***")
+		u.RawQuery = q.Encode()
+	}
+	return u.String()
+}
+
+func formatWebSocketDialError(err error, resp *http.Response) string {
+	if err == nil {
+		return ""
+	}
+	if resp == nil {
+		return err.Error()
+	}
+
+	msg := fmt.Sprintf("%s (HTTP %s)", err, resp.Status)
+	if resp.Body == nil {
+		return msg
+	}
+
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 256))
+	if readErr != nil {
+		return msg
+	}
+	bodyText := strings.TrimSpace(string(body))
+	if bodyText == "" {
+		return msg
+	}
+	return fmt.Sprintf("%s, body=%q", msg, bodyText)
 }
 
 // handleConnection 处理WebSocket连接
@@ -285,15 +493,34 @@ func (w *WebSocketReporter) handleConnection() {
 	// 启动消息接收goroutine
 	go w.receiveMessages()
 
-	// 主发送循环
-	ticker := time.NewTicker(w.pingInterval)
-	defer ticker.Stop()
+	// 指标上报 ticker
+	metricTicker := time.NewTicker(w.pingInterval)
+	defer metricTicker.Stop()
+
+	// 独立 WebSocket keepalive ping ticker
+	pingTicker := time.NewTicker(wsPingInterval)
+	defer pingTicker.Stop()
 
 	for {
 		select {
 		case <-w.ctx.Done():
 			return
-		case <-ticker.C:
+
+		case <-pingTicker.C:
+			// 发送 WebSocket ping 保活，独立于指标上报
+			w.connMutex.Lock()
+			conn := w.conn
+			isConnected := w.connected
+			w.connMutex.Unlock()
+			if !isConnected || conn == nil {
+				return
+			}
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(reporterWriteWait)); err != nil {
+				fmt.Printf("❌ 发送WebSocket ping失败: %v，准备重连\n", err)
+				return
+			}
+
+		case <-metricTicker.C:
 			// 检查连接状态
 			w.connMutex.Lock()
 			isConnected := w.connected
@@ -313,11 +540,35 @@ func (w *WebSocketReporter) handleConnection() {
 	}
 }
 
+var lastNetBytesReceived uint64
+var lastNetBytesTransmitted uint64
+var lastNetTime int64
+
+var connInfoCached ConnectionInfo
+var connInfoCachedAt int64
+var connInfoCachedMu sync.Mutex
+
 // collectSystemInfo 收集系统信息
 func (w *WebSocketReporter) collectSystemInfo() SystemInfo {
 	networkStats := getNetworkStats()
 	cpuInfo := getCPUInfo()
 	memoryInfo := getMemoryInfo()
+	diskInfo := getDiskInfo()
+	loadInfo := getLoadInfo()
+	connInfo := getConnectionInfo()
+
+	now := time.Now().UnixMilli()
+	var netInSpeed, netOutSpeed int64
+	if lastNetTime > 0 {
+		deltaMs := now - lastNetTime
+		if deltaMs > 0 {
+			netInSpeed = int64(float64(networkStats.BytesRecvDelta) * 1000 / float64(deltaMs))
+			netOutSpeed = int64(float64(networkStats.BytesSentDelta) * 1000 / float64(deltaMs))
+		}
+	}
+	lastNetBytesReceived = networkStats.BytesReceived
+	lastNetBytesTransmitted = networkStats.BytesTransmitted
+	lastNetTime = now
 
 	return SystemInfo{
 		Uptime:           getUptime(),
@@ -325,7 +576,46 @@ func (w *WebSocketReporter) collectSystemInfo() SystemInfo {
 		BytesTransmitted: networkStats.BytesTransmitted,
 		CPUUsage:         cpuInfo.Usage,
 		MemoryUsage:      memoryInfo.Usage,
+		DiskUsage:        diskInfo.Usage,
+		Load1:            loadInfo.Load1,
+		Load5:            loadInfo.Load5,
+		Load15:           loadInfo.Load15,
+		TCPConns:         connInfo.TCPConns,
+		UDPConns:         connInfo.UDPConns,
+		NetInSpeed:       netInSpeed,
+		NetOutSpeed:      netOutSpeed,
 	}
+}
+
+// encryptPayload 加密 JSON 数据，返回加密后的消息字节（若加密失败则回退到原始数据）
+func (w *WebSocketReporter) encryptPayload(jsonData []byte) []byte {
+	if w.aesCrypto == nil {
+		return jsonData
+	}
+
+	encryptedData, err := w.aesCrypto.Encrypt(jsonData)
+	if err != nil {
+		fmt.Printf("⚠️ 加密失败，发送原始数据: %v\n", err)
+		return jsonData
+	}
+
+	encryptedMessage := map[string]interface{}{
+		"encrypted": true,
+		"data":      encryptedData,
+		"timestamp": time.Now().Unix(),
+	}
+	messageData, err := json.Marshal(encryptedMessage)
+	if err != nil {
+		fmt.Printf("⚠️ 序列化加密消息失败，发送原始数据: %v\n", err)
+		return jsonData
+	}
+	return messageData
+}
+
+// metricEnvelope wraps SystemInfo with a type field for fast identification on the panel side.
+type metricEnvelope struct {
+	Type string     `json:"type"`
+	Data SystemInfo `json:"data"`
 }
 
 // sendSystemInfo 发送系统信息
@@ -337,42 +627,19 @@ func (w *WebSocketReporter) sendSystemInfo(sysInfo SystemInfo) error {
 		return fmt.Errorf("连接未建立")
 	}
 
-	// 转换为JSON
-	jsonData, err := json.Marshal(sysInfo)
+	// 使用 type:"metric" 信封包装，Panel 可通过 type 字段直接识别指标消息
+	envelope := metricEnvelope{Type: "metric", Data: sysInfo}
+	jsonData, err := json.Marshal(envelope)
 	if err != nil {
 		return fmt.Errorf("序列化系统信息失败: %v", err)
 	}
 
-	var messageData []byte
+	messageData := w.encryptPayload(jsonData)
 
-	// 如果有加密器，则加密数据
-	if w.aesCrypto != nil {
-		encryptedData, err := w.aesCrypto.Encrypt(jsonData)
-		if err != nil {
-			fmt.Printf("⚠️ 加密失败，发送原始数据: %v\n", err)
-			messageData = jsonData
-		} else {
-			// 创建加密消息包装器
-			encryptedMessage := map[string]interface{}{
-				"encrypted": true,
-				"data":      encryptedData,
-				"timestamp": time.Now().Unix(),
-			}
-			messageData, err = json.Marshal(encryptedMessage)
-			if err != nil {
-				fmt.Printf("⚠️ 序列化加密消息失败，发送原始数据: %v\n", err)
-				messageData = jsonData
-			}
-		}
-	} else {
-		messageData = jsonData
-	}
-
-	// 设置写入超时
 	w.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 
 	if err := w.conn.WriteMessage(websocket.TextMessage, messageData); err != nil {
-		w.connected = false // 标记连接已断开
+		w.connected = false
 		return fmt.Errorf("写入消息失败: %v", err)
 	}
 
@@ -381,23 +648,19 @@ func (w *WebSocketReporter) sendSystemInfo(sysInfo SystemInfo) error {
 
 // receiveMessages 接收服务端发送的消息
 func (w *WebSocketReporter) receiveMessages() {
+	// 获取连接引用一次即可，连接生命周期由 handleConnection 管理
+	w.connMutex.Lock()
+	conn := w.conn
+	w.connMutex.Unlock()
+	if conn == nil {
+		return
+	}
+
 	for {
 		select {
 		case <-w.ctx.Done():
 			return
 		default:
-			w.connMutex.Lock()
-			conn := w.conn
-			connected := w.connected
-			w.connMutex.Unlock()
-
-			if conn == nil || !connected {
-				return
-			}
-
-			// 设置读取超时
-			conn.SetReadDeadline(time.Now().Add(reporterReadWait))
-
 			messageType, message, err := conn.ReadMessage()
 			if err != nil {
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
@@ -485,12 +748,8 @@ func (w *WebSocketReporter) handleReceivedMessage(messageType int, message []byt
 			}
 
 			if cmdMsg.Type != "call" {
-				// 其他状态变更命令保持同步，确保顺序执行
-				if cmdMsg.Type == "TcpPing" || cmdMsg.Type == "UpgradeAgent" || cmdMsg.Type == "RollbackAgent" {
-					go w.routeCommand(cmdMsg)
-				} else {
-					w.routeCommand(cmdMsg)
-				}
+				// 所有命令统一异步执行，避免阻塞消息接收循环
+				go w.routeCommand(cmdMsg)
 			}
 		} else {
 			// 处理普通消息
@@ -501,12 +760,8 @@ func (w *WebSocketReporter) handleReceivedMessage(messageType int, message []byt
 				return
 			}
 			if cmdMsg.Type != "call" {
-				// 其他状态变更命令保持同步，确保顺序执行
-				if cmdMsg.Type == "TcpPing" || cmdMsg.Type == "UpgradeAgent" || cmdMsg.Type == "RollbackAgent" {
-					go w.routeCommand(cmdMsg)
-				} else {
-					w.routeCommand(cmdMsg)
-				}
+				// 所有命令统一异步执行，避免阻塞消息接收循环
+				go w.routeCommand(cmdMsg)
 			}
 		}
 
@@ -589,6 +844,13 @@ func (w *WebSocketReporter) routeCommand(cmd CommandMessage) {
 		response.Type = "TcpPingResponse"
 		response.Data = tcpPingResult
 		// needSaveConfig = false (默认值)
+
+	// Service monitor check (read-only)
+	case "ServiceMonitorCheck":
+		var checkResult ServiceMonitorCheckResult
+		checkResult, err = w.handleServiceMonitorCheck(cmd.Data)
+		response.Type = "ServiceMonitorCheckResponse"
+		response.Data = checkResult
 
 	// Protocol blocking switches
 	case "SetProtocol":
@@ -1173,30 +1435,7 @@ func (w *WebSocketReporter) sendResponse(response CommandResponse) {
 		return
 	}
 
-	var messageData []byte
-
-	// 如果有加密器，则加密数据
-	if w.aesCrypto != nil {
-		encryptedData, err := w.aesCrypto.Encrypt(jsonData)
-		if err != nil {
-			fmt.Printf("⚠️ 加密响应失败，发送原始数据: %v\n", err)
-			messageData = jsonData
-		} else {
-			// 创建加密消息包装器
-			encryptedMessage := map[string]interface{}{
-				"encrypted": true,
-				"data":      encryptedData,
-				"timestamp": time.Now().Unix(),
-			}
-			messageData, err = json.Marshal(encryptedMessage)
-			if err != nil {
-				fmt.Printf("⚠️ 序列化加密响应失败，发送原始数据: %v\n", err)
-				messageData = jsonData
-			}
-		}
-	} else {
-		messageData = jsonData
-	}
+	messageData := w.encryptPayload(jsonData)
 
 	// 检查消息大小，如果超过10MB则记录警告
 	if len(messageData) > 10*1024*1024 {
@@ -1245,15 +1484,19 @@ func getNetworkStats() NetworkStats {
 		return stats
 	}
 
-	// 汇总所有非回环接口的流量
 	for _, io := range ioCounters {
-		// 跳过回环接口
 		if io.Name == "lo" || strings.HasPrefix(io.Name, "lo") {
 			continue
 		}
-
 		stats.BytesReceived += io.BytesRecv
 		stats.BytesTransmitted += io.BytesSent
+	}
+
+	if lastNetBytesReceived > 0 && stats.BytesReceived >= lastNetBytesReceived {
+		stats.BytesRecvDelta = stats.BytesReceived - lastNetBytesReceived
+	}
+	if lastNetBytesTransmitted > 0 && stats.BytesTransmitted >= lastNetBytesTransmitted {
+		stats.BytesSentDelta = stats.BytesTransmitted - lastNetBytesTransmitted
 	}
 
 	return stats
@@ -1263,8 +1506,8 @@ func getNetworkStats() NetworkStats {
 func getCPUInfo() CPUInfo {
 	var cpuInfo CPUInfo
 
-	// 获取CPU使用率
-	percentages, err := cpu.Percent(time.Second, false)
+	// 获取CPU使用率 (non-blocking)
+	percentages, err := cpu.Percent(0, false)
 	if err == nil && len(percentages) > 0 {
 		cpuInfo.Usage = percentages[0]
 	}
@@ -1286,11 +1529,75 @@ func getMemoryInfo() MemoryInfo {
 	return memInfo
 }
 
+// getDiskInfo 获取磁盘信息
+func getDiskInfo() DiskInfo {
+	var diskInfo DiskInfo
+
+	usage, err := disk.Usage("/")
+	if err != nil {
+		return diskInfo
+	}
+
+	diskInfo.Usage = usage.UsedPercent
+
+	return diskInfo
+}
+
+// getLoadInfo 获取负载信息
+func getLoadInfo() LoadInfo {
+	var loadInfo LoadInfo
+
+	avg, err := load.Avg()
+	if err != nil {
+		return loadInfo
+	}
+
+	loadInfo.Load1 = avg.Load1
+	loadInfo.Load5 = avg.Load5
+	loadInfo.Load15 = avg.Load15
+
+	return loadInfo
+}
+
+// getConnectionInfo 获取连接信息
+func getConnectionInfo() ConnectionInfo {
+	now := time.Now().UnixMilli()
+	const refreshEveryMs = int64((15 * time.Second) / time.Millisecond)
+
+	connInfoCachedMu.Lock()
+	if connInfoCachedAt > 0 && now-connInfoCachedAt < refreshEveryMs {
+		v := connInfoCached
+		connInfoCachedMu.Unlock()
+		return v
+	}
+	connInfoCachedMu.Unlock()
+
+	var connInfo ConnectionInfo
+
+	connStats, err := psnet.Connections("tcp")
+	if err == nil {
+		connInfo.TCPConns = int64(len(connStats))
+	}
+
+	udpStats, err := psnet.Connections("udp")
+	if err == nil {
+		connInfo.UDPConns = int64(len(udpStats))
+	}
+
+	connInfoCachedMu.Lock()
+	connInfoCached = connInfo
+	connInfoCachedAt = now
+	connInfoCachedMu.Unlock()
+
+	return connInfo
+}
+
 // StartWebSocketReporterWithConfig 使用配置字段启动WebSocket报告器
 func StartWebSocketReporterWithConfig(addr string, secret string, http int, tls int, socks int, version string) *WebSocketReporter {
 
 	// 构建初始 WebSocket URL
-	fullURL := "ws://" + addr + "/system-info?type=1&secret=" + secret + "&version=" + version + "&http=" + strconv.Itoa(http) + "&tls=" + strconv.Itoa(tls) + "&socks=" + strconv.Itoa(socks)
+	candidates := buildWebSocketCandidates(addr, secret, version, http, tls, socks, "")
+	fullURL := candidates[0]
 
 	fmt.Printf("🔗 WebSocket连接URL: %s\n", fullURL)
 
@@ -1364,6 +1671,210 @@ func (w *WebSocketReporter) handleTcpPing(data interface{}) (TcpPingResponse, er
 	}
 
 	return response, nil
+}
+
+// handleServiceMonitorCheck executes a service monitor check on this node.
+// It always returns a result (command execution is considered successful even if the check fails).
+func (w *WebSocketReporter) handleServiceMonitorCheck(data interface{}) (ServiceMonitorCheckResult, error) {
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return ServiceMonitorCheckResult{}, fmt.Errorf("序列化检查数据失败: %v", err)
+	}
+
+	var req ServiceMonitorCheckRequest
+	if err := json.Unmarshal(jsonData, &req); err != nil {
+		return ServiceMonitorCheckResult{}, fmt.Errorf("解析检查请求失败: %v", err)
+	}
+
+	checkType := strings.ToLower(strings.TrimSpace(req.Type))
+	target := strings.TrimSpace(req.Target)
+	res := ServiceMonitorCheckResult{MonitorID: req.MonitorID}
+
+	if checkType != "tcp" && checkType != "icmp" {
+		res.Success = false
+		res.ErrorMessage = "不支持的检查类型"
+		return res, nil
+	}
+	if target == "" {
+		res.Success = false
+		res.ErrorMessage = "检查目标为空"
+		return res, nil
+	}
+
+	timeoutSec := req.TimeoutSec
+	if timeoutSec <= 0 {
+		timeoutSec = 5
+	}
+	timeout := time.Duration(timeoutSec) * time.Second
+
+	start := time.Now()
+
+	switch checkType {
+	case "tcp":
+		// Validate and normalize host:port.
+		_, _, splitErr := net.SplitHostPort(target)
+		if splitErr != nil {
+			res.Success = false
+			res.ErrorMessage = "无效的TCP目标"
+			res.LatencyMs = float64(time.Since(start).Milliseconds())
+			return res, nil
+		}
+		conn, dialErr := net.DialTimeout("tcp", target, timeout)
+		res.LatencyMs = float64(time.Since(start).Milliseconds())
+		if dialErr != nil {
+			res.Success = false
+			res.ErrorMessage = dialErr.Error()
+			return res, nil
+		}
+		_ = conn.Close()
+		res.Success = true
+		return res, nil
+
+	case "icmp":
+		rtt, pingErr := icmpPing(target, timeout)
+		res.LatencyMs = float64(rtt.Milliseconds())
+		if pingErr != nil {
+			res.Success = false
+			res.ErrorMessage = pingErr.Error()
+			return res, nil
+		}
+		res.Success = true
+		return res, nil
+	}
+
+	res.Success = false
+	res.ErrorMessage = "未知错误"
+	res.LatencyMs = float64(time.Since(start).Milliseconds())
+	return res, nil
+}
+
+func icmpPing(target string, timeout time.Duration) (time.Duration, error) {
+	start := time.Now()
+
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return time.Since(start), fmt.Errorf("无效的ICMP目标")
+	}
+	// Avoid accepting URL-like targets.
+	if strings.Contains(target, "://") {
+		return time.Since(start), fmt.Errorf("无效的ICMP目标")
+	}
+	if strings.HasPrefix(target, "[") && strings.HasSuffix(target, "]") {
+		target = strings.TrimSuffix(strings.TrimPrefix(target, "["), "]")
+	}
+
+	ipAddr, err := net.ResolveIPAddr("ip", target)
+	if err != nil || ipAddr == nil || ipAddr.IP == nil {
+		if err == nil {
+			err = fmt.Errorf("unknown address")
+		}
+		return time.Since(start), fmt.Errorf("解析目标失败: %v", err)
+	}
+
+	isV4 := ipAddr.IP.To4() != nil
+	listenAddr := "0.0.0.0"
+	proto := 1
+	var echoType icmp.Type = ipv4.ICMPTypeEcho
+	var echoReplyType icmp.Type = ipv4.ICMPTypeEchoReply
+	networks := []string{"udp4", "ip4:icmp"}
+	if !isV4 {
+		listenAddr = "::"
+		proto = 58
+		echoType = ipv6.ICMPTypeEchoRequest
+		echoReplyType = ipv6.ICMPTypeEchoReply
+		networks = []string{"udp6", "ip6:ipv6-icmp"}
+	}
+
+	var conn *icmp.PacketConn
+	selectedNetwork := ""
+	var lastErr error
+	for _, nw := range networks {
+		c, err := icmp.ListenPacket(nw, listenAddr)
+		if err == nil {
+			conn = c
+			selectedNetwork = nw
+			break
+		}
+		lastErr = err
+	}
+	if conn == nil {
+		if lastErr != nil {
+			return time.Since(start), fmt.Errorf("创建ICMP连接失败: %v", lastErr)
+		}
+		return time.Since(start), fmt.Errorf("创建ICMP连接失败")
+	}
+	defer conn.Close()
+
+	id := os.Getpid() & 0xffff
+	seq := 1
+
+	wm := icmp.Message{
+		Type: echoType,
+		Code: 0,
+		Body: &icmp.Echo{
+			ID:   id,
+			Seq:  seq,
+			Data: []byte("FLVX-PING"),
+		},
+	}
+	wb, err := wm.Marshal(nil)
+	if err != nil {
+		return time.Since(start), err
+	}
+
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+
+	var dst net.Addr
+	if strings.HasPrefix(selectedNetwork, "udp") {
+		dst = &net.UDPAddr{IP: ipAddr.IP, Zone: ipAddr.Zone}
+	} else {
+		dst = &net.IPAddr{IP: ipAddr.IP, Zone: ipAddr.Zone}
+	}
+
+	if _, err := conn.WriteTo(wb, dst); err != nil {
+		return time.Since(start), err
+	}
+
+	addrIP := func(a net.Addr) net.IP {
+		switch v := a.(type) {
+		case *net.IPAddr:
+			return v.IP
+		case *net.UDPAddr:
+			return v.IP
+		default:
+			return nil
+		}
+	}
+
+	rb := make([]byte, 1500)
+	for {
+		n, peer, err := conn.ReadFrom(rb)
+		if err != nil {
+			return time.Since(start), err
+		}
+		if p := addrIP(peer); p != nil && !p.Equal(ipAddr.IP) {
+			continue
+		}
+		rm, err := icmp.ParseMessage(proto, rb[:n])
+		if err != nil {
+			continue
+		}
+		if rm.Type != echoReplyType {
+			continue
+		}
+		echo, ok := rm.Body.(*icmp.Echo)
+		if !ok {
+			continue
+		}
+		if echo.Seq != seq {
+			continue
+		}
+		// For non-privileged endpoints, the kernel may choose the ID.
+		if !strings.HasPrefix(selectedNetwork, "udp") && echo.ID != id {
+			continue
+		}
+		return time.Since(start), nil
+	}
 }
 
 // tcpPingHost 执行TCP连接测试，返回平均连接时间和失败率

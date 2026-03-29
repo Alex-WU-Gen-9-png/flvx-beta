@@ -18,11 +18,15 @@ func (h *Handler) StartBackgroundJobs() {
 	ctx, cancel := context.WithCancel(context.Background())
 	h.jobsCancel = cancel
 	h.jobsStarted = true
-	h.jobsWG.Add(2)
+	h.jobsWG.Add(6)
 	h.jobsMu.Unlock()
 
 	go h.runHourlyStatsLoop(ctx)
 	go h.runDailyMaintenanceLoop(ctx)
+	go h.runNodeRenewalCycleLoop(ctx)
+	go h.runMetricsIngestion(ctx)
+	go h.runHealthChecks(ctx)
+	go h.runTunnelQualityProber(ctx)
 }
 
 func (h *Handler) StopBackgroundJobs() {
@@ -44,6 +48,29 @@ func (h *Handler) StopBackgroundJobs() {
 		cancel()
 	}
 	h.jobsWG.Wait()
+}
+
+func (h *Handler) runMetricsIngestion(ctx context.Context) {
+	defer h.jobsWG.Done()
+	if h.metrics != nil {
+		h.metrics.Start(ctx)
+	}
+}
+
+func (h *Handler) runHealthChecks(ctx context.Context) {
+	defer h.jobsWG.Done()
+	if h.healthCheck != nil {
+		h.healthCheck.Start(ctx)
+	}
+}
+
+func (h *Handler) runTunnelQualityProber(ctx context.Context) {
+	defer h.jobsWG.Done()
+	if h == nil || h.qualityProber == nil || !h.isTunnelQualityMonitoringEnabled() {
+		return
+	}
+
+	h.qualityProber.Start(ctx)
 }
 
 func (h *Handler) runHourlyStatsLoop(ctx context.Context) {
@@ -135,6 +162,7 @@ func (h *Handler) runResetAndExpiryJob(now time.Time) {
 	}
 
 	h.resetMonthlyFlow(now)
+	h.resetUserQuotaWindows(now)
 	h.disableExpiredUsers(now.UnixMilli())
 	h.disableExpiredUserTunnels(now.UnixMilli())
 }
@@ -175,4 +203,40 @@ func (h *Handler) disableExpiredUserTunnels(nowMs int64) {
 		}
 		_ = h.repo.DisableUserTunnel(item.ID)
 	}
+}
+
+func (h *Handler) runNodeRenewalCycleLoop(ctx context.Context) {
+	defer h.jobsWG.Done()
+
+	for {
+		wait := durationUntilNextNodeRenewalCycle(time.Now())
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		case <-timer.C:
+			h.runNodeRenewalCycleJob(time.Now())
+		}
+	}
+}
+
+func durationUntilNextNodeRenewalCycle(now time.Time) time.Duration {
+	next := now.Truncate(6 * time.Hour).Add(6 * time.Hour)
+	return next.Sub(now)
+}
+
+func (h *Handler) runNodeRenewalCycleJob(now time.Time) {
+	if h == nil || h.repo == nil {
+		return
+	}
+
+	advanced, err := h.repo.AdvanceNodeRenewalCycles(now.UnixMilli())
+	if err != nil {
+		return
+	}
+
+	_ = advanced
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +20,103 @@ const (
 	githubHTMLBase = "https://github.com"
 	upgradeTimeout = 5 * time.Minute
 	batchWorkers   = 5
+
+	releaseChannelStable = "stable"
+	releaseChannelDev    = "dev"
 )
+
+var (
+	stableVersionPattern = regexp.MustCompile(`^\d+(?:\.\d+)+$`)
+	testKeywordPattern   = regexp.MustCompile(`(?i)(alpha|beta|rc)`)
+)
+
+type githubRelease struct {
+	TagName     string `json:"tag_name"`
+	Name        string `json:"name"`
+	PublishedAt string `json:"published_at"`
+	Prerelease  bool   `json:"prerelease"`
+	Draft       bool   `json:"draft"`
+}
+
+func normalizeReleaseChannel(channel string) string {
+	switch strings.ToLower(strings.TrimSpace(channel)) {
+	case releaseChannelDev:
+		return releaseChannelDev
+	default:
+		return releaseChannelStable
+	}
+}
+
+func releaseChannelFromTag(tag string) string {
+	normalized := strings.ToLower(strings.TrimSpace(tag))
+	if normalized == "" {
+		return releaseChannelDev
+	}
+	if testKeywordPattern.MatchString(normalized) {
+		return releaseChannelDev
+	}
+	if stableVersionPattern.MatchString(normalized) {
+		return releaseChannelStable
+	}
+
+	return releaseChannelDev
+}
+
+func releaseChannelLabel(channel string) string {
+	if normalizeReleaseChannel(channel) == releaseChannelDev {
+		return "测试版"
+	}
+
+	return "正式版"
+}
+
+func fetchGitHubReleases(perPage int) ([]githubRelease, error) {
+	if perPage <= 0 {
+		perPage = 20
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("%s/repos/%s/releases?per_page=%d", githubAPIBase, githubRepo, perPage))
+	if err != nil {
+		return nil, fmt.Errorf("请求GitHub API失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("GitHub API返回 %d: %s", resp.StatusCode, string(body))
+	}
+
+	var releases []githubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+		return nil, fmt.Errorf("解析GitHub API响应失败: %v", err)
+	}
+
+	return releases, nil
+}
+
+func resolveLatestReleaseByChannel(channel string) (string, error) {
+	normalizedChannel := normalizeReleaseChannel(channel)
+	releases, err := fetchGitHubReleases(50)
+	if err != nil {
+		return "", err
+	}
+
+	for _, r := range releases {
+		if r.Draft {
+			continue
+		}
+		tag := strings.TrimSpace(r.TagName)
+		if tag == "" {
+			continue
+		}
+		if releaseChannelFromTag(tag) == normalizedChannel {
+			return tag, nil
+		}
+	}
+
+	return "", fmt.Errorf("未找到%s版本号", releaseChannelLabel(normalizedChannel))
+}
 
 func (h *Handler) nodeUpgrade(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -30,6 +127,7 @@ func (h *Handler) nodeUpgrade(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID      int64  `json:"id"`
 		Version string `json:"version"`
+		Channel string `json:"channel"`
 	}
 	if err := decodeJSON(r.Body, &req); err != nil {
 		response.WriteJSON(w, response.ErrDefault("请求参数错误"))
@@ -40,12 +138,13 @@ func (h *Handler) nodeUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	channel := normalizeReleaseChannel(req.Channel)
 	version := strings.TrimSpace(req.Version)
 	if version == "" {
 		var err error
-		version, err = resolveLatestRelease()
+		version, err = resolveLatestReleaseByChannel(channel)
 		if err != nil {
-			response.WriteJSON(w, response.Err(-2, fmt.Sprintf("获取最新版本失败: %v", err)))
+			response.WriteJSON(w, response.Err(-2, fmt.Sprintf("获取最新%s失败: %v", releaseChannelLabel(channel), err)))
 			return
 		}
 	}
@@ -67,6 +166,7 @@ func (h *Handler) nodeUpgrade(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSON(w, response.Err(-2, fmt.Sprintf("升级失败: %v", err)))
 		return
 	}
+	h.markNodePendingUpgradeRedeploy(req.ID)
 
 	response.WriteJSON(w, response.OK(map[string]interface{}{
 		"version": version,
@@ -75,61 +175,11 @@ func (h *Handler) nodeUpgrade(w http.ResponseWriter, r *http.Request) {
 }
 
 func resolveLatestRelease() (string, error) {
-	client := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-		Timeout: 10 * time.Second,
-	}
-
-	resp, err := client.Get(githubProxy + "/" + githubHTMLBase + "/" + githubRepo + "/releases/latest")
-	if err != nil {
-		return "", fmt.Errorf("请求GitHub失败: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusMovedPermanently {
-		return resolveLatestReleaseAPI()
-	}
-
-	location := resp.Header.Get("Location")
-	if location == "" {
-		return resolveLatestReleaseAPI()
-	}
-
-	parts := strings.Split(location, "/")
-	tag := parts[len(parts)-1]
-	if tag == "" || tag == "latest" {
-		return resolveLatestReleaseAPI()
-	}
-
-	return tag, nil
+	return resolveLatestReleaseByChannel(releaseChannelStable)
 }
 
 func resolveLatestReleaseAPI() (string, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(githubAPIBase + "/repos/" + githubRepo + "/releases/latest")
-	if err != nil {
-		return "", fmt.Errorf("请求GitHub API失败: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return "", fmt.Errorf("GitHub API返回 %d: %s", resp.StatusCode, string(body))
-	}
-
-	var release struct {
-		TagName string `json:"tag_name"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", fmt.Errorf("解析GitHub API响应失败: %v", err)
-	}
-	if strings.TrimSpace(release.TagName) == "" {
-		return "", fmt.Errorf("无法从GitHub获取最新版本号")
-	}
-
-	return release.TagName, nil
+	return resolveLatestReleaseByChannel(releaseChannelStable)
 }
 
 func (h *Handler) nodeBatchUpgrade(w http.ResponseWriter, r *http.Request) {
@@ -141,6 +191,7 @@ func (h *Handler) nodeBatchUpgrade(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		IDs     []int64 `json:"ids"`
 		Version string  `json:"version"`
+		Channel string  `json:"channel"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.WriteJSON(w, response.ErrDefault("请求参数错误"))
@@ -151,12 +202,13 @@ func (h *Handler) nodeBatchUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	channel := normalizeReleaseChannel(req.Channel)
 	version := strings.TrimSpace(req.Version)
 	if version == "" {
 		var err error
-		version, err = resolveLatestRelease()
+		version, err = resolveLatestReleaseByChannel(channel)
 		if err != nil {
-			response.WriteJSON(w, response.Err(-2, fmt.Sprintf("获取最新版本失败: %v", err)))
+			response.WriteJSON(w, response.Err(-2, fmt.Sprintf("获取最新%s失败: %v", releaseChannelLabel(channel), err)))
 			return
 		}
 	}
@@ -195,6 +247,7 @@ func (h *Handler) nodeBatchUpgrade(w http.ResponseWriter, r *http.Request) {
 				results[index] = upgradeResult{ID: nodeID, Success: false, Message: err.Error()}
 				return
 			}
+			h.markNodePendingUpgradeRedeploy(nodeID)
 			results[index] = upgradeResult{ID: nodeID, Success: true, Message: result.Message}
 		}(i, id)
 	}
@@ -212,29 +265,19 @@ func (h *Handler) listReleases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Get(githubAPIBase + "/repos/" + githubRepo + "/releases?per_page=20")
+	var req struct {
+		Channel string `json:"channel"`
+	}
+	if err := decodeJSON(r.Body, &req); err != nil && err != io.EOF {
+		response.WriteJSON(w, response.ErrDefault("请求参数错误"))
+		return
+	}
+
+	channel := normalizeReleaseChannel(req.Channel)
+
+	releases, err := fetchGitHubReleases(50)
 	if err != nil {
 		response.WriteJSON(w, response.Err(-2, fmt.Sprintf("获取版本列表失败: %v", err)))
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		response.WriteJSON(w, response.Err(-2, fmt.Sprintf("获取版本列表失败: GitHub API返回 %d: %s", resp.StatusCode, string(body))))
-		return
-	}
-
-	var releases []struct {
-		TagName     string `json:"tag_name"`
-		Name        string `json:"name"`
-		PublishedAt string `json:"published_at"`
-		Prerelease  bool   `json:"prerelease"`
-		Draft       bool   `json:"draft"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
-		response.WriteJSON(w, response.Err(-2, fmt.Sprintf("解析版本列表失败: %v", err)))
 		return
 	}
 
@@ -243,6 +286,7 @@ func (h *Handler) listReleases(w http.ResponseWriter, r *http.Request) {
 		Name        string `json:"name"`
 		PublishedAt string `json:"publishedAt"`
 		Prerelease  bool   `json:"prerelease"`
+		Channel     string `json:"channel"`
 	}
 
 	items := make([]releaseItem, 0, len(releases))
@@ -250,11 +294,20 @@ func (h *Handler) listReleases(w http.ResponseWriter, r *http.Request) {
 		if r.Draft {
 			continue
 		}
+		tag := strings.TrimSpace(r.TagName)
+		if tag == "" {
+			continue
+		}
+		itemChannel := releaseChannelFromTag(tag)
+		if itemChannel != channel {
+			continue
+		}
 		items = append(items, releaseItem{
-			Version:     r.TagName,
+			Version:     tag,
 			Name:        r.Name,
 			PublishedAt: r.PublishedAt,
-			Prerelease:  r.Prerelease,
+			Prerelease:  itemChannel == releaseChannelDev,
+			Channel:     itemChannel,
 		})
 	}
 
@@ -288,4 +341,67 @@ func (h *Handler) nodeRollback(w http.ResponseWriter, r *http.Request) {
 	response.WriteJSON(w, response.OK(map[string]interface{}{
 		"message": result.Message,
 	}))
+}
+
+func (h *Handler) markNodePendingUpgradeRedeploy(nodeID int64) {
+	if h == nil || nodeID <= 0 {
+		return
+	}
+	h.upgradeMu.Lock()
+	h.pendingUpgradeRedeploy[nodeID] = struct{}{}
+	h.upgradeMu.Unlock()
+}
+
+func (h *Handler) consumeNodePendingUpgradeRedeploy(nodeID int64) bool {
+	if h == nil || nodeID <= 0 {
+		return false
+	}
+	h.upgradeMu.Lock()
+	_, ok := h.pendingUpgradeRedeploy[nodeID]
+	if ok {
+		delete(h.pendingUpgradeRedeploy, nodeID)
+	}
+	h.upgradeMu.Unlock()
+	return ok
+}
+
+func (h *Handler) onNodeOnline(nodeID int64) {
+	if !h.consumeNodePendingUpgradeRedeploy(nodeID) {
+		return
+	}
+	h.redeployNodeRuntimeAfterUpgrade(nodeID)
+}
+
+func (h *Handler) redeployNodeRuntimeAfterUpgrade(nodeID int64) {
+	tunnelIDs, err := h.repo.ListActiveTunnelIDsByNode(nodeID)
+	if err != nil {
+		fmt.Printf("post-upgrade redeploy: list tunnels for node %d failed: %v\n", nodeID, err)
+		return
+	}
+	forwardIDs, err := h.repo.ListActiveForwardIDsByNode(nodeID)
+	if err != nil {
+		fmt.Printf("post-upgrade redeploy: list forwards for node %d failed: %v\n", nodeID, err)
+		return
+	}
+
+	tunnelFailed := make(map[int64]struct{})
+	for _, tunnelID := range tunnelIDs {
+		if err := h.redeployTunnelAndForwards(tunnelID); err != nil {
+			tunnelFailed[tunnelID] = struct{}{}
+			fmt.Printf("post-upgrade redeploy: tunnel %d failed on node %d: %v\n", tunnelID, nodeID, err)
+		}
+	}
+
+	for _, forwardID := range forwardIDs {
+		forward, getErr := h.getForwardRecord(forwardID)
+		if getErr != nil || forward == nil {
+			continue
+		}
+		if _, skipped := tunnelFailed[forward.TunnelID]; skipped {
+			continue
+		}
+		if err := h.syncForwardServices(forward, "UpdateService", true); err != nil {
+			fmt.Printf("post-upgrade redeploy: forward %d failed on node %d: %v\n", forwardID, nodeID, err)
+		}
+	}
 }

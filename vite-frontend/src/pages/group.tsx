@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Card, CardBody, CardHeader } from "@heroui/card";
-import { Button } from "@heroui/button";
-import { Input } from "@heroui/input";
+import toast from "react-hot-toast";
+
+import { Card, CardBody, CardHeader } from "@/shadcn-bridge/heroui/card";
+import { Button } from "@/shadcn-bridge/heroui/button";
+import { Input } from "@/shadcn-bridge/heroui/input";
 import {
   Modal,
   ModalBody,
@@ -9,8 +11,8 @@ import {
   ModalFooter,
   ModalHeader,
   useDisclosure,
-} from "@heroui/modal";
-import { Select, SelectItem } from "@heroui/select";
+} from "@/shadcn-bridge/heroui/modal";
+import { Select, SelectItem } from "@/shadcn-bridge/heroui/select";
 import {
   Table,
   TableBody,
@@ -18,11 +20,9 @@ import {
   TableColumn,
   TableHeader,
   TableRow,
-} from "@heroui/table";
-import { Chip } from "@heroui/chip";
-import { Spinner } from "@heroui/spinner";
-import toast from "react-hot-toast";
-
+} from "@/shadcn-bridge/heroui/table";
+import { Chip } from "@/shadcn-bridge/heroui/chip";
+import { Spinner } from "@/shadcn-bridge/heroui/spinner";
 import {
   assignGroupPermission,
   assignTunnelsToGroup,
@@ -40,6 +40,7 @@ import {
   updateTunnelGroup,
   updateUserGroup,
 } from "@/api";
+import { getAdminFlag } from "@/utils/session";
 
 interface TunnelItem {
   id: number;
@@ -86,22 +87,9 @@ const formatDate = (timestamp?: number): string => {
   return new Date(timestamp).toLocaleString();
 };
 
-const isAdminUser = () => {
-  let adminFlag = localStorage.getItem("admin") === "true";
-
-  if (localStorage.getItem("admin") === null) {
-    const roleId = parseInt(localStorage.getItem("role_id") || "1", 10);
-
-    adminFlag = roleId === 0;
-    localStorage.setItem("admin", adminFlag.toString());
-  }
-
-  return adminFlag;
-};
-
 export default function GroupPage() {
   const [loading, setLoading] = useState(true);
-  const [isAdmin] = useState(isAdminUser());
+  const [isAdmin] = useState(getAdminFlag());
 
   const [tunnelGroups, setTunnelGroups] = useState<TunnelGroup[]>([]);
   const [userGroups, setUserGroups] = useState<UserGroup[]>([]);
@@ -185,6 +173,22 @@ export default function GroupPage() {
     return map;
   }, [users]);
 
+  const selectedTunnelSummary = useMemo(() => {
+    const value = Array.from(selectedTunnelKeys)
+      .map((id) => tunnelNameMap.get(Number(id)) || id)
+      .join("、");
+
+    return value || "无";
+  }, [selectedTunnelKeys, tunnelNameMap]);
+
+  const selectedUserSummary = useMemo(() => {
+    const value = Array.from(selectedUserKeys)
+      .map((id) => userNameMap.get(Number(id)) || id)
+      .join("、");
+
+    return value || "无";
+  }, [selectedUserKeys, userNameMap]);
+
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
@@ -198,19 +202,25 @@ export default function GroupPage() {
         ]);
 
       if (tunnelGroupRes.code === 0) {
-        setTunnelGroups(tunnelGroupRes.data || []);
+        setTunnelGroups(
+          Array.isArray(tunnelGroupRes.data) ? tunnelGroupRes.data : [],
+        );
       }
       if (userGroupRes.code === 0) {
-        setUserGroups(userGroupRes.data || []);
+        setUserGroups(
+          Array.isArray(userGroupRes.data) ? userGroupRes.data : [],
+        );
       }
       if (permissionRes.code === 0) {
-        setPermissions(permissionRes.data || []);
+        setPermissions(
+          Array.isArray(permissionRes.data) ? permissionRes.data : [],
+        );
       }
       if (tunnelRes.code === 0) {
-        setTunnels(tunnelRes.data || []);
+        setTunnels(Array.isArray(tunnelRes.data) ? tunnelRes.data : []);
       }
       if (userRes.code === 0) {
-        setUsers(userRes.data || []);
+        setUsers(Array.isArray(userRes.data) ? userRes.data : []);
       }
 
       if (
@@ -467,10 +477,15 @@ export default function GroupPage() {
       )}
 
       <Card>
-        <CardHeader className="flex items-center justify-between">
+        <CardHeader className="flex flex-row items-center gap-3 pb-2">
           <h3 className="text-lg font-semibold">隧道分组</h3>
-          <Button color="primary" size="sm" onPress={openCreateTunnelGroup}>
-            新建隧道分组
+          <Button
+            className="h-7 px-3 text-xs font-medium min-w-0 shadow-sm"
+            color="primary"
+            size="sm"
+            onPress={openCreateTunnelGroup}
+          >
+            新建
           </Button>
         </CardHeader>
         <CardBody>
@@ -534,10 +549,15 @@ export default function GroupPage() {
       </Card>
 
       <Card>
-        <CardHeader className="flex items-center justify-between">
+        <CardHeader className="flex flex-row items-center gap-3 pb-2">
           <h3 className="text-lg font-semibold">用户分组</h3>
-          <Button color="primary" size="sm" onPress={openCreateUserGroup}>
-            新建用户分组
+          <Button
+            className="h-7 px-3 text-xs font-medium min-w-0 shadow-sm"
+            color="primary"
+            size="sm"
+            onPress={openCreateUserGroup}
+          >
+            新建
           </Button>
         </CardHeader>
         <CardBody>
@@ -605,7 +625,7 @@ export default function GroupPage() {
           <h3 className="text-lg font-semibold">权限分配</h3>
         </CardHeader>
         <CardBody className="space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-3 md:items-end">
             <Select
               items={userGroups}
               label="用户分组"
@@ -635,11 +655,13 @@ export default function GroupPage() {
               {(item) => <SelectItem key={item.id}>{item.name}</SelectItem>}
             </Select>
             <Button
+              className="md:self-end md:justify-self-start whitespace-nowrap px-4"
               color="primary"
               isLoading={savingPermission}
+              size="sm"
               onPress={handleAssignPermission}
             >
-              分配权限
+              分配
             </Button>
           </div>
 
@@ -680,6 +702,10 @@ export default function GroupPage() {
       </Card>
 
       <Modal
+        backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={tunnelGroupModalOpen}
         onOpenChange={onTunnelGroupModalChange}
       >
@@ -723,7 +749,14 @@ export default function GroupPage() {
         </ModalContent>
       </Modal>
 
-      <Modal isOpen={userGroupModalOpen} onOpenChange={onUserGroupModalChange}>
+      <Modal
+        backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
+        isOpen={userGroupModalOpen}
+        onOpenChange={onUserGroupModalChange}
+      >
         <ModalContent>
           <ModalHeader>
             {editingUserGroup ? "编辑用户分组" : "新建用户分组"}
@@ -765,13 +798,19 @@ export default function GroupPage() {
       </Modal>
 
       <Modal
+        backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={tunnelAssignModalOpen}
         onOpenChange={onTunnelAssignModalChange}
       >
         <ModalContent>
           <ModalHeader>分配隧道 - {assignTunnelGroup?.name}</ModalHeader>
-          <ModalBody>
+          <ModalBody className="min-w-0">
             <Select
+              className="min-w-0"
+              classNames={{ trigger: "max-w-full" }}
               items={tunnels}
               label="选择隧道"
               selectedKeys={selectedTunnelKeys}
@@ -784,11 +823,11 @@ export default function GroupPage() {
             >
               {(item) => <SelectItem key={item.id}>{item.name}</SelectItem>}
             </Select>
-            <p className="text-xs text-default-500">
-              当前已选：
-              {Array.from(selectedTunnelKeys)
-                .map((id) => tunnelNameMap.get(Number(id)) || id)
-                .join("、") || "无"}
+            <p
+              className="w-full min-w-0 max-w-full text-xs text-default-500 truncate"
+              title={`当前已选：${selectedTunnelSummary}`}
+            >
+              当前已选：{selectedTunnelSummary}
             </p>
             <p className="text-xs text-default-500">
               不选择任何隧道并保存将清空该分组成员。
@@ -810,13 +849,19 @@ export default function GroupPage() {
       </Modal>
 
       <Modal
+        backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={userAssignModalOpen}
         onOpenChange={onUserAssignModalChange}
       >
         <ModalContent>
           <ModalHeader>分配用户 - {assignUserGroup?.name}</ModalHeader>
-          <ModalBody>
+          <ModalBody className="min-w-0">
             <Select
+              className="min-w-0"
+              classNames={{ trigger: "max-w-full" }}
               items={users}
               label="选择用户"
               selectedKeys={selectedUserKeys}
@@ -829,11 +874,11 @@ export default function GroupPage() {
             >
               {(item) => <SelectItem key={item.id}>{item.user}</SelectItem>}
             </Select>
-            <p className="text-xs text-default-500">
-              当前已选：
-              {Array.from(selectedUserKeys)
-                .map((id) => userNameMap.get(Number(id)) || id)
-                .join("、") || "无"}
+            <p
+              className="w-full min-w-0 max-w-full text-xs text-default-500 truncate"
+              title={`当前已选：${selectedUserSummary}`}
+            >
+              当前已选：{selectedUserSummary}
             </p>
             <p className="text-xs text-default-500">
               不选择任何用户并保存将清空该分组成员。

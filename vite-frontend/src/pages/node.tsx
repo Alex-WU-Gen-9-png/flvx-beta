@@ -1,25 +1,5 @@
-import { useState, useEffect, useMemo, useRef } from "react";
-import { Card, CardBody, CardHeader } from "@heroui/card";
-import { Button } from "@heroui/button";
-import { Input } from "@heroui/input";
-import { Textarea } from "@heroui/input";
-import {
-  Modal,
-  ModalContent,
-  ModalHeader,
-  ModalBody,
-  ModalFooter,
-} from "@heroui/modal";
-import { Chip } from "@heroui/chip";
-import { Switch } from "@heroui/switch";
-import { Spinner } from "@heroui/spinner";
-import { Alert } from "@heroui/alert";
-import { Progress } from "@heroui/progress";
-import { Accordion, AccordionItem } from "@heroui/accordion";
-import { Select, SelectItem } from "@heroui/select";
-import { Checkbox } from "@heroui/checkbox";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import toast from "react-hot-toast";
-import axios from "axios";
 import {
   DndContext,
   KeyboardSensor,
@@ -38,6 +18,36 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
+import { SearchBar } from "@/components/search-bar";
+import { AnimatedPage } from "@/components/animated-page";
+import { LayoutGrid, List } from "lucide-react";
+import {
+  Table,
+  TableHeader,
+  TableColumn,
+  TableBody,
+  TableRow,
+  TableCell,
+} from "@/shadcn-bridge/heroui/table";
+import { Card, CardBody, CardHeader } from "@/shadcn-bridge/heroui/card";
+import { Button } from "@/shadcn-bridge/heroui/button";
+import { Input } from "@/shadcn-bridge/heroui/input";
+import { Textarea } from "@/shadcn-bridge/heroui/input";
+import {
+  Modal,
+  ModalContent,
+  ModalHeader,
+  ModalBody,
+  ModalFooter,
+} from "@/shadcn-bridge/heroui/modal";
+import { Chip } from "@/shadcn-bridge/heroui/chip";
+import { Switch } from "@/shadcn-bridge/heroui/switch";
+import { Spinner } from "@/shadcn-bridge/heroui/spinner";
+import { Alert } from "@/shadcn-bridge/heroui/alert";
+import { Progress } from "@/shadcn-bridge/heroui/progress";
+import { Accordion, AccordionItem } from "@/shadcn-bridge/heroui/accordion";
+import { Select, SelectItem } from "@/shadcn-bridge/heroui/select";
+import { Checkbox } from "@/shadcn-bridge/heroui/checkbox";
 import {
   createNode,
   getNodeList,
@@ -50,12 +60,41 @@ import {
   batchUpgradeNodes,
   getNodeReleases,
   rollbackNode,
+  getPeerRemoteUsageList,
+  dismissNodeExpiryReminder,
+  type ReleaseChannel,
 } from "@/api";
+import { PageEmptyState, PageLoadingState } from "@/components/page-state";
+import {
+  getConnectionStatusMeta,
+  getRemoteSyncErrorMessage,
+} from "@/pages/node/display";
+import { tryCopyInstallCommand } from "@/pages/node/install-command";
+import {
+  getNodeRenewalSnapshot,
+  formatNodeRenewalTime,
+  getNodeRenewalCycleLabel,
+  type NodeRenewalCycle,
+} from "@/pages/node/renewal";
+import {
+  buildNodeSystemInfo,
+  type NodeSystemInfo,
+} from "@/pages/node/system-info";
+import { useNodeOfflineTimers } from "@/pages/node/use-node-offline-timers";
+import { useNodeRealtime } from "@/pages/node/use-node-realtime";
+import { useLocalStorageState } from "@/hooks/use-local-storage-state";
+import { loadStoredOrder, saveOrder } from "@/utils/order-storage";
+
+const NODE_FALLBACK_REFRESH_INTERVAL_MS = 15000;
 
 interface Node {
   id: number;
   inx?: number;
   name: string;
+  remark?: string;
+  expiryTime?: number;
+  renewalCycle?: NodeRenewalCycle;
+  expiryReminderDismissed?: number;
   ip: string;
   serverIp: string;
   serverIpV4?: string;
@@ -63,6 +102,7 @@ interface Node {
   port: string;
   tcpListenAddr?: string;
   udpListenAddr?: string;
+  extraIPs?: string;
   version?: string;
   http?: number; // 0 关 1 开
   tls?: number; // 0 关 1 开
@@ -72,15 +112,7 @@ interface Node {
   remoteUrl?: string;
   syncError?: string;
   connectionStatus: "online" | "offline";
-  systemInfo?: {
-    cpuUsage: number;
-    memoryUsage: number;
-    uploadTraffic: number;
-    downloadTraffic: number;
-    uploadSpeed: number;
-    downloadSpeed: number;
-    uptime: number;
-  } | null;
+  systemInfo?: NodeSystemInfo | null;
   copyLoading?: boolean;
   upgradeLoading?: boolean;
   rollbackLoading?: boolean;
@@ -89,6 +121,9 @@ interface Node {
 interface NodeForm {
   id: number | null;
   name: string;
+  remark: string;
+  expiryTime: number;
+  renewalCycle: NodeRenewalCycle;
   serverHost: string;
   serverIpV4: string;
   serverIpV6: string;
@@ -96,17 +131,130 @@ interface NodeForm {
   tcpListenAddr: string;
   udpListenAddr: string;
   interfaceName: string;
+  extraIPs: string;
   http: number; // 0 关 1 开
   tls: number; // 0 关 1 开
   socks: number; // 0 关 1 开
 }
+
+type NodeTab = "local" | "remote";
+
+interface RemoteUsageBinding {
+  bindingId: number;
+  tunnelId: number;
+  tunnelName: string;
+  chainType: number;
+  hopInx: number;
+  allocatedPort: number;
+  resourceKey: string;
+  remoteBindingId: string;
+  updatedTime: number;
+}
+
+interface RemoteUsageNode {
+  nodeId: number;
+  nodeName: string;
+  remoteUrl: string;
+  shareId: number;
+  portRangeStart: number;
+  portRangeEnd: number;
+  maxBandwidth: number;
+  currentFlow: number;
+  usedPorts: number[];
+  bindings: RemoteUsageBinding[];
+  activeBindingNum: number;
+  syncError?: string;
+}
+
+const EXPIRING_SOON_DAYS = 7;
+
+type NodeExpiryState = "permanent" | "healthy" | "expiringSoon" | "expired";
+
+type NodeFilterMode = "all" | "expiringSoon" | "expired" | "withExpiry";
+
+const getNodeReminderEnabled = (node: Node): boolean => {
+  return !!node.expiryTime && node.expiryTime > 0 && !!node.renewalCycle;
+};
+
+const getNodeExpiryMeta = (timestamp?: number, cycle?: NodeRenewalCycle) => {
+  const renewal = getNodeRenewalSnapshot(timestamp, cycle, EXPIRING_SOON_DAYS);
+
+  if (renewal.state === "unset") {
+    return {
+      state: "permanent" as NodeExpiryState,
+      label: "未设置续费周期",
+      tone: "default" as const,
+      accentClassName: "",
+      bannerClassName: "",
+      isHighlighted: false,
+      sortWeight: 3,
+      nextDueTime: undefined,
+    };
+  }
+
+  if (renewal.state === "expired") {
+    return {
+      state: "expired" as NodeExpiryState,
+      label: "已过期",
+      tone: "danger" as const,
+      accentClassName:
+        "border-red-300/80 bg-red-50/70 shadow-red-100 dark:border-red-500/40 dark:bg-red-950/20",
+      bannerClassName:
+        "bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-300",
+      isHighlighted: true,
+      sortWeight: 0,
+      nextDueTime: renewal.nextDueTime,
+    };
+  }
+
+  if (renewal.state === "dueSoon") {
+    return {
+      state: "expiringSoon" as NodeExpiryState,
+      label: renewal.label,
+      tone: "warning" as const,
+      accentClassName:
+        "border-amber-300/80 bg-amber-50/80 shadow-amber-100 dark:border-amber-500/40 dark:bg-amber-950/20",
+      bannerClassName:
+        "bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-300",
+      isHighlighted: true,
+      sortWeight: 1,
+      nextDueTime: renewal.nextDueTime,
+    };
+  }
+
+  return {
+    state: "healthy" as NodeExpiryState,
+    label: renewal.label,
+    tone: "success" as const,
+    accentClassName: "",
+    bannerClassName: "",
+    isHighlighted: false,
+    sortWeight: 2,
+    nextDueTime: renewal.nextDueTime,
+  };
+};
+
+const mergeNodeRealtimeState = (
+  incomingNode: Node,
+  existingNode?: Node,
+): Node => {
+  return {
+    ...incomingNode,
+    systemInfo: existingNode?.systemInfo ?? incomingNode.systemInfo ?? null,
+    copyLoading: existingNode?.copyLoading ?? incomingNode.copyLoading ?? false,
+    upgradeLoading:
+      existingNode?.upgradeLoading ?? incomingNode.upgradeLoading ?? false,
+    rollbackLoading:
+      existingNode?.rollbackLoading ?? incomingNode.rollbackLoading ?? false,
+  };
+};
 
 const SortableItem = ({
   id,
   children,
 }: {
   id: number;
-  children: (listeners: any) => any;
+  children: (listeners: any, attributes?: any) => any;
 }) => {
   const {
     attributes,
@@ -117,21 +265,22 @@ const SortableItem = ({
     isDragging,
   } = useSortable({ id });
 
-  const style = {
-    transform: transform ? CSS.Transform.toString(transform) : undefined,
+  const style: React.CSSProperties = {
+    transform: transform
+      ? CSS.Transform.toString({
+          ...transform,
+          x: Math.round(transform.x),
+          y: Math.round(transform.y),
+        })
+      : undefined,
     transition: isDragging ? undefined : transition || undefined,
     opacity: isDragging ? 0.5 : 1,
-    willChange: "transform",
+    willChange: isDragging ? "transform" : undefined,
   };
 
   return (
-    <div
-      ref={setNodeRef}
-      style={style}
-      {...attributes}
-      className="overflow-hidden"
-    >
-      {children(listeners)}
+    <div ref={setNodeRef} className="overflow-visible h-full" style={style}>
+      {children(listeners, attributes)}
     </div>
   );
 };
@@ -140,27 +289,61 @@ export default function NodePage() {
   const [nodeList, setNodeList] = useState<Node[]>([]);
   const [nodeOrder, setNodeOrder] = useState<number[]>([]);
   const [loading, setLoading] = useState(false);
-  const [wsConnected, setWsConnected] = useState(false);
-  const [wsConnecting, setWsConnecting] = useState(false);
+  const [localSearchKeyword, setLocalSearchKeyword] = useLocalStorageState(
+    "node-search-keyword-local",
+    "",
+  );
+  const [remoteSearchKeyword, setRemoteSearchKeyword] = useLocalStorageState(
+    "node-search-keyword-remote",
+    "",
+  );
+  const [activeTab, setActiveTab] = useLocalStorageState<NodeTab>(
+    "node-active-tab",
+    "local",
+  );
+  const [viewMode, setViewMode] = useLocalStorageState<"list" | "grid">(
+    "node-view-mode",
+    "grid",
+  );
+
+  // Backward-compat: older versions stored extra tab values.
+  useEffect(() => {
+    if (activeTab !== "local" && activeTab !== "remote") {
+      setActiveTab("local");
+    }
+  }, [activeTab, setActiveTab]);
+  const [remoteUsageMap, setRemoteUsageMap] = useState<
+    Record<number, RemoteUsageNode>
+  >({});
+  const [nodeFilterMode, setNodeFilterMode, resetNodeFilterMode] =
+    useLocalStorageState<NodeFilterMode>("node-expiry-filter-mode", "all");
+  const [isSearchVisible, setIsSearchVisible] = useState(false);
+  const [isFilterModalOpen, setIsFilterModalOpen] = useState(false);
   const [dialogVisible, setDialogVisible] = useState(false);
   const [dialogTitle, setDialogTitle] = useState("");
   const [isEdit, setIsEdit] = useState(false);
   const [submitLoading, setSubmitLoading] = useState(false);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  const [rollbackModalOpen, setRollbackModalOpen] = useState(false);
+  const [nodeToRollback, setNodeToRollback] = useState<Node | null>(null);
   const [nodeToDelete, setNodeToDelete] = useState<Node | null>(null);
   const [protocolDisabled, setProtocolDisabled] = useState(false);
   const [protocolDisabledReason, setProtocolDisabledReason] = useState("");
   const [form, setForm] = useState<NodeForm>({
     id: null,
     name: "",
+    remark: "",
+    expiryTime: 0,
+    renewalCycle: "",
     serverHost: "",
     serverIpV4: "",
     serverIpV6: "",
-    port: "1000-65535",
+    port: "10000-65535",
     tcpListenAddr: "[::]",
     udpListenAddr: "[::]",
     interfaceName: "",
+    extraIPs: "",
     http: 0,
     tls: 0,
     socks: 0,
@@ -176,6 +359,10 @@ export default function NodePage() {
   const [installCommandModal, setInstallCommandModal] = useState(false);
   const [installCommand, setInstallCommand] = useState("");
   const [currentNodeName, setCurrentNodeName] = useState("");
+  const [installSelectorOpen, setInstallSelectorOpen] = useState(false);
+  const [installTargetNode, setInstallTargetNode] = useState<Node | null>(null);
+  const [installChannel, setInstallChannel] =
+    useState<ReleaseChannel>("stable");
 
   // 升级相关状态
   const [upgradeModalOpen, setUpgradeModalOpen] = useState(false);
@@ -191,63 +378,98 @@ export default function NodePage() {
       name: string;
       publishedAt: string;
       prerelease: boolean;
+      channel: ReleaseChannel;
     }>
   >([]);
   const [releasesLoading, setReleasesLoading] = useState(false);
+  const [releaseChannel, setReleaseChannel] =
+    useState<ReleaseChannel>("stable");
   const [selectedVersion, setSelectedVersion] = useState("");
   const [batchUpgradeLoading, setBatchUpgradeLoading] = useState(false);
   const [upgradeProgress, setUpgradeProgress] = useState<
     Record<number, { stage: string; percent: number; message: string }>
   >({});
 
-  const websocketRef = useRef<WebSocket | null>(null);
-  const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const reconnectAttemptsRef = useRef(0);
-  const maxReconnectAttempts = 5;
-  const offlineTimersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(
-    new Map(),
-  );
-  const offlineDelayMs = 3000;
+  const [infoPopoverPlacement, setInfoPopoverPlacement] = useState<
+    Record<number, "left" | "bottom">
+  >({});
 
-  const clearOfflineTimer = (nodeId: number) => {
-    const timer = offlineTimersRef.current.get(nodeId);
+  const updateInfoPopoverPlacement = useCallback(
+    (nodeId: number, triggerElement: HTMLElement | null) => {
+      if (!triggerElement) {
+        return;
+      }
 
-    if (timer) {
-      clearTimeout(timer);
-      offlineTimersRef.current.delete(nodeId);
-    }
-  };
+      const rect = triggerElement.getBoundingClientRect();
+      const cardElement = triggerElement.closest("[data-node-card='true']");
+      const cardRect =
+        cardElement instanceof HTMLElement
+          ? cardElement.getBoundingClientRect()
+          : null;
+      const estimatedPanelWidth = 288;
+      const containerPadding = 16;
+      const availableLeftSpace = cardRect
+        ? rect.left - cardRect.left
+        : rect.left;
+      const nextPlacement: "left" | "bottom" =
+        availableLeftSpace >= estimatedPanelWidth + containerPadding
+          ? "left"
+          : "bottom";
 
-  const scheduleNodeOffline = (nodeId: number) => {
-    if (offlineTimersRef.current.has(nodeId)) return;
-    const timer = setTimeout(() => {
-      offlineTimersRef.current.delete(nodeId);
-      setNodeList((prev) =>
-        prev.map((node) => {
-          if (node.id !== nodeId) return node;
-          if (node.connectionStatus === "offline" && node.systemInfo === null)
-            return node;
-
-          return { ...node, connectionStatus: "offline", systemInfo: null };
-        }),
+      setInfoPopoverPlacement((prev) =>
+        prev[nodeId] === nextPlacement
+          ? prev
+          : { ...prev, [nodeId]: nextPlacement },
       );
-    }, offlineDelayMs);
+    },
+    [],
+  );
 
-    offlineTimersRef.current.set(nodeId, timer);
-  };
+  const handleNodeOffline = useCallback((nodeId: number) => {
+    setNodeList((prev) =>
+      prev.map((node) => {
+        if (node.id !== nodeId) return node;
+        if (node.connectionStatus === "offline" && node.systemInfo === null) {
+          return node;
+        }
 
-  useEffect(() => {
-    loadNodes();
-    initWebSocket();
+        return { ...node, connectionStatus: "offline", systemInfo: null };
+      }),
+    );
+  }, []);
 
-    return () => {
-      closeWebSocket();
-    };
+  const { clearOfflineTimer, scheduleNodeOffline } = useNodeOfflineTimers({
+    delayMs: 3000,
+    onNodeOffline: handleNodeOffline,
+  });
+
+  const loadRemoteUsage = useCallback(async () => {
+    try {
+      const res = await getPeerRemoteUsageList();
+
+      if (res.code === 0 && Array.isArray(res.data)) {
+        const nextMap: Record<number, RemoteUsageNode> = {};
+
+        (res.data as unknown as RemoteUsageNode[]).forEach((item) => {
+          if (!item || typeof item.nodeId !== "number") return;
+          nextMap[item.nodeId] = item;
+        });
+
+        setRemoteUsageMap(nextMap);
+      }
+    } catch {
+      // ignore remote usage errors in node page
+    }
   }, []);
 
   // 加载节点列表
-  const loadNodes = async () => {
-    setLoading(true);
+  const loadNodes = useCallback(async (options?: { silent?: boolean }) => {
+    const silent = options?.silent ?? false;
+
+    if (!silent) {
+      setLoading(true);
+    }
+
     try {
       const res = await getNodeList();
 
@@ -265,7 +487,13 @@ export default function NodePage() {
           copyLoading: false,
         }));
 
-        setNodeList(nodesData);
+        setNodeList((prev) => {
+          const previousById = new Map(prev.map((node) => [node.id, node]));
+
+          return nodesData.map((node) =>
+            mergeNodeRealtimeState(node, previousById.get(node.id)),
+          );
+        });
 
         // 优先使用数据库中的 inx 字段进行排序，否则回退到本地排序
         const hasDbOrdering = nodesData.some(
@@ -279,103 +507,28 @@ export default function NodePage() {
 
           setNodeOrder(dbOrder);
         } else {
-          try {
-            const stored = localStorage.getItem("node-order");
-
-            if (stored) {
-              const parsed = JSON.parse(stored);
-
-              if (Array.isArray(parsed)) {
-                const existingIds = new Set(nodesData.map((n) => n.id));
-                const validOrder = parsed
-                  .map((id: any) => Number(id))
-                  .filter((id: number) => existingIds.has(id));
-
-                if (validOrder.length > 0) {
-                  setNodeOrder(validOrder);
-                } else {
-                  setNodeOrder(nodesData.map((n) => n.id));
-                }
-              } else {
-                setNodeOrder(nodesData.map((n) => n.id));
-              }
-            } else {
-              setNodeOrder(nodesData.map((n) => n.id));
-            }
-          } catch {
-            setNodeOrder(nodesData.map((n) => n.id));
-          }
+          setNodeOrder(
+            loadStoredOrder(
+              "node-order",
+              nodesData.map((n) => n.id),
+            ),
+          );
         }
       } else {
-        toast.error(res.msg || "加载节点列表失败");
+        if (!silent) {
+          toast.error(res.msg || "加载节点列表失败");
+        }
       }
     } catch {
-      toast.error("网络错误，请重试");
+      if (!silent) {
+        toast.error("网络错误，请重试");
+      }
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
-  };
-
-  // 初始化WebSocket连接
-  const initWebSocket = () => {
-    if (
-      websocketRef.current &&
-      (websocketRef.current.readyState === WebSocket.OPEN ||
-        websocketRef.current.readyState === WebSocket.CONNECTING)
-    ) {
-      return;
-    }
-
-    if (websocketRef.current) {
-      closeWebSocket();
-    }
-
-    // 构建WebSocket URL，使用axios的baseURL
-    const baseUrl =
-      axios.defaults.baseURL ||
-      (import.meta.env.VITE_API_BASE
-        ? `${import.meta.env.VITE_API_BASE}/api/v1/`
-        : "/api/v1/");
-    const wsUrl =
-      baseUrl.replace(/^http/, "ws").replace(/\/api\/v1\/$/, "") +
-      `/system-info?type=0&secret=${localStorage.getItem("token")}`;
-
-    try {
-      setWsConnecting(true);
-      websocketRef.current = new WebSocket(wsUrl);
-
-      websocketRef.current.onopen = () => {
-        reconnectAttemptsRef.current = 0;
-        setWsConnected(true);
-        setWsConnecting(false);
-      };
-
-      websocketRef.current.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-
-          handleWebSocketMessage(data);
-        } catch {
-          // 解析失败时不输出错误信息
-        }
-      };
-
-      websocketRef.current.onerror = () => {
-        // WebSocket错误时不输出错误信息
-      };
-
-      websocketRef.current.onclose = () => {
-        websocketRef.current = null;
-        setWsConnected(false);
-        setWsConnecting(false);
-        attemptReconnect();
-      };
-    } catch {
-      setWsConnected(false);
-      setWsConnecting(false);
-      attemptReconnect();
-    }
-  };
+  }, []);
 
   // 处理WebSocket消息
   const handleWebSocketMessage = (data: any) => {
@@ -404,61 +557,20 @@ export default function NodePage() {
       setNodeList((prev) =>
         prev.map((node) => {
           if (node.id === nodeId) {
-            try {
-              let systemInfo;
+            const systemInfo = buildNodeSystemInfo(
+              messageData,
+              node.systemInfo,
+            );
 
-              if (typeof messageData === "string") {
-                systemInfo = JSON.parse(messageData);
-              } else {
-                systemInfo = messageData;
-              }
-
-              const currentUpload = parseInt(systemInfo.bytes_transmitted) || 0;
-              const currentDownload = parseInt(systemInfo.bytes_received) || 0;
-              const currentUptime = parseInt(systemInfo.uptime) || 0;
-
-              let uploadSpeed = 0;
-              let downloadSpeed = 0;
-
-              if (node.systemInfo && node.systemInfo.uptime) {
-                const timeDiff = currentUptime - node.systemInfo.uptime;
-
-                if (timeDiff > 0 && timeDiff <= 10) {
-                  const lastUpload = node.systemInfo.uploadTraffic || 0;
-                  const lastDownload = node.systemInfo.downloadTraffic || 0;
-
-                  const uploadDiff = currentUpload - lastUpload;
-                  const downloadDiff = currentDownload - lastDownload;
-
-                  const uploadReset = currentUpload < lastUpload;
-                  const downloadReset = currentDownload < lastDownload;
-
-                  if (!uploadReset && uploadDiff >= 0) {
-                    uploadSpeed = uploadDiff / timeDiff;
-                  }
-
-                  if (!downloadReset && downloadDiff >= 0) {
-                    downloadSpeed = downloadDiff / timeDiff;
-                  }
-                }
-              }
-
-              return {
-                ...node,
-                connectionStatus: "online",
-                systemInfo: {
-                  cpuUsage: parseFloat(systemInfo.cpu_usage) || 0,
-                  memoryUsage: parseFloat(systemInfo.memory_usage) || 0,
-                  uploadTraffic: currentUpload,
-                  downloadTraffic: currentDownload,
-                  uploadSpeed: uploadSpeed,
-                  downloadSpeed: downloadSpeed,
-                  uptime: currentUptime,
-                },
-              };
-            } catch {
+            if (!systemInfo) {
               return node;
             }
+
+            return {
+              ...node,
+              connectionStatus: "online",
+              systemInfo,
+            };
           }
 
           return node;
@@ -484,52 +596,76 @@ export default function NodePage() {
       } catch {
         // ignore parse errors
       }
+    } else if (type === "metric") {
+      clearOfflineTimer(nodeId);
+      setNodeList((prev) =>
+        prev.map((node) => {
+          if (node.id !== nodeId) return node;
+
+          const metric =
+            typeof messageData === "string"
+              ? JSON.parse(messageData)
+              : messageData;
+
+          if (!metric || typeof metric !== "object") return node;
+
+          const incomingUptime = metric.uptime ?? 0;
+
+          return {
+            ...node,
+            connectionStatus: "online",
+            systemInfo: {
+              cpuUsage: metric.cpuUsage ?? metric.cpu_usage ?? 0,
+              memoryUsage: metric.memoryUsage ?? metric.memory_usage ?? 0,
+              uploadTraffic:
+                metric.netOutBytes ?? metric.bytes_transmitted ?? 0,
+              downloadTraffic: metric.netInBytes ?? metric.bytes_received ?? 0,
+              uploadSpeed: metric.netOutSpeed ?? metric.net_out_speed ?? 0,
+              downloadSpeed: metric.netInSpeed ?? metric.net_in_speed ?? 0,
+              uptime: incomingUptime || node.systemInfo?.uptime || 0,
+              diskUsage: metric.diskUsage ?? metric.disk_usage,
+              load1: metric.load1,
+              load5: metric.load5,
+              load15: metric.load15,
+              tcpConns: metric.tcpConns ?? metric.tcp_conns,
+              udpConns: metric.udpConns ?? metric.udp_conns,
+              netInSpeed: metric.netInSpeed ?? metric.net_in_speed,
+              netOutSpeed: metric.netOutSpeed ?? metric.net_out_speed,
+            },
+          };
+        }),
+      );
     }
   };
 
-  // 尝试重新连接
-  const attemptReconnect = () => {
-    if (reconnectTimerRef.current) return;
-    if (reconnectAttemptsRef.current < maxReconnectAttempts) {
-      reconnectAttemptsRef.current++;
+  const { wsConnected, wsConnecting, usingPollingFallback } = useNodeRealtime({
+    onMessage: handleWebSocketMessage,
+  });
 
-      reconnectTimerRef.current = setTimeout(() => {
-        reconnectTimerRef.current = null;
-        initWebSocket();
-      }, 3000 * reconnectAttemptsRef.current);
-    }
-  };
+  useEffect(() => {
+    loadNodes();
+    loadRemoteUsage();
+  }, [loadNodes, loadRemoteUsage]);
 
-  // 关闭WebSocket连接
-  const closeWebSocket = () => {
-    if (reconnectTimerRef.current) {
-      clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = null;
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (!usingPollingFallback) {
+      return;
     }
 
-    offlineTimersRef.current.forEach((timer) => clearTimeout(timer));
-    offlineTimersRef.current.clear();
+    void loadNodes({ silent: true });
 
-    reconnectAttemptsRef.current = 0;
-    setWsConnected(false);
-    setWsConnecting(false);
+    const interval = window.setInterval(() => {
+      void loadNodes({ silent: true });
+    }, NODE_FALLBACK_REFRESH_INTERVAL_MS);
 
-    if (websocketRef.current) {
-      websocketRef.current.onopen = null;
-      websocketRef.current.onmessage = null;
-      websocketRef.current.onerror = null;
-      websocketRef.current.onclose = null;
-
-      if (
-        websocketRef.current.readyState === WebSocket.OPEN ||
-        websocketRef.current.readyState === WebSocket.CONNECTING
-      ) {
-        websocketRef.current.close();
-      }
-
-      websocketRef.current = null;
-    }
-  };
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [loadNodes, usingPollingFallback]);
 
   // 格式化速度
   const formatSpeed = (bytesPerSecond: number): string => {
@@ -562,27 +698,34 @@ export default function NodePage() {
   };
 
   // 格式化流量
-  const formatTraffic = (bytes: number): string => {
-    if (bytes === 0) return "0 B";
 
-    const k = 1024;
-    const sizes = ["B", "KB", "MB", "GB", "TB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
 
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+  const formatFlow = (bytes: number): string => {
+    if (!Number.isFinite(bytes) || bytes <= 0) {
+      return "0 B";
+    }
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KB`;
+    if (bytes < 1024 * 1024 * 1024)
+      return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
   };
 
-  // 获取进度条颜色
-  const getProgressColor = (
-    value: number,
-    offline = false,
-  ): "default" | "primary" | "secondary" | "success" | "warning" | "danger" => {
-    if (offline) return "default";
-    if (value <= 50) return "success";
-    if (value <= 80) return "warning";
+  const formatChainType = (chainType: number, hopInx: number) => {
+    if (chainType === 1) {
+      return "入口节点";
+    }
+    if (chainType === 2) {
+      return `中继跳点 #${hopInx}`;
+    }
+    if (chainType === 3) {
+      return "出口节点";
+    }
 
-    return "danger";
+    return "未知链路";
   };
+
 
   // IPv4/IPv6 格式验证（仅用于判定地址族）
   const ipv4Regex =
@@ -680,6 +823,13 @@ export default function NodePage() {
       newErrors.name = "节点名称长度不能超过50位";
     }
 
+    if (
+      (form.renewalCycle && !form.expiryTime) ||
+      (!form.renewalCycle && form.expiryTime)
+    ) {
+      newErrors.expiryTime = "请同时设置续费周期和续费基准时间";
+    }
+
     const v4 = form.serverIpV4.trim();
     const v6 = form.serverIpV6.trim();
     const host = form.serverHost.trim();
@@ -739,13 +889,17 @@ export default function NodePage() {
     setForm({
       id: node.id,
       name: node.name,
+      remark: node.remark || "",
+      expiryTime: node.expiryTime || 0,
+      renewalCycle: node.renewalCycle || "",
       serverHost: normalizedHost,
       serverIpV4: normalizedV4,
       serverIpV6: normalizedV6,
-      port: node.port || "1000-65535",
+      port: node.port || "10000-65535",
       tcpListenAddr: node.tcpListenAddr || "[::]",
       udpListenAddr: node.udpListenAddr || "[::]",
       interfaceName: (node as any).interfaceName || "",
+      extraIPs: node.extraIPs || "",
       http: typeof node.http === "number" ? node.http : 1,
       tls: typeof node.tls === "number" ? node.tls : 1,
       socks: typeof node.socks === "number" ? node.socks : 1,
@@ -787,21 +941,50 @@ export default function NodePage() {
     }
   };
 
+  const handleDismissExpiryReminder = async (nodeId: number) => {
+    try {
+      const res = await dismissNodeExpiryReminder(nodeId);
+
+      if (res.code === 0) {
+        setNodeList((prev) =>
+          prev.map((n) =>
+            n.id === nodeId ? { ...n, expiryReminderDismissed: 1 } : n,
+          ),
+        );
+      } else {
+        toast.error(res.msg || "操作失败");
+      }
+    } catch {
+      toast.error("网络错误，请重试");
+    }
+  };
+
+  const openInstallSelector = (node: Node) => {
+    setInstallTargetNode(node);
+    setInstallChannel("stable");
+    setInstallSelectorOpen(true);
+  };
+
   // 复制安装命令
-  const handleCopyInstallCommand = async (node: Node) => {
+  const handleCopyInstallCommand = async (
+    node: Node,
+    channel: ReleaseChannel,
+  ) => {
     setNodeList((prev) =>
       prev.map((n) => (n.id === node.id ? { ...n, copyLoading: true } : n)),
     );
 
     try {
-      const res = await getNodeInstallCommand(node.id);
+      const res = await getNodeInstallCommand(node.id, channel);
 
       if (res.code === 0 && res.data) {
-        try {
-          await navigator.clipboard.writeText(res.data);
-          toast.success("安装命令已复制到剪贴板");
-        } catch {
-          // 复制失败，显示安装命令模态框
+        const copied = await tryCopyInstallCommand(res.data);
+
+        if (copied) {
+          toast.success(
+            `${channel === "stable" ? "正式版" : "测试版"}安装命令已复制到剪贴板`,
+          );
+        } else {
           setInstallCommand(res.data);
           setCurrentNodeName(node.name);
           setInstallCommandModal(true);
@@ -818,6 +1001,13 @@ export default function NodePage() {
     }
   };
 
+  const handleConfirmInstallCommand = async () => {
+    if (!installTargetNode) return;
+
+    setInstallSelectorOpen(false);
+    await handleCopyInstallCommand(installTargetNode, installChannel);
+  };
+
   // 手动复制安装命令
   const handleManualCopy = async () => {
     try {
@@ -829,18 +1019,10 @@ export default function NodePage() {
     }
   };
 
-  // 打开版本选择弹窗
-  const openUpgradeModal = async (
-    target: "single" | "batch",
-    nodeId?: number,
-  ) => {
-    setUpgradeTarget(target);
-    setUpgradeTargetNodeId(nodeId || null);
-    setSelectedVersion("");
-    setUpgradeModalOpen(true);
+  const loadReleasesByChannel = useCallback(async (channel: ReleaseChannel) => {
     setReleasesLoading(true);
     try {
-      const res = await getNodeReleases();
+      const res = await getNodeReleases(channel);
 
       if (res.code === 0 && Array.isArray(res.data)) {
         setReleases(res.data);
@@ -852,6 +1034,21 @@ export default function NodePage() {
     } finally {
       setReleasesLoading(false);
     }
+  }, []);
+
+  // 打开版本选择弹窗
+  const openUpgradeModal = async (
+    target: "single" | "batch",
+    nodeId?: number,
+  ) => {
+    const defaultChannel: ReleaseChannel = "stable";
+
+    setUpgradeTarget(target);
+    setUpgradeTargetNodeId(nodeId || null);
+    setReleaseChannel(defaultChannel);
+    setSelectedVersion("");
+    setUpgradeModalOpen(true);
+    await loadReleasesByChannel(defaultChannel);
   };
 
   // 确认升级（从版本弹窗）
@@ -870,7 +1067,11 @@ export default function NodePage() {
         ),
       );
       try {
-        const res = await upgradeNode(upgradeTargetNodeId, version);
+        const res = await upgradeNode(
+          upgradeTargetNodeId,
+          version,
+          releaseChannel,
+        );
 
         if (res.code === 0) {
           toast.success(`节点升级命令已发送，节点将自动重启`);
@@ -887,13 +1088,32 @@ export default function NodePage() {
         );
       }
     } else if (upgradeTarget === "batch") {
+      const selectedLocalIds = Array.from(selectedIds).filter((id) => {
+        const matchedNode = nodeList.find((node) => node.id === id);
+
+        return matchedNode?.isRemote !== 1;
+      });
+
+      if (selectedLocalIds.length === 0) {
+        toast.error("请选择本地节点进行升级");
+        setUpgradeModalOpen(false);
+
+        return;
+      }
+
       setBatchUpgradeLoading(true);
       setUpgradeModalOpen(false);
       try {
-        const res = await batchUpgradeNodes(Array.from(selectedIds), version);
+        const res = await batchUpgradeNodes(
+          selectedLocalIds,
+          version,
+          releaseChannel,
+        );
 
         if (res.code === 0) {
-          toast.success(`批量升级命令已发送到 ${selectedIds.size} 个节点`);
+          toast.success(
+            `批量升级命令已发送到 ${selectedLocalIds.length} 个节点`,
+          );
         } else {
           toast.error(res.msg || "批量升级失败");
         }
@@ -906,7 +1126,16 @@ export default function NodePage() {
   };
 
   // 回退节点
-  const handleRollbackNode = async (node: Node) => {
+  const handleRollbackNode = (node: Node) => {
+    setNodeToRollback(node);
+    setRollbackModalOpen(true);
+  };
+
+  const confirmRollback = async () => {
+    if (!nodeToRollback) return;
+    const node = nodeToRollback;
+
+    setRollbackModalOpen(false);
     setNodeList((prev) =>
       prev.map((n) => (n.id === node.id ? { ...n, rollbackLoading: true } : n)),
     );
@@ -926,6 +1155,7 @@ export default function NodePage() {
           n.id === node.id ? { ...n, rollbackLoading: false } : n,
         ),
       );
+      setNodeToRollback(null);
     }
   };
 
@@ -940,6 +1170,10 @@ export default function NodePage() {
       const { serverHost, ...rest } = form;
       const data = {
         ...rest,
+        remark: form.remark.trim(),
+        expiryTime: form.expiryTime,
+        renewalCycle: form.renewalCycle,
+        extraIPs: form.extraIPs,
         serverIp:
           form.serverIpV4?.trim() ||
           form.serverIpV6?.trim() ||
@@ -960,6 +1194,9 @@ export default function NodePage() {
                 ? {
                     ...n,
                     name: form.name,
+                    remark: form.remark.trim(),
+                    expiryTime: form.expiryTime,
+                    renewalCycle: form.renewalCycle,
                     serverIp:
                       form.serverIpV4?.trim() ||
                       form.serverIpV6?.trim() ||
@@ -996,13 +1233,17 @@ export default function NodePage() {
     setForm({
       id: null,
       name: "",
+      remark: "",
+      expiryTime: 0,
+      renewalCycle: "",
       serverHost: "",
       serverIpV4: "",
       serverIpV6: "",
-      port: "1000-65535",
+      port: "10000-65535",
       tcpListenAddr: "[::]",
       udpListenAddr: "[::]",
       interfaceName: "",
+      extraIPs: "",
       http: 0,
       tls: 0,
       socks: 0,
@@ -1022,19 +1263,31 @@ export default function NodePage() {
 
     if (isNaN(activeId) || isNaN(overId)) return;
 
-    const oldIndex = nodeOrder.indexOf(activeId);
-    const newIndex = nodeOrder.indexOf(overId);
+    const displayNodeIds = displayNodes.map((node) => node.id);
+    const oldIndex = displayNodeIds.indexOf(activeId);
+    const newIndex = displayNodeIds.indexOf(overId);
 
     if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) return;
 
-    const newOrder = arrayMove(nodeOrder, oldIndex, newIndex);
+    const reorderedDisplayIds = arrayMove(displayNodeIds, oldIndex, newIndex);
+    const displayIdSet = new Set(displayNodeIds);
+    let reorderedDisplayIndex = 0;
+
+    const newOrder = nodeOrder.map((id) => {
+      if (!displayIdSet.has(id)) {
+        return id;
+      }
+
+      const nextId = reorderedDisplayIds[reorderedDisplayIndex];
+
+      reorderedDisplayIndex += 1;
+
+      return nextId;
+    });
 
     setNodeOrder(newOrder);
 
-    // 保存到 localStorage
-    try {
-      localStorage.setItem("node-order", JSON.stringify(newOrder));
-    } catch {}
+    saveOrder("node-order", newOrder);
 
     // 持久化到数据库
     try {
@@ -1083,7 +1336,7 @@ export default function NodePage() {
   };
 
   const selectAll = () => {
-    setSelectedIds(new Set(sortedNodes.map((n) => n.id)));
+    setSelectedIds(new Set(displayNodes.map((n) => n.id)));
   };
 
   const deselectAll = () => {
@@ -1130,6 +1383,27 @@ export default function NodePage() {
     }),
   );
 
+  const nodeExpiryStats = useMemo(() => {
+    return nodeList.reduce(
+      (acc, node) => {
+        if (node.isRemote === 1) {
+          return acc;
+        }
+
+        const meta = getNodeExpiryMeta(node.expiryTime, node.renewalCycle);
+
+        if (meta.state === "expired") acc.expired += 1;
+        if (meta.state === "expiringSoon") acc.expiringSoon += 1;
+        if (getNodeReminderEnabled(node)) {
+          acc.withExpiry += 1;
+        }
+
+        return acc;
+      },
+      { expired: 0, expiringSoon: 0, withExpiry: 0 },
+    );
+  }, [nodeList]);
+
   // 根据排序顺序获取节点列表
   const sortedNodes = useMemo((): Node[] => {
     if (!nodeList || nodeList.length === 0) return [];
@@ -1168,72 +1442,299 @@ export default function NodePage() {
     return sortedByDb;
   }, [nodeList, nodeOrder]);
 
-  const sortableNodeIds = useMemo(
-    () => sortedNodes.map((n) => n.id),
+  const filterNodesByKeyword = useCallback((nodes: Node[], keyword: string) => {
+    const normalizedKeyword = keyword.trim().toLowerCase();
+
+    if (!normalizedKeyword) {
+      return nodes;
+    }
+
+    return nodes.filter(
+      (node) =>
+        (node.name && node.name.toLowerCase().includes(normalizedKeyword)) ||
+        (node.remark &&
+          node.remark.toLowerCase().includes(normalizedKeyword)) ||
+        (node.serverIp &&
+          node.serverIp.toLowerCase().includes(normalizedKeyword)) ||
+        (node.serverIpV4 &&
+          node.serverIpV4.toLowerCase().includes(normalizedKeyword)) ||
+        (node.serverIpV6 &&
+          node.serverIpV6.toLowerCase().includes(normalizedKeyword)),
+    );
+  }, []);
+
+  const localNodes = useMemo(
+    () => sortedNodes.filter((node) => node.isRemote !== 1),
     [sortedNodes],
   );
 
-  return (
-    <div className="px-3 lg:px-6 py-8">
-      {/* 页面头部 */}
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex-1" />
+  const remoteNodes = useMemo(
+    () => sortedNodes.filter((node) => node.isRemote === 1),
+    [sortedNodes],
+  );
 
-        <div className="flex gap-2 items-center">
+  const filteredLocalNodes = useMemo(() => {
+    const keywordFiltered = filterNodesByKeyword(
+      localNodes,
+      localSearchKeyword,
+    );
+
+    if (nodeFilterMode === "all") {
+      return keywordFiltered;
+    }
+
+    return keywordFiltered.filter((node) => {
+      const expiryMeta = getNodeExpiryMeta(node.expiryTime, node.renewalCycle);
+
+      switch (nodeFilterMode) {
+        case "expiringSoon":
+          return expiryMeta.state === "expiringSoon";
+        case "expired":
+          return expiryMeta.state === "expired";
+        case "withExpiry":
+          return getNodeReminderEnabled(node);
+        default:
+          return true;
+      }
+    });
+  }, [filterNodesByKeyword, localNodes, localSearchKeyword, nodeFilterMode]);
+
+  const filteredRemoteNodes = useMemo(
+    () => filterNodesByKeyword(remoteNodes, remoteSearchKeyword),
+    [filterNodesByKeyword, remoteNodes, remoteSearchKeyword],
+  );
+
+  const currentSearchKeyword =
+    activeTab === "remote" ? remoteSearchKeyword : localSearchKeyword;
+
+  const setCurrentSearchKeyword =
+    activeTab === "remote" ? setRemoteSearchKeyword : setLocalSearchKeyword;
+
+  const displayNodes = useMemo(
+    () => (activeTab === "remote" ? filteredRemoteNodes : filteredLocalNodes),
+    [activeTab, filteredLocalNodes, filteredRemoteNodes],
+  );
+
+  const canBatchUpgrade = activeTab === "local";
+  const canUseExpiryFilter = activeTab === "local";
+  const hasKeywordSearch = currentSearchKeyword.trim().length > 0;
+  const hasActiveFilters = nodeFilterMode !== "all";
+  const isDisplayFiltered =
+    hasKeywordSearch || (canUseExpiryFilter && hasActiveFilters);
+
+  const sortableNodeIds = useMemo(
+    () => displayNodes.map((n) => n.id),
+    [displayNodes],
+  );
+
+  return (
+    <AnimatedPage className="px-3 lg:px-6 py-8">
+      <div className="mb-6 space-y-3">
+        <div className="flex items-center gap-2 overflow-x-auto pb-1">
           <Button
-            color={selectMode ? "warning" : "default"}
+            className="shrink-0"
+            color={activeTab === "local" ? "primary" : "default"}
             size="sm"
-            variant="flat"
-            onPress={toggleSelectMode}
+            variant={activeTab === "local" ? "solid" : "flat"}
+            onPress={() => setActiveTab("local")}
           >
-            {selectMode ? "取消多选" : "多选"}
+            本地节点
+            <Chip
+              className="ml-1 shrink-0 whitespace-nowrap"
+              size="sm"
+              variant="flat"
+            >
+              {localNodes.length}
+            </Chip>
           </Button>
-          <Button color="primary" size="sm" variant="flat" onPress={handleAdd}>
-            新增
+          <Button
+            className="shrink-0"
+            color={activeTab === "remote" ? "primary" : "default"}
+            size="sm"
+            variant={activeTab === "remote" ? "solid" : "flat"}
+            onPress={() => setActiveTab("remote")}
+          >
+            远程节点
+            <Chip
+              className="ml-1 shrink-0 whitespace-nowrap"
+              size="sm"
+              variant="flat"
+            >
+              {remoteNodes.length}
+            </Chip>
           </Button>
         </div>
-      </div>
 
-      {/* 批量操作浮动工具栏 */}
-      {selectMode && selectedIds.size > 0 && (
-        <div className="fixed bottom-7 left-1/2 z-50 w-[calc(100vw-1rem)] max-w-max -translate-x-1/2 overflow-x-auto rounded-lg border border-divider bg-content1 p-2 shadow-lg">
-          <div className="flex min-w-max items-center gap-2">
-            <span className="text-sm font-medium shrink-0">
-              已选 {selectedIds.size} 项
-            </span>
-            <Button size="sm" variant="flat" onPress={selectAll}>
-              全选
-            </Button>
-            <Button size="sm" variant="flat" onPress={deselectAll}>
-              清空
-            </Button>
-            <Button
-              color="warning"
-              isLoading={batchUpgradeLoading}
-              size="sm"
-              variant="flat"
-              onPress={() => openUpgradeModal("batch")}
-            >
-              升级
-            </Button>
-            <Button
-              color="danger"
-              size="sm"
-              variant="flat"
-              onPress={() => setBatchDeleteModalOpen(true)}
-            >
-              删除
-            </Button>
+        <div className="flex flex-row items-center justify-between gap-3 overflow-x-auto pb-1">
+          <div
+            className={`flex-1 max-w-sm flex items-center gap-2 shrink-0 ${
+              isSearchVisible ? "min-w-[200px]" : "min-w-0"
+            }`}
+          >
+            <SearchBar
+              isVisible={isSearchVisible}
+              placeholder={
+                activeTab === "remote"
+                  ? "搜索远程节点名称或IP"
+                  : "搜索本地节点名称或IP"
+              }
+              value={currentSearchKeyword}
+              onChange={setCurrentSearchKeyword}
+              onClose={() => setIsSearchVisible(false)}
+              onOpen={() => {
+                setIsSearchVisible(true);
+                setTimeout(() => {
+                  // 精准抓取带有“搜索”字样的输入框并强制聚焦
+                  const searchInput = document.querySelector(
+                    'input[placeholder*="搜索"]',
+                  );
+
+                  if (searchInput) (searchInput as HTMLElement).focus();
+                }, 150); // 150ms 刚好是 CSS 展开动画的时间
+              }}
+            />
+          </div>
+
+          <div className="flex h-8 items-center justify-end gap-2 whitespace-nowrap shrink-0">
+            {selectMode ? (
+              <>
+                <span className="text-sm text-default-600 shrink-0">
+                  已选择 {selectedIds.size} 项
+                </span>
+                <Button
+                  color="primary"
+                  size="sm"
+                  variant="flat"
+                  onPress={selectAll}
+                >
+                  全选
+                </Button>
+                <Button
+                  color="secondary"
+                  size="sm"
+                  variant="flat"
+                  onPress={deselectAll}
+                >
+                  清空
+                </Button>
+                <Button
+                  color="warning"
+                  isDisabled={selectedIds.size === 0 || !canBatchUpgrade}
+                  isLoading={batchUpgradeLoading}
+                  size="sm"
+                  variant="flat"
+                  onPress={() => openUpgradeModal("batch")}
+                >
+                  升级
+                </Button>
+                <Button
+                  color="danger"
+                  isDisabled={selectedIds.size === 0}
+                  size="sm"
+                  variant="flat"
+                  onPress={() => setBatchDeleteModalOpen(true)}
+                >
+                  删除
+                </Button>
+                <Button
+                  color="secondary"
+                  size="sm"
+                  variant="solid"
+                  onPress={toggleSelectMode}
+                >
+                  退出
+                </Button>
+              </>
+            ) : (
+              <>
+                {/* 视图切换按钮 */}
+                <Button
+                  isIconOnly
+                  size="sm"
+                  variant="flat"
+                  className="text-default-600 hidden sm:flex"
+                  onPress={() => setViewMode(viewMode === "list" ? "grid" : "list")}
+                >
+                  {viewMode === "list" ? (
+                    <LayoutGrid className="w-4 h-4" />
+                  ) : (
+                    <List className="w-4 h-4" />
+                  )}
+                </Button>
+
+                {/* 筛选按钮 */}
+                <Button
+                  isIconOnly
+                  aria-label="筛选条件"
+                  className={
+                    canUseExpiryFilter && nodeFilterMode !== "all"
+                      ? "bg-primary/20 text-primary relative"
+                      : "text-default-600 relative"
+                  }
+                  color={
+                    canUseExpiryFilter && nodeFilterMode !== "all"
+                      ? "primary"
+                      : "default"
+                  }
+                  isDisabled={!canUseExpiryFilter}
+                  size="sm"
+                  title={
+                    canUseExpiryFilter ? "筛选条件" : "远程节点不支持到期筛选"
+                  }
+                  variant="flat"
+                  onPress={() => setIsFilterModalOpen(true)}
+                >
+                  <svg
+                    aria-hidden="true"
+                    className="w-4 h-4"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                    />
+                  </svg>
+                  {canUseExpiryFilter && nodeFilterMode !== "all" && (
+                    <span className="absolute top-1.5 right-1.5 flex h-1.5 w-1.5 rounded-full bg-primary" />
+                  )}
+                </Button>
+                <Button
+                  className="bg-sky-100 text-sky-700 hover:bg-sky-200 dark:bg-sky-900/30 dark:text-sky-300 dark:hover:bg-sky-900/45"
+                  color="default"
+                  size="sm"
+                  variant="flat"
+                  onPress={toggleSelectMode}
+                >
+                  批量
+                </Button>
+                <Button
+                  color="primary"
+                  size="sm"
+                  variant="flat"
+                  onPress={handleAdd}
+                >
+                  新增
+                </Button>
+              </>
+            )}
           </div>
         </div>
-      )}
+      </div>
 
       {!wsConnected && (
         <Alert
           className="mb-4"
           color="warning"
           description={
-            wsConnecting ? "监控连接中..." : "监控连接已断开，正在重连..."
+            wsConnecting
+              ? "监控连接中..."
+              : usingPollingFallback
+                ? "监控连接已断开，已切换为列表自动刷新兜底模式。"
+                : "监控连接已断开，正在重连..."
           }
           variant="flat"
         />
@@ -1241,41 +1742,177 @@ export default function NodePage() {
 
       {/* 节点列表 */}
       {loading ? (
-        <div className="flex items-center justify-center h-64">
-          <div className="flex items-center gap-3">
-            <Spinner size="sm" />
-            <span className="text-default-600">正在加载...</span>
-          </div>
-        </div>
+        <PageLoadingState message="正在加载..." />
       ) : nodeList.length === 0 ? (
-        <Card className="shadow-sm border border-gray-200 dark:border-gray-700">
-          <CardBody className="text-center py-16">
-            <div className="flex flex-col items-center gap-4">
-              <div className="w-16 h-16 bg-default-100 rounded-full flex items-center justify-center">
-                <svg
-                  className="w-8 h-8 text-default-400"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    d="M5 12h14M5 12l4-4m-4 4l4 4"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={1.5}
-                  />
-                </svg>
-              </div>
-              <div>
-                <h3 className="text-lg font-semibold text-foreground">
-                  暂无节点配置
-                </h3>
-                <p className="text-default-500 text-sm mt-1">
-                  还没有创建任何节点配置，点击上方按钮开始创建
-                </p>
-              </div>
-            </div>
-          </CardBody>
+        <PageEmptyState
+          className="h-64"
+          message="暂无节点配置，点击上方按钮开始创建"
+        />
+      ) : displayNodes.length === 0 ? (
+        <PageEmptyState
+          className="h-64"
+          message={
+            isDisplayFiltered
+              ? activeTab === "remote"
+                ? "未找到匹配的远程节点"
+                : "未找到匹配的本地节点"
+              : activeTab === "remote"
+                ? "暂无远程节点"
+                : "暂无本地节点，点击上方按钮开始创建"
+          }
+        />
+      ) : viewMode === "list" ? (
+        <Card>
+          <Table
+            aria-label="节点列表"
+            className="overflow-x-auto min-w-full"
+            classNames={{
+              th: "bg-default-100/50 text-default-600 font-semibold text-sm border-b border-divider py-3 uppercase tracking-wider",
+              td: "py-3 border-b border-divider/50 group-data-[last=true]:border-b-0",
+              tr: "hover:bg-default-50/50 transition-colors",
+            }}
+          >
+            <TableHeader>
+              <TableColumn className="w-12 px-4 whitespace-nowrap overflow-hidden">
+                <Checkbox
+                  isSelected={selectMode && selectedIds.size === displayNodes.length && displayNodes.length > 0}
+                  onValueChange={(checked) => {
+                    if (checked) {
+                      selectAll();
+                      setSelectMode(true);
+                    } else {
+                      deselectAll();
+                      setSelectMode(false);
+                    }
+                  }}
+                />
+              </TableColumn>
+              <TableColumn>节点名称</TableColumn>
+              <TableColumn>地址</TableColumn>
+              <TableColumn>版本</TableColumn>
+              <TableColumn>操作</TableColumn>
+            </TableHeader>
+            <TableBody items={displayNodes}>
+              {(node) => {
+                const isRemoteNode = node.isRemote === 1;
+                const hasRemark = Boolean(node.remark?.trim());
+
+                return (
+                  <TableRow key={node.id}>
+                    <TableCell className="px-4">
+                      <Checkbox
+                        isSelected={selectedIds.has(node.id)}
+                        onValueChange={(checked) => {
+                          if (checked) {
+                            setSelectMode(true);
+                            setSelectedIds((prev) => new Set([...prev, node.id]));
+                          } else {
+                            setSelectedIds((prev) => {
+                              const next = new Set(prev);
+                              next.delete(node.id);
+                              if (next.size === 0) setSelectMode(false);
+                              return next;
+                            });
+                          }
+                        }}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        <div
+                          className={`shrink-0 w-2 h-2 rounded-full ${
+                            node.connectionStatus === "online"
+                              ? "bg-success"
+                              : node.syncError
+                                ? "bg-danger"
+                                : "bg-default-400"
+                          } ${node.systemInfo && node.connectionStatus === "online" ? "animate-pulse" : ""}`}
+                        />
+                        <span className="font-medium text-foreground text-sm">
+                          {node.name}
+                        </span>
+                        {hasRemark && (
+                          <Chip size="sm" variant="flat" className="h-4 px-1 text-[10px]">
+                            {node.remark}
+                          </Chip>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <span className="text-sm font-mono text-default-600">
+                        {isRemoteNode ? new URL(node.remoteUrl || "").hostname : node.serverIp}
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      <span className="text-sm text-default-500">
+                        {node.version || "-"}
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap items-center gap-1.5 min-w-max">
+                        {!isRemoteNode && (
+                          <Button
+                            size="sm"
+                            variant="flat"
+                            className="h-6 px-2 min-w-0 text-xs bg-emerald-50 text-emerald-600 hover:bg-emerald-100 dark:bg-emerald-950/30 dark:text-emerald-400"
+                            isLoading={node.copyLoading}
+                            onPress={() => openInstallSelector(node)}
+                          >
+                            安装
+                          </Button>
+                        )}
+                        {!isRemoteNode && (
+                          <Button
+                            size="sm"
+                            variant="flat"
+                            className="h-6 px-2 min-w-0 text-xs bg-amber-50 text-amber-600 hover:bg-amber-100 dark:bg-amber-950/30 dark:text-amber-400"
+                            isDisabled={node.connectionStatus !== "online"}
+                            isLoading={node.upgradeLoading}
+                            onPress={() => {
+                              setUpgradeTargetNodeId(node.id);
+                              openUpgradeModal("single");
+                            }}
+                          >
+                            升级
+                          </Button>
+                        )}
+                        {!isRemoteNode && (
+                          <Button
+                            size="sm"
+                            variant="flat"
+                            className="h-6 px-2 min-w-0 text-xs bg-blue-50 text-blue-600 hover:bg-blue-100 dark:bg-blue-950/30 dark:text-blue-400"
+                            isDisabled={node.connectionStatus !== "online"}
+                            isLoading={node.rollbackLoading}
+                            onPress={() => handleRollbackNode(node)}
+                          >
+                            回退
+                          </Button>
+                        )}
+                        {!isRemoteNode && (
+                          <Button
+                            size="sm"
+                            variant="flat"
+                            className="h-6 px-2 min-w-0 text-xs bg-indigo-50 text-indigo-600 hover:bg-indigo-100 dark:bg-indigo-950/30 dark:text-indigo-400"
+                            onPress={() => handleEdit(node)}
+                          >
+                            编辑
+                          </Button>
+                        )}
+                        <Button
+                          size="sm"
+                          variant="flat"
+                          className="h-6 px-2 min-w-0 text-xs bg-rose-50 text-rose-600 hover:bg-rose-100 dark:bg-rose-950/30 dark:text-rose-400"
+                          onPress={() => handleDelete(node)}
+                        >
+                          删除
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+              }}
+            </TableBody>
+          </Table>
         </Card>
       ) : (
         <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
@@ -1284,37 +1921,48 @@ export default function NodePage() {
             strategy={rectSortingStrategy}
           >
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
-              {sortedNodes.map((node) => {
+              {displayNodes.map((node) => {
                 const isRemoteNode = node.isRemote === 1;
+                const remoteUsage = isRemoteNode
+                  ? remoteUsageMap[node.id]
+                  : null;
+                const expiryMeta = getNodeExpiryMeta(
+                  node.expiryTime,
+                  node.renewalCycle,
+                );
+                const connectionStatusMeta = getConnectionStatusMeta(
+                  node.connectionStatus,
+                );
+                const hasRemark = Boolean(node.remark?.trim());
+                const hasExpiryInfo = Boolean(
+                  node.expiryTime &&
+                    node.expiryTime > 0 &&
+                    node.renewalCycle &&
+                    !node.expiryReminderDismissed,
+                );
+                const hasInfoTrigger = hasRemark || hasExpiryInfo;
+                const infoCount = Number(hasExpiryInfo) + Number(hasRemark);
+                const infoPlacement = infoPopoverPlacement[node.id] ?? "left";
 
                 return (
                   <SortableItem key={node.id} id={node.id}>
                     {(listeners) => (
                       <Card
                         key={node.id}
-                        className="group shadow-sm border border-divider hover:shadow-md transition-shadow duration-200 overflow-hidden"
+                        className={`group relative overflow-visible shadow-sm border border-divider hover:shadow-md transition-shadow duration-200 h-full flex flex-col ${node.expiryReminderDismissed ? "" : expiryMeta.accentClassName}`}
+                        data-node-card="true"
                       >
-                        <CardHeader className="pb-2">
-                          <div className="flex justify-between items-start w-full">
-                            <div className="flex items-center gap-2 flex-1 min-w-0">
-                              {selectMode && (
-                                <Checkbox
-                                  isSelected={selectedIds.has(node.id)}
-                                  onValueChange={() => toggleSelect(node.id)}
-                                />
-                              )}
-                              <h3 className="font-semibold text-foreground truncate text-sm">
-                                {node.name}
-                              </h3>
-                            </div>
-                            <div className="flex items-center gap-1.5 ml-2">
+                        <CardHeader className="pb-3 md:pb-3">
+                          <div className="flex justify-between items-start w-full gap-3">
+                            <div className="flex items-start gap-2 flex-1 min-w-0">
                               <div
-                                className="cursor-grab active:cursor-grabbing p-2 text-default-400 hover:text-default-600 transition-colors touch-manipulation opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+                                className="cursor-grab active:cursor-grabbing p-2 -ml-2 -mt-1 text-default-400 hover:text-default-600 transition-colors touch-manipulation opacity-100 sm:opacity-0 sm:group-hover:opacity-100 flex-shrink-0"
                                 {...listeners}
                                 style={{ touchAction: "none" }}
                                 title="拖拽排序"
                               >
                                 <svg
+                                  aria-hidden="true"
                                   className="w-4 h-4"
                                   fill="currentColor"
                                   viewBox="0 0 20 20"
@@ -1322,53 +1970,144 @@ export default function NodePage() {
                                   <path d="M7 2a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 2zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 8zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 14zm6-8a2 2 0 1 1-.001-4.001A2 2 0 0 1 13 6zm0 2a2 2 0 1 1 .001 4.001A2 2 0 0 1 13 8zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 13 14z" />
                                 </svg>
                               </div>
-                              {isRemoteNode && (
-                                <Chip
-                                  className="text-xs"
-                                  color="secondary"
-                                  size="sm"
-                                  variant="flat"
-                                >
-                                  远程
-                                </Chip>
+                              {selectMode && (
+                                <Checkbox
+                                  className="mt-0.5"
+                                  isSelected={selectedIds.has(node.id)}
+                                  onValueChange={() => toggleSelect(node.id)}
+                                />
                               )}
-                              <Chip
-                                className="text-xs"
-                                color={
-                                  node.connectionStatus === "online"
-                                    ? "success"
-                                    : "danger"
-                                }
-                                size="sm"
-                                variant="flat"
-                              >
-                                {node.connectionStatus === "online"
-                                  ? "在线"
-                                  : "离线"}
-                              </Chip>
+                              <div className="min-w-0 flex-1 pt-0.5">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <h3 className="font-semibold text-foreground truncate text-sm leading-5">
+                                    {node.name}
+                                  </h3>
+                                  <span
+                                    className={`h-2.5 w-2.5 rounded-full flex-shrink-0 ${connectionStatusMeta.color === "success" ? "bg-emerald-500" : "bg-rose-500"}`}
+                                    title={connectionStatusMeta.text}
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                            <div className="ml-2 flex-shrink-0 self-start">
+                              {hasInfoTrigger && (
+                                <div className="group/info relative">
+                                  <button
+                                    aria-label={`查看节点信息，共 ${infoCount} 项`}
+                                    className="relative flex h-7 w-7 items-center justify-center rounded-full border border-divider/80 bg-background/95 text-default-500 shadow-sm transition hover:border-default-300 hover:text-foreground focus-visible:border-default-300 focus-visible:text-foreground focus-visible:outline-none"
+                                    type="button"
+                                    onFocus={(event) =>
+                                      updateInfoPopoverPlacement(
+                                        node.id,
+                                        event.currentTarget,
+                                      )
+                                    }
+                                    onMouseEnter={(event) =>
+                                      updateInfoPopoverPlacement(
+                                        node.id,
+                                        event.currentTarget,
+                                      )
+                                    }
+                                  >
+                                    <svg
+                                      aria-hidden="true"
+                                      className="h-3.5 w-3.5"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      viewBox="0 0 24 24"
+                                    >
+                                      <path
+                                        d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                        strokeWidth={1.8}
+                                      />
+                                    </svg>
+                                    {hasRemark && (
+                                      <span className="absolute -right-1 -top-1 flex h-2.5 w-2.5 rounded-full border border-background bg-default-300 shadow-sm dark:bg-default-500" />
+                                    )}
+                                  </button>
+                                  <div
+                                    className={`pointer-events-none invisible absolute z-[60] w-72 max-w-[min(18rem,calc(100vw-4rem))] rounded-xl border border-divider/80 bg-background/98 p-3 opacity-0 shadow-xl backdrop-blur transition-all duration-150 group-hover/info:visible group-hover/info:pointer-events-auto group-hover/info:opacity-100 group-focus-within/info:visible group-focus-within/info:pointer-events-auto group-focus-within/info:opacity-100 ${
+                                      infoPlacement === "bottom"
+                                        ? "right-0 top-[calc(100%+0.75rem)] translate-y-1 group-hover/info:translate-y-0 group-focus-within/info:translate-y-0"
+                                        : "right-[calc(100%+0.75rem)] top-1/2 -translate-y-1/2 translate-x-1 group-hover/info:translate-x-0 group-focus-within/info:translate-x-0"
+                                    }`}
+                                  >
+                                    <div className="space-y-3">
+                                      {hasExpiryInfo && (
+                                        <div className="space-y-2">
+                                          <div className="flex items-center justify-between">
+                                            <div className="text-[11px] font-medium text-default-500">
+                                              到期提醒
+                                            </div>
+                                            <button
+                                              className="text-[10px] text-default-400 hover:text-default-600 transition-colors"
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleDismissExpiryReminder(node.id);
+                                              }}
+                                            >
+                                              关闭提醒
+                                            </button>
+                                          </div>
+                                          <div className="flex flex-wrap gap-1.5">
+                                            <Chip
+                                              className="text-[10px] h-5 px-1 flex-shrink-0"
+                                              color={expiryMeta.tone}
+                                              size="sm"
+                                              title={`${formatNodeRenewalTime(expiryMeta.nextDueTime)} (${getNodeRenewalCycleLabel(node.renewalCycle)})`}
+                                              variant="flat"
+                                            >
+                                              {expiryMeta.label}
+                                            </Chip>
+                                          </div>
+                                          <div className="rounded-lg border border-divider/80 bg-default-50/80 px-3 py-2 text-xs leading-5 text-default-700">
+                                            {formatNodeRenewalTime(
+                                              expiryMeta.nextDueTime,
+                                            )}
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {hasRemark && (
+                                        <div className="space-y-2">
+                                          <div className="text-[11px] font-medium text-default-500">
+                                            备注
+                                          </div>
+                                          <div
+                                            className="max-h-32 overflow-y-auto rounded-lg border border-divider/80 bg-default-50/80 px-3 py-2 text-xs leading-5 text-default-700 break-all [scrollbar-width:thin]"
+                                            title={node.remark?.trim()}
+                                          >
+                                            {node.remark?.trim()}
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
                             </div>
                           </div>
                         </CardHeader>
 
-                        <CardBody className="pt-0 pb-3">
+                        <CardBody className="pt-0 pb-3 md:pt-0 md:pb-3 flex-1 flex flex-col">
                           {isRemoteNode && node.syncError && (
                             <div className="mb-3 px-2 py-1.5 rounded-md bg-warning-50 dark:bg-warning-100/10 text-warning-700 dark:text-warning-400 text-xs">
-                              {node.syncError === "provider_share_deleted"
-                                ? "提供方已删除该分享"
-                                : node.syncError === "provider_share_disabled"
-                                  ? "提供方已禁用该分享"
-                                  : node.syncError === "provider_share_expired"
-                                    ? "提供方分享已过期"
-                                    : `远程同步失败: ${node.syncError}`}
+                              {getRemoteSyncErrorMessage(node.syncError)}
                             </div>
                           )}
                           {/* 基础信息 */}
                           <div className="space-y-2 mb-4">
+                            {node.expiryTime &&
+                              node.expiryTime > 0 &&
+                              node.renewalCycle && <div className="hidden" />}
                             <div className="flex justify-between items-center text-sm min-w-0">
                               <span className="text-default-600 flex-shrink-0">
                                 IP
                               </span>
-                              <div className="text-right text-xs min-w-0 flex-1 ml-2">
+                              <div className="text-right text-xs min-w-0 flex-1 ml-2 min-h-[2.125rem]">
                                 {node.serverIpV4?.trim() ||
                                 node.serverIpV6?.trim() ? (
                                   <div className="space-y-0.5">
@@ -1435,198 +2174,222 @@ export default function NodePage() {
                             )}
                           </div>
 
-                          {!isRemoteNode && (
-                            <>
-                              {/* 系统监控 */}
-                              <div className="space-y-3 mb-4">
-                                <div className="grid grid-cols-2 gap-3">
-                                  <div>
-                                    <div className="flex justify-between text-xs mb-1">
-                                      <span>CPU</span>
-                                      <span className="font-mono">
-                                        {node.connectionStatus === "online" &&
-                                        node.systemInfo
-                                          ? `${node.systemInfo.cpuUsage.toFixed(1)}%`
-                                          : "-"}
+                          {isRemoteNode && (
+                            <div className="space-y-3 mb-4">
+                              {remoteUsage ? (
+                                <>
+                                  <div className="text-xs rounded-md border border-default-200 dark:border-default-100/30 bg-default-50 dark:bg-default-100/20 p-2.5 space-y-2">
+                                    <div className="flex justify-between gap-2">
+                                      <span className="text-default-500">
+                                        远程地址
+                                      </span>
+                                      <span
+                                        className="font-mono text-right truncate"
+                                        title={
+                                          remoteUsage.remoteUrl ||
+                                          node.remoteUrl ||
+                                          "-"
+                                        }
+                                      >
+                                        {remoteUsage.remoteUrl ||
+                                          node.remoteUrl ||
+                                          "-"}
                                       </span>
                                     </div>
-                                    <Progress
-                                      aria-label="CPU使用率"
-                                      color={getProgressColor(
-                                        node.connectionStatus === "online" &&
-                                          node.systemInfo
-                                          ? node.systemInfo.cpuUsage
-                                          : 0,
-                                        node.connectionStatus !== "online",
-                                      )}
-                                      size="sm"
-                                      value={
-                                        node.connectionStatus === "online" &&
-                                        node.systemInfo
-                                          ? node.systemInfo.cpuUsage
-                                          : 0
-                                      }
-                                    />
-                                  </div>
-                                  <div>
-                                    <div className="flex justify-between text-xs mb-1">
-                                      <span>内存</span>
+                                    <div className="flex justify-between gap-2">
+                                      <span className="text-default-500">
+                                        共享ID
+                                      </span>
                                       <span className="font-mono">
-                                        {node.connectionStatus === "online" &&
-                                        node.systemInfo
-                                          ? `${node.systemInfo.memoryUsage.toFixed(1)}%`
-                                          : "-"}
+                                        #{remoteUsage.shareId}
                                       </span>
                                     </div>
-                                    <Progress
-                                      aria-label="内存使用率"
-                                      color={getProgressColor(
-                                        node.connectionStatus === "online" &&
-                                          node.systemInfo
-                                          ? node.systemInfo.memoryUsage
-                                          : 0,
-                                        node.connectionStatus !== "online",
+                                    <div className="flex justify-between gap-2">
+                                      <span className="text-default-500">
+                                        流量
+                                      </span>
+                                      <span className="font-mono">
+                                        {formatFlow(remoteUsage.currentFlow)}
+                                      </span>
+                                    </div>
+                                    <div className="flex justify-between gap-2">
+                                      <span className="text-default-500">
+                                        带宽上限
+                                      </span>
+                                      <span className="font-mono">
+                                        {remoteUsage.maxBandwidth > 0
+                                          ? formatSpeed(
+                                              remoteUsage.maxBandwidth,
+                                            )
+                                          : "不限"}
+                                      </span>
+                                    </div>
+                                  </div>
+
+                                  <div className="text-xs rounded-md border border-default-200 dark:border-default-100/30 bg-default-50 dark:bg-default-100/20 p-2.5">
+                                    <div className="flex items-center justify-between mb-2">
+                                      <span className="text-default-500">
+                                        占用端口
+                                      </span>
+                                      <span className="font-mono text-default-700 dark:text-default-300">
+                                        {remoteUsage.usedPorts.length}/
+                                        {Math.max(
+                                          remoteUsage.portRangeEnd -
+                                            remoteUsage.portRangeStart +
+                                            1,
+                                          0,
+                                        )}
+                                      </span>
+                                    </div>
+                                    <div className="max-h-20 overflow-y-auto rounded bg-white/70 dark:bg-black/20 p-1.5 [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1">
+                                      {remoteUsage.usedPorts.length > 0 ? (
+                                        <div className="flex flex-wrap gap-1">
+                                          {remoteUsage.usedPorts.map((port) => (
+                                            <Chip
+                                              key={`${node.id}-port-${port}`}
+                                              className="font-mono shrink-0 whitespace-nowrap"
+                                              size="sm"
+                                              variant="flat"
+                                            >
+                                              {port}
+                                            </Chip>
+                                          ))}
+                                        </div>
+                                      ) : (
+                                        <div className="text-default-400">
+                                          暂无占用端口
+                                        </div>
                                       )}
-                                      size="sm"
-                                      value={
-                                        node.connectionStatus === "online" &&
-                                        node.systemInfo
-                                          ? node.systemInfo.memoryUsage
-                                          : 0
-                                      }
-                                    />
+                                    </div>
                                   </div>
-                                </div>
 
-                                <div className="grid grid-cols-2 gap-2 text-xs">
-                                  <div className="text-center p-2 bg-default-50 dark:bg-default-100 rounded">
-                                    <div className="text-default-600 mb-0.5">
-                                      上传
+                                  <div className="text-xs rounded-md border border-default-200 dark:border-default-100/30 bg-default-50 dark:bg-default-100/20 p-2.5">
+                                    <div className="flex items-center justify-between mb-2">
+                                      <span className="text-default-500">
+                                        绑定明细
+                                      </span>
+                                      <span className="font-mono text-default-700 dark:text-default-300">
+                                        {remoteUsage.activeBindingNum}
+                                      </span>
                                     </div>
-                                    <div className="font-mono">
-                                      {node.connectionStatus === "online" &&
-                                      node.systemInfo
-                                        ? formatSpeed(
-                                            node.systemInfo.uploadSpeed,
-                                          )
-                                        : "-"}
+                                    <div className="max-h-32 overflow-y-auto space-y-1.5 pr-1 [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1">
+                                      {remoteUsage.bindings.length > 0 ? (
+                                        remoteUsage.bindings.map((binding) => (
+                                          <div
+                                            key={binding.bindingId}
+                                            className="rounded border border-default-200 dark:border-default-100/30 bg-white/70 dark:bg-black/20 p-2"
+                                          >
+                                            <div className="flex items-center justify-between gap-2">
+                                              <span
+                                                className="font-medium truncate"
+                                                title={binding.tunnelName}
+                                              >
+                                                {binding.tunnelName}
+                                              </span>
+                                              <span className="font-mono text-[11px]">
+                                                #{binding.tunnelId}
+                                              </span>
+                                            </div>
+                                            <div className="mt-1 text-[11px] text-default-500 flex items-center justify-between gap-2">
+                                              <span>
+                                                {formatChainType(
+                                                  binding.chainType,
+                                                  binding.hopInx,
+                                                )}
+                                              </span>
+                                              <span className="font-mono">
+                                                端口 {binding.allocatedPort}
+                                              </span>
+                                            </div>
+                                          </div>
+                                        ))
+                                      ) : (
+                                        <div className="text-default-400">
+                                          暂无绑定明细
+                                        </div>
+                                      )}
                                     </div>
                                   </div>
-                                  <div className="text-center p-2 bg-default-50 dark:bg-default-100 rounded">
-                                    <div className="text-default-600 mb-0.5">
-                                      下载
-                                    </div>
-                                    <div className="font-mono">
-                                      {node.connectionStatus === "online" &&
-                                      node.systemInfo
-                                        ? formatSpeed(
-                                            node.systemInfo.downloadSpeed,
-                                          )
-                                        : "-"}
-                                    </div>
-                                  </div>
+                                </>
+                              ) : (
+                                <div className="text-xs rounded-md border border-default-200 dark:border-default-100/30 bg-default-50 dark:bg-default-100/20 p-2.5 text-default-500">
+                                  暂未获取到远程占用数据
                                 </div>
-
-                                {/* 流量统计 */}
-                                <div className="grid grid-cols-2 gap-2 text-xs">
-                                  <div className="text-center p-2 bg-primary-50 dark:bg-primary-100/20 rounded border border-primary-200 dark:border-primary-300/20">
-                                    <div className="text-primary-600 dark:text-primary-400 mb-0.5">
-                                      ↑ 上行流量
-                                    </div>
-                                    <div className="font-mono text-primary-700 dark:text-primary-300">
-                                      {node.connectionStatus === "online" &&
-                                      node.systemInfo
-                                        ? formatTraffic(
-                                            node.systemInfo.uploadTraffic,
-                                          )
-                                        : "-"}
-                                    </div>
-                                  </div>
-                                  <div className="text-center p-2 bg-success-50 dark:bg-success-100/20 rounded border border-success-200 dark:border-success-300/20">
-                                    <div className="text-success-600 dark:text-success-400 mb-0.5">
-                                      ↓ 下行流量
-                                    </div>
-                                    <div className="font-mono text-success-700 dark:text-success-300">
-                                      {node.connectionStatus === "online" &&
-                                      node.systemInfo
-                                        ? formatTraffic(
-                                            node.systemInfo.downloadTraffic,
-                                          )
-                                        : "-"}
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
-                            </>
+                              )}
+                            </div>
                           )}
 
-                          {/* 操作按钮 */}
-                          <div className="space-y-1.5">
-                            {!isRemoteNode && (
-                              <div className="grid grid-cols-3 gap-1.5">
+
+
+                          <div className="mt-auto space-y-3">
+                            {/* 操作按钮 */}
+                            <div className="space-y-1.5">
+                              {!isRemoteNode && (
+                                <div className="grid grid-cols-3 gap-1.5">
+                                  <Button
+                                    className="min-h-8"
+                                    color="success"
+                                    isLoading={node.copyLoading}
+                                    size="sm"
+                                    variant="flat"
+                                    onPress={() => openInstallSelector(node)}
+                                  >
+                                    安装
+                                  </Button>
+                                  <Button
+                                    className="min-h-8"
+                                    color="warning"
+                                    isDisabled={
+                                      node.connectionStatus !== "online"
+                                    }
+                                    isLoading={node.upgradeLoading}
+                                    size="sm"
+                                    variant="flat"
+                                    onPress={() =>
+                                      openUpgradeModal("single", node.id)
+                                    }
+                                  >
+                                    升级
+                                  </Button>
+                                  <Button
+                                    className="min-h-8"
+                                    color="secondary"
+                                    isDisabled={
+                                      node.connectionStatus !== "online"
+                                    }
+                                    isLoading={node.rollbackLoading}
+                                    size="sm"
+                                    variant="flat"
+                                    onPress={() => handleRollbackNode(node)}
+                                  >
+                                    回退
+                                  </Button>
+                                </div>
+                              )}
+                              <div
+                                className={`grid gap-1.5 ${isRemoteNode ? "grid-cols-1" : "grid-cols-2"}`}
+                              >
+                                {!isRemoteNode && (
+                                  <Button
+                                    className="min-h-8"
+                                    color="primary"
+                                    size="sm"
+                                    variant="flat"
+                                    onPress={() => handleEdit(node)}
+                                  >
+                                    编辑
+                                  </Button>
+                                )}
                                 <Button
                                   className="min-h-8"
-                                  color="success"
-                                  isLoading={node.copyLoading}
+                                  color="danger"
                                   size="sm"
                                   variant="flat"
-                                  onPress={() => handleCopyInstallCommand(node)}
+                                  onPress={() => handleDelete(node)}
                                 >
-                                  安装
-                                </Button>
-                                <Button
-                                  className="min-h-8"
-                                  color="warning"
-                                  isDisabled={
-                                    node.connectionStatus !== "online"
-                                  }
-                                  isLoading={node.upgradeLoading}
-                                  size="sm"
-                                  variant="flat"
-                                  onPress={() =>
-                                    openUpgradeModal("single", node.id)
-                                  }
-                                >
-                                  升级
-                                </Button>
-                                <Button
-                                  className="min-h-8"
-                                  color="secondary"
-                                  isDisabled={
-                                    node.connectionStatus !== "online"
-                                  }
-                                  isLoading={node.rollbackLoading}
-                                  size="sm"
-                                  variant="flat"
-                                  onPress={() => handleRollbackNode(node)}
-                                >
-                                  回退
+                                  删除
                                 </Button>
                               </div>
-                            )}
-                            <div
-                              className={`grid gap-1.5 ${isRemoteNode ? "grid-cols-1" : "grid-cols-2"}`}
-                            >
-                              {!isRemoteNode && (
-                                <Button
-                                  className="min-h-8"
-                                  color="primary"
-                                  size="sm"
-                                  variant="flat"
-                                  onPress={() => handleEdit(node)}
-                                >
-                                  编辑
-                                </Button>
-                              )}
-                              <Button
-                                className="min-h-8"
-                                color="danger"
-                                size="sm"
-                                variant="flat"
-                                onPress={() => handleDelete(node)}
-                              >
-                                删除
-                              </Button>
                             </div>
                           </div>
                         </CardBody>
@@ -1639,10 +2402,12 @@ export default function NodePage() {
           </SortableContext>
         </DndContext>
       )}
-
       {/* 新增/编辑节点对话框 */}
       <Modal
         backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={dialogVisible}
         placement="center"
         scrollBehavior="outside"
@@ -1665,12 +2430,83 @@ export default function NodePage() {
                 }
               />
 
+              <Textarea
+                description="可记录供应商、用途、续费说明等补充信息"
+                label="备注"
+                maxRows={4}
+                minRows={3}
+                placeholder="例如: 搬瓦工年付，2026-12 续费，日本中转"
+                value={form.remark}
+                variant="bordered"
+                onChange={(e) =>
+                  setForm((prev) => ({ ...prev, remark: e.target.value }))
+                }
+              />
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <Select
+                  label="续费周期"
+                  placeholder="选择续费周期"
+                  selectedKeys={form.renewalCycle ? [form.renewalCycle] : []}
+                  variant="bordered"
+                  onSelectionChange={(keys) => {
+                    const selected = Array.from(keys)[0] as
+                      | NodeRenewalCycle
+                      | undefined;
+
+                    setForm((prev) => ({
+                      ...prev,
+                      renewalCycle: selected || "",
+                    }));
+                  }}
+                >
+                  <SelectItem key="month" textValue="month">
+                    月付
+                  </SelectItem>
+                  <SelectItem key="quarter" textValue="quarter">
+                    季付
+                  </SelectItem>
+                  <SelectItem key="year" textValue="year">
+                    年付
+                  </SelectItem>
+                </Select>
+              </div>
+
               <Input
-                description="可选：不带协议、不带端口。至少填写一个 IPv4/IPv6/域名"
+                description="填写最近一次续费时间或周期起始时间，系统会按月/季/年自动推算下次续费"
+                errorMessage={errors.expiryTime}
+                isInvalid={!!errors.expiryTime}
+                label="续费基准时间"
+                max="9999-12-31"
+                type="date"
+                value={
+                  form.expiryTime > 0
+                    ? new Date(form.expiryTime).toISOString().slice(0, 10)
+                    : ""
+                }
+                variant="bordered"
+                onChange={(e) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    expiryTime: e.target.value
+                      ? new Date(e.target.value).getTime()
+                      : 0,
+                  }))
+                }
+              />
+
+              <Alert
+                color="primary"
+                description="例如选择月付并填写 2026-03-01，系统会自动按每月同日推算下次续费时间。"
+                variant="flat"
+              />
+
+              <Input
+                description="可选：不带协议、不带端口。建议在 IPv4 和 IPv6 都未填写时使用。至少填写一个 IPv4/IPv6 域名"
                 errorMessage={errors.serverHost}
                 isInvalid={!!errors.serverHost}
-                label="服务器域名/主机名"
-                placeholder="例如: node.example.com"
+                label="域名/主机名"
+                placeholder="例如: test.example.com"
                 value={form.serverHost}
                 variant="bordered"
                 onChange={(e) =>
@@ -1680,11 +2516,11 @@ export default function NodePage() {
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <Input
-                  description="双栈节点组隧道时优先使用 IPv4"
+                  description="填写一个 IPv4 地址"
                   errorMessage={errors.serverIpV4}
                   isInvalid={!!errors.serverIpV4}
-                  label="服务器IPv4"
-                  placeholder="例如: 203.0.113.10"
+                  label="IPv4 地址"
+                  placeholder="例如: 192.168.1.100"
                   value={form.serverIpV4}
                   variant="bordered"
                   onChange={(e) =>
@@ -1693,10 +2529,10 @@ export default function NodePage() {
                 />
 
                 <Input
-                  description="至少填写一个 IPv4/IPv6/域名"
+                  description="填写一个 IPv6 地址"
                   errorMessage={errors.serverIpV6}
                   isInvalid={!!errors.serverIpV6}
-                  label="服务器IPv6"
+                  label="IPv6 地址"
                   placeholder="例如: 2001:db8::10"
                   value={form.serverIpV6}
                   variant="bordered"
@@ -1710,11 +2546,11 @@ export default function NodePage() {
                 classNames={{
                   input: "font-mono",
                 }}
-                description="支持单个端口(80)、多个端口(80,443)或端口范围(1000-65535)，多个可用逗号分隔"
+                description="支持单个端口(80)、多个端口(80,443)或端口范围(10000-65535)，多个可用逗号分隔"
                 errorMessage={errors.port}
                 isInvalid={!!errors.port}
                 label="可用端口"
-                placeholder="例如: 80,443,1000-65535"
+                placeholder="例如: 80,443,10000-65535"
                 value={form.port}
                 variant="bordered"
                 onChange={(e) =>
@@ -1742,6 +2578,20 @@ export default function NodePage() {
                         setForm((prev) => ({
                           ...prev,
                           interfaceName: e.target.value,
+                        }))
+                      }
+                    />
+
+                    <Input
+                      description="多IP服务器可填写额外IP地址，逗号分隔"
+                      label="额外IP地址"
+                      placeholder="例如: 192.168.1.100, 10.0.0.5"
+                      value={form.extraIPs}
+                      variant="bordered"
+                      onChange={(e) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          extraIPs: e.target.value,
                         }))
                       }
                     />
@@ -1816,6 +2666,7 @@ export default function NodePage() {
                         <div className="px-3 py-3 rounded-lg bg-white dark:bg-default-50 border border-default-200 dark:border-default-100/30 hover:border-primary-200 transition-colors">
                           <div className="flex items-center gap-2 mb-2">
                             <svg
+                              aria-hidden="true"
                               className="w-4 h-4 text-default-500"
                               fill="none"
                               stroke="currentColor"
@@ -1856,6 +2707,7 @@ export default function NodePage() {
                         <div className="px-3 py-3 rounded-lg bg-white dark:bg-default-50 border border-default-200 dark:border-default-100/30 hover:border-primary-200 transition-colors">
                           <div className="flex items-center gap-2 mb-2">
                             <svg
+                              aria-hidden="true"
                               className="w-4 h-4 text-default-500"
                               fill="none"
                               stroke="currentColor"
@@ -1899,6 +2751,7 @@ export default function NodePage() {
                         <div className="px-3 py-3 rounded-lg bg-white dark:bg-default-50 border border-default-200 dark:border-default-100/30 hover:border-primary-200 transition-colors">
                           <div className="flex items-center gap-2 mb-2">
                             <svg
+                              aria-hidden="true"
                               className="w-4 h-4 text-default-500"
                               fill="none"
                               stroke="currentColor"
@@ -1950,7 +2803,7 @@ export default function NodePage() {
               <Alert
                 className="mt-4"
                 color="primary"
-                description="服务器ip是你要添加的服务器的ip地址，不是面板的ip地址。"
+                description="节点ip地址是你要添加的入口/出口的ip地址，不是面板的ip地址。"
                 variant="flat"
               />
             </div>
@@ -1970,9 +2823,53 @@ export default function NodePage() {
         </ModalContent>
       </Modal>
 
+      {/* 回退确认模态框 */}
+      <Modal
+        backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
+        isOpen={rollbackModalOpen}
+        placement="center"
+        scrollBehavior="outside"
+        size="2xl"
+        onOpenChange={setRollbackModalOpen}
+      >
+        <ModalContent>
+          {(onClose) => (
+            <>
+              <ModalHeader className="flex flex-col gap-1">
+                <h2 className="text-xl font-bold">确认回退</h2>
+              </ModalHeader>
+              <ModalBody>
+                <p>
+                  确定要将节点{" "}
+                  <strong>&quot;{nodeToRollback?.name}&quot;</strong>{" "}
+                  回退到上一个版本吗？
+                </p>
+                <p className="text-small text-default-500">
+                  节点将执行版本回退并自动重启，期间会导致节点短暂离线。
+                </p>
+              </ModalBody>
+              <ModalFooter>
+                <Button variant="light" onPress={onClose}>
+                  取消
+                </Button>
+                <Button color="secondary" onPress={confirmRollback}>
+                  确认回退
+                </Button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
+
       {/* 删除确认模态框 */}
       <Modal
         backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={deleteModalOpen}
         placement="center"
         scrollBehavior="outside"
@@ -2011,9 +2908,64 @@ export default function NodePage() {
         </ModalContent>
       </Modal>
 
+      <Modal
+        backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
+        isOpen={installSelectorOpen}
+        placement="center"
+        size="md"
+        onOpenChange={setInstallSelectorOpen}
+      >
+        <ModalContent>
+          {(onClose) => (
+            <>
+              <ModalHeader className="flex flex-col gap-1">
+                <h2 className="text-xl font-bold">
+                  选择安装通道
+                  {installTargetNode ? ` - ${installTargetNode.name}` : ""}
+                </h2>
+              </ModalHeader>
+              <ModalBody>
+                <div className="space-y-4">
+                  <Select
+                    label="版本通道"
+                    selectedKeys={[installChannel]}
+                    onSelectionChange={(keys) => {
+                      const selected = Array.from(keys)[0] as ReleaseChannel;
+
+                      setInstallChannel(selected || "stable");
+                    }}
+                  >
+                    <SelectItem key="stable" textValue="stable">
+                      正式版（纯数字版本，如 2.1.4）
+                    </SelectItem>
+                    <SelectItem key="dev" textValue="dev">
+                      测试版（含 alpha / beta / rc）
+                    </SelectItem>
+                  </Select>
+                </div>
+              </ModalBody>
+              <ModalFooter>
+                <Button variant="light" onPress={onClose}>
+                  取消
+                </Button>
+                <Button color="primary" onPress={handleConfirmInstallCommand}>
+                  生成命令
+                </Button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
+
       {/* 安装命令模态框 */}
       <Modal
         backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={installCommandModal}
         placement="center"
         scrollBehavior="outside"
@@ -2068,6 +3020,9 @@ export default function NodePage() {
       {/* 版本选择升级模态框 */}
       <Modal
         backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={upgradeModalOpen}
         placement="center"
         scrollBehavior="outside"
@@ -2092,8 +3047,27 @@ export default function NodePage() {
                 ) : (
                   <div className="space-y-4">
                     <Select
+                      label="版本通道"
+                      selectedKeys={[releaseChannel]}
+                      onSelectionChange={(keys) => {
+                        const selected =
+                          (Array.from(keys)[0] as ReleaseChannel) || "stable";
+
+                        setReleaseChannel(selected);
+                        setSelectedVersion("");
+                        void loadReleasesByChannel(selected);
+                      }}
+                    >
+                      <SelectItem key="stable" textValue="stable">
+                        正式版（纯数字版本，如 2.1.4）
+                      </SelectItem>
+                      <SelectItem key="dev" textValue="dev">
+                        测试版（含 alpha / beta / rc）
+                      </SelectItem>
+                    </Select>
+                    <Select
                       label="选择版本"
-                      placeholder="留空则使用最新版本"
+                      placeholder="留空则使用当前通道最新版本"
                       selectedKeys={selectedVersion ? [selectedVersion] : []}
                       onSelectionChange={(keys) => {
                         const selected = Array.from(keys)[0] as string;
@@ -2109,14 +3083,14 @@ export default function NodePage() {
                               {r.publishedAt
                                 ? new Date(r.publishedAt).toLocaleDateString()
                                 : ""}
-                              {r.prerelease && (
+                              {r.channel === "dev" && (
                                 <Chip
-                                  className="ml-1"
+                                  className="ml-1 shrink-0 whitespace-nowrap"
                                   color="warning"
                                   size="sm"
                                   variant="flat"
                                 >
-                                  预览
+                                  测试
                                 </Chip>
                               )}
                             </span>
@@ -2127,7 +3101,7 @@ export default function NodePage() {
                     <p className="text-sm text-default-500">
                       {selectedVersion
                         ? `将升级到版本 ${selectedVersion}`
-                        : "未选择版本，将自动使用最新稳定版"}
+                        : `未选择版本，将自动使用最新${releaseChannel === "stable" ? "正式" : "测试"}版`}
                     </p>
                   </div>
                 )}
@@ -2152,6 +3126,9 @@ export default function NodePage() {
       {/* 批量删除确认模态框 */}
       <Modal
         backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={batchDeleteModalOpen}
         placement="center"
         scrollBehavior="outside"
@@ -2189,6 +3166,69 @@ export default function NodePage() {
           )}
         </ModalContent>
       </Modal>
-    </div>
+
+      <Modal
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
+        isOpen={isFilterModalOpen}
+        placement="center"
+        size="md"
+        onOpenChange={setIsFilterModalOpen}
+      >
+        <ModalContent>
+          {(onClose) => (
+            <>
+              <ModalHeader className="flex flex-col gap-1">
+                筛选条件
+              </ModalHeader>
+              <ModalBody>
+                <div className="flex flex-col gap-4 py-2">
+                  <div className="flex flex-col gap-2">
+                    <p className="text-sm font-medium">按到期状态筛选</p>
+                    <Select
+                      aria-label="按到期状态筛选"
+                      className="w-full"
+                      selectedKeys={[nodeFilterMode]}
+                      variant="bordered"
+                      onSelectionChange={(keys) => {
+                        const selected = Array.from(keys)[0] as
+                          | NodeFilterMode
+                          | undefined;
+
+                        setNodeFilterMode(selected || "all");
+                      }}
+                    >
+                      <SelectItem key="all">全部节点</SelectItem>
+                      <SelectItem key="expiringSoon">
+                        7天内续费 ({nodeExpiryStats.expiringSoon})
+                      </SelectItem>
+                      <SelectItem key="expired">
+                        已逾期 ({nodeExpiryStats.expired})
+                      </SelectItem>
+                      <SelectItem key="withExpiry">
+                        已启用续费提醒 ({nodeExpiryStats.withExpiry})
+                      </SelectItem>
+                    </Select>
+                  </div>
+                </div>
+              </ModalBody>
+              <ModalFooter>
+                <Button
+                  color="default"
+                  variant="flat"
+                  onPress={resetNodeFilterMode}
+                >
+                  重置
+                </Button>
+                <Button color="primary" onPress={onClose}>
+                  完成
+                </Button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
+    </AnimatedPage>
   );
 }

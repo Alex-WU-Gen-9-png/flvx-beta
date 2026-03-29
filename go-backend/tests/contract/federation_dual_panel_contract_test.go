@@ -166,7 +166,7 @@ func TestFederationDualPanelMiddleExitAutoPortContract(t *testing.T) {
 
 	assertCount(t, providerRepo, `SELECT COUNT(1) FROM peer_share_runtime WHERE share_id = ? AND status = 1 AND applied = 1`, middleShareID, 1)
 	assertCount(t, providerRepo, `SELECT COUNT(1) FROM peer_share_runtime WHERE share_id = ? AND status = 1 AND applied = 1`, exitShareID, 1)
-	assertCount(t, providerRepo, `SELECT COUNT(1) FROM peer_share_runtime WHERE share_id = ?`, entryShareID, 0)
+	assertCount(t, providerRepo, `SELECT COUNT(1) FROM peer_share_runtime WHERE share_id = ? AND status = 1 AND applied = 1`, entryShareID, 1)
 }
 
 func TestFederationDualPanelRemoteDiagnosisContract(t *testing.T) {
@@ -624,42 +624,6 @@ func waitNodeStatus(t *testing.T, r *repo.Repository, nodeID int64, expectedStat
 	}
 }
 
-func valueAsInt(v interface{}) int {
-	switch n := v.(type) {
-	case float64:
-		return int(n)
-	case int:
-		return n
-	case int64:
-		return int(n)
-	default:
-		return 0
-	}
-}
-
-func valueAsString(v interface{}) string {
-	s, _ := v.(string)
-	return s
-}
-
-func valueAsBool(v interface{}) bool {
-	switch b := v.(type) {
-	case bool:
-		return b
-	case float64:
-		return b != 0
-	case int:
-		return b != 0
-	case int64:
-		return b != 0
-	case string:
-		s := strings.TrimSpace(strings.ToLower(b))
-		return s == "1" || s == "t" || s == "true" || s == "yes" || s == "y"
-	default:
-		return false
-	}
-}
-
 func TestFederationRuntimeCommandPortRangeEnforcement(t *testing.T) {
 	providerSecret := "provider-portrange-jwt"
 	providerRouter, providerRepo := setupContractRouter(t, providerSecret)
@@ -759,6 +723,21 @@ func TestFederationRuntimeCommandPortRangeEnforcement(t *testing.T) {
 	}
 
 	// Test: Non-service commands should pass through without port validation
+	res = sendCommand("share-portrange-token", "UpdateLimiters", map[string]interface{}{
+		"limiter": "federation-limit-test",
+		"data": map[string]interface{}{
+			"name":   "federation-limit-test",
+			"limits": []string{"$ 1MB 1MB"},
+		},
+	})
+	out = response.R{}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if out.Code != 0 {
+		t.Fatalf("expected code 0 for UpdateLimiters command, got %d (msg: %s)", out.Code, out.Msg)
+	}
+
 	res = sendCommand("share-portrange-token", "reload", nil)
 	out = response.R{}
 	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {

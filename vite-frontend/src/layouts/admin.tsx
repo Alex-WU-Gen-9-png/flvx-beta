@@ -1,12 +1,15 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { Button } from "@heroui/button";
+import { toast } from "react-hot-toast";
+import { AnimatePresence, motion } from "framer-motion";
+
+import { Button } from "@/shadcn-bridge/heroui/button";
 import {
   Dropdown,
   DropdownTrigger,
   DropdownMenu,
   DropdownItem,
-} from "@heroui/dropdown";
+} from "@/shadcn-bridge/heroui/dropdown";
 import {
   Modal,
   ModalContent,
@@ -14,14 +17,15 @@ import {
   ModalBody,
   ModalFooter,
   useDisclosure,
-} from "@heroui/modal";
-import { Input } from "@heroui/input";
-import { toast } from "react-hot-toast";
-
-import { Logo } from "@/components/icons";
-import { updatePassword } from "@/api";
+} from "@/shadcn-bridge/heroui/modal";
+import { Input } from "@/shadcn-bridge/heroui/input";
+import { BrandLogo } from "@/components/brand-logo";
+import { VersionFooter } from "@/components/version-footer";
+import { getMonitorAccess, updatePassword } from "@/api";
 import { safeLogout } from "@/utils/logout";
 import { siteConfig } from "@/config/site";
+import { useMobileBreakpoint } from "@/hooks/useMobileBreakpoint";
+import { getAdminFlag, getSessionName } from "@/utils/session";
 
 interface MenuItem {
   path: string;
@@ -46,10 +50,16 @@ export default function AdminLayout({
   const location = useLocation();
   const { isOpen, onOpen, onOpenChange } = useDisclosure();
 
-  const [isMobile, setIsMobile] = useState(false);
   const [mobileMenuVisible, setMobileMenuVisible] = useState(false);
+  const [isCollapsed, setIsCollapsed] = useState(
+    () => localStorage.getItem("sidebar_collapsed") === "true",
+  );
   const [username, setUsername] = useState("");
   const [isAdmin, setIsAdmin] = useState(false);
+  const [monitorAllowed, setMonitorAllowed] = useState<boolean | null>(null);
+  const [monitorAccessReason, setMonitorAccessReason] = useState<string | null>(
+    null,
+  );
   const [passwordLoading, setPasswordLoading] = useState(false);
   const [passwordForm, setPasswordForm] = useState<PasswordForm>({
     newUsername: "",
@@ -57,6 +67,7 @@ export default function AdminLayout({
     newPassword: "",
     confirmPassword: "",
   });
+  const isMobile = useMobileBreakpoint();
 
   // 菜单项配置
   const menuItems: MenuItem[] = [
@@ -71,7 +82,7 @@ export default function AdminLayout({
     },
     {
       path: "/forward",
-      label: "转发",
+      label: "规则",
       icon: (
         <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
           <path
@@ -109,6 +120,19 @@ export default function AdminLayout({
         </svg>
       ),
       adminOnly: true,
+    },
+    {
+      path: "/monitor",
+      label: "监控",
+      icon: (
+        <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+          <path
+            clipRule="evenodd"
+            d="M3 3a1 1 0 000 2v11a1 1 0 001 1h13a1 1 0 100-2H5V5a1 1 0 00-1-1H3zm13.707 4.293a1 1 0 00-1.414 0L12 10.586 10.707 9.293a1 1 0 00-1.414 0L7 11.586l-1.293-1.293a1 1 0 10-1.414 1.414l2 2a1 1 0 001.414 0L10 11.414l1.293 1.293a1 1 0 001.414 0l3-3a1 1 0 000-1.414z"
+            fillRule="evenodd"
+          />
+        </svg>
+      ),
     },
     {
       path: "/limit",
@@ -170,40 +194,55 @@ export default function AdminLayout({
     },
   ];
 
-  // 检查移动端
-  const checkMobile = () => {
-    setIsMobile(window.innerWidth <= 768);
-    if (window.innerWidth > 768) {
-      setMobileMenuVisible(false);
-    }
-  };
-
   useEffect(() => {
     // 获取用户信息
-    const name = localStorage.getItem("name") || "Admin";
-
-    // 兼容处理：如果没有admin字段，根据role_id判断（0为管理员）
-    let adminFlag = localStorage.getItem("admin") === "true";
-
-    if (localStorage.getItem("admin") === null) {
-      const roleId = parseInt(localStorage.getItem("role_id") || "1", 10);
-
-      adminFlag = roleId === 0;
-      // 补充设置admin字段，避免下次再次判断
-      localStorage.setItem("admin", adminFlag.toString());
-    }
+    const name = getSessionName() || "Admin";
+    const adminFlag = getAdminFlag();
 
     setUsername(name);
     setIsAdmin(adminFlag);
 
-    // 响应式检查
-    checkMobile();
-    window.addEventListener("resize", checkMobile);
+    // Monitor permission is not strictly role-based; non-admin users may be
+    // granted access explicitly. Fetch a lightweight capability flag so we can
+    // avoid a confusing 403 navigation.
+    if (adminFlag) {
+      setMonitorAllowed(true);
+      setMonitorAccessReason(null);
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await getMonitorAccess();
+        if (cancelled) return;
+        if (res.code === 0 && res.data) {
+          setMonitorAllowed(Boolean(res.data.allowed));
+          setMonitorAccessReason(
+            res.data.allowed ? null : (res.data.reason || null),
+          );
+          return;
+        }
+        // Fail open to preserve legacy navigation behavior.
+        setMonitorAllowed(true);
+        setMonitorAccessReason(null);
+      } catch {
+        if (cancelled) return;
+        setMonitorAllowed(true);
+        setMonitorAccessReason(null);
+      }
+    })();
 
     return () => {
-      window.removeEventListener("resize", checkMobile);
+      cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!isMobile) {
+      setMobileMenuVisible(false);
+    }
+  }, [isMobile]);
 
   // 退出登录
   const handleLogout = () => {
@@ -221,8 +260,33 @@ export default function AdminLayout({
     setMobileMenuVisible(false);
   };
 
+  // 切换折叠状态
+  const toggleCollapse = () => {
+    const newCollapsed = !isCollapsed;
+
+    setIsCollapsed(newCollapsed);
+    localStorage.setItem("sidebar_collapsed", newCollapsed.toString());
+  };
+
   // 菜单点击处理
   const handleMenuClick = (path: string) => {
+    if (path === "/monitor" && monitorAllowed !== true) {
+      if (monitorAllowed == null) {
+        toast("正在检查监控权限，请稍后重试");
+
+        return;
+      }
+
+      const hint =
+        monitorAccessReason === "need_admin_grant"
+          ? "暂无监控权限，请联系管理员在用户页面授予监控权限"
+          : "暂无监控权限，请联系管理员授权";
+
+      toast.error(hint);
+
+      return;
+    }
+
     navigate(path);
     if (isMobile) {
       hideMobileMenu();
@@ -321,74 +385,155 @@ export default function AdminLayout({
         className={`
         ${isMobile ? "fixed" : "relative"} 
         ${isMobile && !mobileMenuVisible ? "-translate-x-full" : "translate-x-0"}
-        ${isMobile ? "w-64" : "w-72"} 
+        ${isMobile ? "w-64" : isCollapsed ? "w-20" : "w-72"} 
         bg-white dark:bg-black 
         shadow-lg 
         border-r border-gray-200 dark:border-gray-600
         z-50 
-        transition-transform duration-300 ease-in-out
+        transition-all duration-300 ease-in-out
         flex flex-col
         ${isMobile ? "h-screen" : "h-full"}
         ${isMobile ? "top-0 left-0" : ""}
       `}
       >
         {/* Logo 区域 */}
-        <div className="px-3 py-3 h-14 flex items-center">
-          <div className="flex items-center gap-2 w-full">
-            <Logo size={24} />
-            <div className="flex-1 min-w-0">
-              <h1 className="text-sm font-bold text-foreground overflow-hidden whitespace-nowrap">
-                {siteConfig.name}
-              </h1>
-              <p className="text-xs text-default-500">v{siteConfig.version}</p>
-            </div>
+        <div className="px-5 h-14 flex items-center overflow-hidden whitespace-nowrap box-border">
+          <div className="flex-shrink-0 flex items-center justify-center w-10">
+            <BrandLogo size={28} />
+          </div>
+          <div
+            className={`transition-all duration-300 overflow-hidden ${isCollapsed ? "max-w-0 opacity-0 ml-0" : "max-w-[180px] opacity-100 ml-2"}`}
+          >
+            <h1 className="text-sm font-bold text-foreground overflow-hidden whitespace-nowrap text-ellipsis">
+              {siteConfig.name}
+            </h1>
           </div>
         </div>
 
         {/* 菜单导航 */}
-        <nav className="flex-1 px-4 py-6 overflow-y-auto">
+        <nav className="flex-1 px-3 py-6 overflow-y-auto overflow-x-hidden">
           <ul className="space-y-1">
             {filteredMenuItems.map((item) => {
               const isActive = location.pathname === item.path;
+              const isMonitor = item.path === "/monitor";
+              const isMonitorBlocked = isMonitor && monitorAllowed !== true;
 
               return (
                 <li key={item.path}>
-                  <button
+                  <motion.button
                     className={`
-                       w-full flex items-center gap-3 px-4 py-3 rounded-lg text-left
-                       transition-colors duration-200 min-h-[44px]
+                       w-full flex items-center p-2 rounded-lg text-left
+                       relative min-h-[44px] overflow-hidden transition-colors
+                       ${isMonitorBlocked ? "opacity-60" : ""}
                        ${
                          isActive
-                           ? "bg-primary-100 dark:bg-primary-600/20 text-primary-600 dark:text-primary-300"
-                           : "text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-900"
+                           ? "text-primary-600 dark:text-primary-300"
+                            : isMonitorBlocked
+                              ? "text-gray-500 dark:text-gray-400"
+                              : "text-gray-700 dark:text-gray-200"
                        }
                      `}
+                    aria-disabled={isMonitorBlocked}
+                    title={
+                      isCollapsed
+                        ? isMonitorBlocked
+                          ? `${item.label} (无权限)`
+                          : item.label
+                        : undefined
+                    }
+                    transition={{ duration: 0.15 }}
                     onClick={() => handleMenuClick(item.path)}
                   >
-                    <div className="flex-shrink-0">{item.icon}</div>
-                    <span className="font-medium text-sm">{item.label}</span>
-                  </button>
+                    {isActive && (
+                      <motion.div
+                        className="absolute inset-0 rounded-lg bg-primary-100 dark:bg-primary-600/20"
+                        layoutId="sidebar-active"
+                        transition={{
+                          type: "spring",
+                          stiffness: 380,
+                          damping: 30,
+                        }}
+                      />
+                    )}
+                    {!isActive && (
+                      <motion.div
+                        className="absolute inset-0 rounded-lg bg-gray-100 dark:bg-gray-900 opacity-0"
+                        transition={{ duration: 0.15 }}
+                        whileHover={{ opacity: 1 }}
+                      />
+                    )}
+                    <div className="flex-shrink-0 w-10 h-10 flex items-center justify-center relative z-10">
+                      {item.icon}
+                    </div>
+                    <div
+                      className={`transition-all duration-300 overflow-hidden flex items-center ${isCollapsed ? "max-w-0 opacity-0 ml-0" : "max-w-[200px] opacity-100 ml-2"}`}
+                    >
+                      <span className="font-medium text-sm relative z-10 whitespace-nowrap">
+                        {item.label}
+                      </span>
+                    </div>
+                  </motion.button>
                 </li>
               );
             })}
           </ul>
         </nav>
 
-        {/* 底部版权信息 */}
-        <div className="px-4 py-2 pb-4 mt-auto flex-shrink-0">
-          <div className="text-center">
-            <p className="text-xs text-gray-400 dark:text-gray-500">
-              Powered by{" "}
-              <a
-                className="text-gray-500 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
-                href={siteConfig.github_repo}
-                rel="noopener noreferrer"
-                target="_blank"
-              >
-                FLVX
-              </a>
-            </p>
+        {/* 底部版权信息和折叠按钮 */}
+        <div className="px-5 py-2 pb-4 mt-auto flex-shrink-0 flex items-center justify-between overflow-hidden whitespace-nowrap box-border">
+          <div
+            className={`transition-all duration-300 overflow-hidden flex items-center ${isCollapsed ? "max-w-0 opacity-0" : "max-w-[200px] opacity-100"}`}
+          >
+            <VersionFooter
+              poweredClassName="text-xs text-gray-400 dark:text-gray-500"
+              updateBadgeClassName="ml-2 inline-flex items-center rounded-full bg-rose-500/90 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-white"
+              version={siteConfig.version}
+              versionClassName="text-xs text-gray-400 dark:text-gray-500"
+            />
           </div>
+
+          {/* 桌面端折叠按钮 */}
+          {!isMobile && (
+            <Button
+              isIconOnly
+              className="flex-shrink-0 text-gray-400 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-300 min-w-0 w-10 h-10 rounded-full ml-auto"
+              size="sm"
+              variant="light"
+              onPress={toggleCollapse}
+            >
+              {isCollapsed ? (
+                // 向右扩展的提示
+                <svg
+                  className="w-5 h-5"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    d="M13 5l7 7-7 7M5 5l7 7-7 7"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                  />
+                </svg>
+              ) : (
+                // 向左收起的提示
+                <svg
+                  className="w-5 h-5"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    d="M11 19l-7-7 7-7m8 14l-7-7 7-7"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                  />
+                </svg>
+              )}
+            </Button>
+          )}
         </div>
       </aside>
 
@@ -493,16 +638,28 @@ export default function AdminLayout({
         </header>
 
         {/* 主内容 */}
-        <main
-          className={`flex-1 bg-gray-100 dark:bg-black ${isMobile ? "" : "overflow-y-auto"}`}
-        >
-          {children}
+        <main className="flex-1 bg-gray-100 dark:bg-black overflow-y-auto">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={location.pathname}
+              animate={{ opacity: 1, y: 0 }}
+              className="h-full"
+              exit={{ opacity: 0, y: -6 }}
+              initial={{ opacity: 0, y: 10 }}
+              transition={{ duration: 0.22, ease: [0.25, 0.46, 0.45, 0.94] }}
+            >
+              {children}
+            </motion.div>
+          </AnimatePresence>
         </main>
       </div>
 
       {/* 修改密码弹窗 */}
       <Modal
         backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={isOpen}
         placement="center"
         scrollBehavior="outside"

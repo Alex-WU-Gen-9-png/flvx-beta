@@ -39,6 +39,7 @@ type nodeSession struct {
 	nodeID int64
 	secret string
 	conn   *connWrap
+	crypto *security.AESCrypto // 缓存的 AES 加密器，避免每条消息重建
 }
 
 type commandResponse struct {
@@ -68,15 +69,51 @@ type CommandResult struct {
 }
 
 type Server struct {
-	repo      *repo.Repository
-	jwtSecret string
-	upgrader  websocket.Upgrader
+	repo         *repo.Repository
+	jwtSecret    string
+	upgrader     websocket.Upgrader
+	onNodeOnline func(nodeID int64)
+	onNodeMetric func(nodeID int64, info SystemInfo)
 
 	mu      sync.RWMutex
 	admins  map[*connWrap]struct{}
 	nodes   map[int64]*nodeSession
 	byConn  map[*websocket.Conn]*nodeSession
 	pending map[string]pendingRequest
+}
+
+type SystemInfo struct {
+	Uptime           uint64  `json:"uptime"`
+	BytesReceived    uint64  `json:"bytes_received"`
+	BytesTransmitted uint64  `json:"bytes_transmitted"`
+	CPUUsage         float64 `json:"cpu_usage"`
+	MemoryUsage      float64 `json:"memory_usage"`
+	DiskUsage        float64 `json:"disk_usage"`
+	Load1            float64 `json:"load1"`
+	Load5            float64 `json:"load5"`
+	Load15           float64 `json:"load15"`
+	TCPConns         int64   `json:"tcp_conns"`
+	UDPConns         int64   `json:"udp_conns"`
+	NetInSpeed       int64   `json:"net_in_speed"`
+	NetOutSpeed      int64   `json:"net_out_speed"`
+}
+
+func (s *Server) SetNodeOnlineHook(fn func(nodeID int64)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.onNodeOnline = fn
+	s.mu.Unlock()
+}
+
+func (s *Server) SetNodeMetricHook(fn func(nodeID int64, info SystemInfo)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.onNodeMetric = fn
+	s.mu.Unlock()
 }
 
 func NewServer(repo *repo.Repository, jwtSecret string) *Server {
@@ -175,13 +212,25 @@ func (s *Server) handleNode(w http.ResponseWriter, r *http.Request, nodeID int64
 		_ = old.conn.conn.Close()
 		delete(s.byConn, old.conn.conn)
 	}
-	ns := &nodeSession{nodeID: nodeID, secret: secret, conn: cw}
+	// 初始化 AES 加密器并缓存（仅创建一次）
+	var nodeCrypto *security.AESCrypto
+	if strings.TrimSpace(secret) != "" {
+		nodeCrypto, _ = security.NewAESCrypto(secret)
+	}
+	ns := &nodeSession{nodeID: nodeID, secret: secret, conn: cw, crypto: nodeCrypto}
 	s.nodes[nodeID] = ns
 	s.byConn[conn] = ns
 	s.mu.Unlock()
 
 	_ = s.repo.UpdateNodeOnline(nodeID, 1, version, httpVal, tlsVal, socksVal)
 	s.broadcastStatus(nodeID, 1)
+
+	s.mu.RLock()
+	onlineHook := s.onNodeOnline
+	s.mu.RUnlock()
+	if onlineHook != nil {
+		go onlineHook(nodeID)
+	}
 
 	defer func() {
 		close(done)
@@ -208,18 +257,100 @@ func (s *Server) handleNode(w http.ResponseWriter, r *http.Request, nodeID int64
 			return
 		}
 
-		msg := decryptIfNeeded(payload, secret)
+		msg := decryptIfNeeded(payload, ns.crypto, secret)
 		s.tryResolvePending(nodeID, msg)
 
 		var parsed struct {
 			Type string `json:"type"`
 		}
-		if json.Unmarshal([]byte(msg), &parsed) == nil && parsed.Type == "UpgradeProgress" {
-			s.broadcastTyped(nodeID, "upgrade_progress", msg)
-		} else {
-			s.broadcastInfo(nodeID, msg)
+		if json.Unmarshal([]byte(msg), &parsed) == nil && parsed.Type != "" {
+			switch parsed.Type {
+			case "metric":
+				// Agent 新版指标消息：{type:"metric", data:{...}}
+				var envelope struct {
+					Data json.RawMessage `json:"data"`
+				}
+				if err := json.Unmarshal([]byte(msg), &envelope); err == nil && len(envelope.Data) > 0 {
+					// 解析 SystemInfo 并调用 hook
+					var sysInfo SystemInfo
+					if json.Unmarshal(envelope.Data, &sysInfo) == nil {
+						s.mu.RLock()
+						onMetric := s.onNodeMetric
+						s.mu.RUnlock()
+						if onMetric != nil {
+							go onMetric(nodeID, sysInfo)
+						}
+					}
+					// 广播内层 data 给前端（保持平坦结构兼容性）
+					s.broadcastTyped(nodeID, "metric", string(envelope.Data))
+				}
+				continue
+			case "UpgradeProgress":
+				s.broadcastTyped(nodeID, "upgrade_progress", msg)
+				continue
+			default:
+				// Unknown typed messages still get broadcast so future
+				// agent message types are not silently lost.
+				s.broadcastInfo(nodeID, msg)
+				continue
+			}
+		}
+
+		// 兼容旧版 Agent：无 type 字段的系统信息消息
+		if looksLikeSystemInfoMessage(msg) {
+			var sysInfo SystemInfo
+			if err := json.Unmarshal([]byte(msg), &sysInfo); err == nil {
+				s.mu.RLock()
+				onMetric := s.onNodeMetric
+				s.mu.RUnlock()
+				if onMetric != nil {
+					go onMetric(nodeID, sysInfo)
+				}
+				s.broadcastTyped(nodeID, "metric", msg)
+				continue
+			}
+		}
+
+		s.broadcastInfo(nodeID, msg)
+	}
+}
+
+func looksLikeSystemInfoMessage(msg string) bool {
+	// Keep this as a cheap heuristic so that arbitrary JSON objects don't get
+	// misclassified as metrics (SystemInfo unmarshal would otherwise succeed with
+	// all-zero values).
+	if strings.TrimSpace(msg) == "" {
+		return false
+	}
+	if !strings.Contains(msg, "{") {
+		return false
+	}
+
+	keys := []string{
+		"\"uptime\"",
+		"\"cpu_usage\"",
+		"\"memory_usage\"",
+		"\"disk_usage\"",
+		"\"bytes_received\"",
+		"\"bytes_transmitted\"",
+		"\"net_in_speed\"",
+		"\"net_out_speed\"",
+		"\"tcp_conns\"",
+		"\"udp_conns\"",
+		"\"load1\"",
+		"\"load5\"",
+		"\"load15\"",
+	}
+	matched := 0
+	for _, k := range keys {
+		if strings.Contains(msg, k) {
+			matched++
+			if matched >= 3 {
+				return true
+			}
 		}
 	}
+	return false
 }
 
 func (s *Server) SendCommand(nodeID int64, cmdType string, data interface{}, timeout time.Duration) (CommandResult, error) {
@@ -268,13 +399,8 @@ func (s *Server) SendCommand(nodeID int64, cmdType string, data interface{}, tim
 	}
 
 	messageData := rawCmd
-	if strings.TrimSpace(ns.secret) != "" {
-		crypto, err := security.NewAESCrypto(ns.secret)
-		if err != nil {
-			cleanup()
-			return CommandResult{}, err
-		}
-		encrypted, err := crypto.Encrypt(rawCmd)
+	if ns.crypto != nil {
+		encrypted, err := ns.crypto.Encrypt(rawCmd)
 		if err != nil {
 			cleanup()
 			return CommandResult{}, err
@@ -321,6 +447,11 @@ func (s *Server) SendCommand(nodeID int64, cmdType string, data interface{}, tim
 
 func (s *Server) tryResolvePending(nodeID int64, message string) {
 	if s == nil || strings.TrimSpace(message) == "" {
+		return
+	}
+
+	// 快速短路：指标消息永远不含 requestId，跳过完整 JSON 解析
+	if !strings.Contains(message, "\"requestId\"") {
 		return
 	}
 
@@ -441,18 +572,22 @@ func (s *Server) broadcastToAdmins(message string) {
 	}
 }
 
-func decryptIfNeeded(payload []byte, secret string) string {
+func decryptIfNeeded(payload []byte, crypto *security.AESCrypto, secret string) string {
 	text := string(payload)
 	var wrap encryptedMessage
 	if err := json.Unmarshal(payload, &wrap); err != nil || !wrap.Encrypted || strings.TrimSpace(wrap.Data) == "" {
 		return text
 	}
 
-	crypto, err := security.NewAESCrypto(secret)
-	if err != nil {
+	// 优先使用缓存的 crypto 实例
+	c := crypto
+	if c == nil && strings.TrimSpace(secret) != "" {
+		c, _ = security.NewAESCrypto(secret)
+	}
+	if c == nil {
 		return text
 	}
-	plain, err := crypto.Decrypt(wrap.Data)
+	plain, err := c.Decrypt(wrap.Data)
 	if err != nil {
 		return text
 	}

@@ -62,6 +62,9 @@ go-gost/ss/
 .classpath
 .project
 .settings/
+
+# OpenCode session metadata
+.entire/
 bin/
 tmp/
 *.swp
@@ -259,6 +262,8 @@ gitee/
 doraemon.jks
 device.id
 commit.sh
+.opencode/
+analysis/
 sql/
 !go-backend/internal/store/sqlite/sql/
 !go-backend/internal/store/sqlite/sql/schema.sql
@@ -266,3 +271,6 @@ sql/
 !go-backend/internal/store/postgres/sql/
 !go-backend/internal/store/postgres/sql/schema.sql
 !go-backend/internal/store/postgres/sql/data.sql
+go-backend/gost.db-shm
+.gitignore
+go-backend/gost.db-wal

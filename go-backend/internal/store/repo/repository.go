@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,6 +49,11 @@ type UserGroupBackup = model.UserGroupBackup
 type PermissionBackup = model.PermissionBackup
 type PermissionGrantBackup = model.PermissionGrantBackup
 type ImportResult = model.ImportResult
+type NodeMetric = model.NodeMetric
+type TunnelMetric = model.TunnelMetric
+type ServiceMonitor = model.ServiceMonitor
+type ServiceMonitorResult = model.ServiceMonitorResult
+type TunnelQuality = model.TunnelQuality
 
 // ─── Repository ──────────────────────────────────────────────────────
 
@@ -127,6 +134,11 @@ func OpenPostgres(dsn string) (*Repository, error) {
 		return nil, err
 	}
 
+	if err := preparePostgresLegacySchema(db); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("prepare postgres legacy schema: %w", err)
+	}
+
 	if err := autoMigrateAll(db); err != nil {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("auto migrate: %w", err)
@@ -156,6 +168,7 @@ func (r *Repository) Close() error {
 func autoMigrateAll(db *gorm.DB) error {
 	models := []interface{}{
 		&model.User{},
+		&model.UserQuota{},
 		&model.Forward{},
 		&model.ForwardPort{},
 		&model.Node{},
@@ -170,12 +183,18 @@ func autoMigrateAll(db *gorm.DB) error {
 		&model.UserGroupUser{},
 		&model.GroupPermission{},
 		&model.GroupPermissionGrant{},
+		&model.MonitorPermission{},
 		&model.ViteConfig{},
 		&model.PeerShare{},
 		&model.PeerShareRuntime{},
 		&model.FederationTunnelBinding{},
 		&model.Announcement{},
 		&model.SchemaVersion{},
+		&model.NodeMetric{},
+		&model.TunnelMetric{},
+		&model.ServiceMonitor{},
+		&model.ServiceMonitorResult{},
+		&model.TunnelQuality{},
 	}
 
 	if db.Dialector.Name() != "sqlite" {
@@ -205,6 +224,49 @@ func autoMigrateAll(db *gorm.DB) error {
 	return nil
 }
 
+// preparePostgresLegacySchema renames unique constraints that were created by
+// the old schema.sql (which used inline UNIQUE column syntax) to the names
+// expected by GORM's NamingStrategy ("uni_<table>_<column>"). Without this,
+// GORM's AutoMigrate emits "DROP CONSTRAINT uni_..." against constraints that
+// don't exist under that name, crashing startup on upgraded PostgreSQL installs.
+func preparePostgresLegacySchema(db *gorm.DB) error {
+	if db == nil || db.Dialector.Name() != "postgres" {
+		return nil
+	}
+
+	type rename struct{ table, oldName, newName string }
+	renames := []rename{
+		{"vite_config", "vite_config_name_key", "uni_vite_config_name"},
+		{"peer_share", "peer_share_token_key", "uni_peer_share_token"},
+		{"peer_share_runtime", "peer_share_runtime_reservation_id_key", "uni_peer_share_runtime_reservation_id"},
+		{"peer_share_runtime", "peer_share_runtime_resource_key_key", "uni_peer_share_runtime_resource_key"},
+		{"federation_tunnel_binding", "federation_tunnel_binding_resource_key_key", "uni_federation_tunnel_binding_resource_key"},
+	}
+
+	for _, r := range renames {
+		var count int64
+		if err := db.Raw(
+			`SELECT COUNT(*) FROM information_schema.table_constraints
+			 WHERE constraint_schema = current_schema()
+			   AND table_name = ?
+			   AND constraint_name = ?
+			   AND constraint_type = 'UNIQUE'`,
+			r.table, r.oldName,
+		).Scan(&count).Error; err != nil {
+			return fmt.Errorf("check constraint %s.%s: %w", r.table, r.oldName, err)
+		}
+		if count == 0 {
+			continue
+		}
+		if err := db.Exec(
+			fmt.Sprintf(`ALTER TABLE %q RENAME CONSTRAINT %q TO %q`, r.table, r.oldName, r.newName),
+		).Error; err != nil {
+			return fmt.Errorf("rename constraint %s.%s→%s: %w", r.table, r.oldName, r.newName, err)
+		}
+	}
+	return nil
+}
+
 func prepareSQLiteLegacyColumns(db *gorm.DB) error {
 	if db == nil || db.Dialector.Name() != "sqlite" {
 		return nil
@@ -212,7 +274,7 @@ func prepareSQLiteLegacyColumns(db *gorm.DB) error {
 	m := db.Migrator()
 
 	if m.HasTable(&model.Node{}) {
-		for _, field := range []string{"ServerIPV4", "ServerIPV6", "Inx", "IsRemote", "RemoteURL", "RemoteToken", "RemoteConfig"} {
+		for _, field := range []string{"ServerIPV4", "ServerIPV6", "ExtraIPs", "TCPListenAddr", "UDPListenAddr", "Inx", "IsRemote", "RemoteURL", "RemoteToken", "RemoteConfig", "Remark", "ExpiryTime", "RenewalCycle", "ExpiryReminderDismissed"} {
 			if m.HasColumn(&model.Node{}, field) {
 				continue
 			}
@@ -345,6 +407,24 @@ func (r *Repository) ListConfigs() (map[string]string, error) {
 	return result, nil
 }
 
+func (r *Repository) GetConfigsByNames(names []string) (map[string]string, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("repository not initialized")
+	}
+	if len(names) == 0 {
+		return map[string]string{}, nil
+	}
+	var configs []model.ViteConfig
+	if err := r.db.Select("name", "value").Where("name IN ?", names).Find(&configs).Error; err != nil {
+		return nil, err
+	}
+	result := make(map[string]string, len(configs))
+	for _, c := range configs {
+		result[c.Name] = c.Value
+	}
+	return result, nil
+}
+
 func (r *Repository) UpsertConfig(name, value string, now int64) error {
 	if r == nil || r.db == nil {
 		return errors.New("repository not initialized")
@@ -399,7 +479,7 @@ func (r *Repository) GetUserPackageTunnels(userID int64) ([]model.UserTunnelDeta
 	}
 	var items []model.UserTunnelDetail
 	err := r.db.Model(&model.UserTunnel{}).
-		Select("user_tunnel.id, user_tunnel.user_id, user_tunnel.tunnel_id, tunnel.name AS tunnel_name, tunnel.flow AS tunnel_flow, user_tunnel.flow, user_tunnel.in_flow, user_tunnel.out_flow, user_tunnel.num, user_tunnel.flow_reset_time, user_tunnel.exp_time, user_tunnel.speed_id, speed_limit.name AS speed_limit, speed_limit.speed").
+		Select("user_tunnel.id, user_tunnel.user_id, user_tunnel.tunnel_id, tunnel.name AS tunnel_name, user_tunnel.status, tunnel.flow AS tunnel_flow, user_tunnel.flow, user_tunnel.in_flow, user_tunnel.out_flow, user_tunnel.num, user_tunnel.flow_reset_time, user_tunnel.exp_time, user_tunnel.speed_id, speed_limit.name AS speed_limit, speed_limit.speed").
 		Joins("LEFT JOIN tunnel ON tunnel.id = user_tunnel.tunnel_id").
 		Joins("LEFT JOIN speed_limit ON speed_limit.id = user_tunnel.speed_id").
 		Where("user_tunnel.user_id = ?", userID).
@@ -586,18 +666,23 @@ func (r *Repository) ListNodes() ([]map[string]interface{}, error) {
 	for _, n := range nodes {
 		items = append(items, map[string]interface{}{
 			"id": n.ID, "inx": n.Inx, "name": n.Name,
-			"ip": n.ServerIP, "serverIp": n.ServerIP,
+			"remark":       nullableString(n.Remark),
+			"expiryTime":   nullableInt64(n.ExpiryTime),
+			"renewalCycle": nullableString(n.RenewalCycle),
+			"ip":           n.ServerIP, "serverIp": n.ServerIP,
 			"serverIpV4":    nullableString(n.ServerIPV4),
 			"serverIpV6":    nullableString(n.ServerIPV6),
+			"extraIPs":      nullableString(n.ExtraIPs),
 			"port":          n.Port,
 			"tcpListenAddr": n.TCPListenAddr,
 			"udpListenAddr": n.UDPListenAddr,
 			"version":       nullableString(n.Version),
 			"http":          n.HTTP, "tls": n.TLS, "socks": n.Socks,
 			"status": n.Status, "isRemote": n.IsRemote,
-			"remoteUrl":    nullableString(n.RemoteURL),
-			"remoteToken":  nullableString(n.RemoteToken),
-			"remoteConfig": nullableString(n.RemoteConfig),
+			"remoteUrl":                 nullableString(n.RemoteURL),
+			"remoteToken":               nullableString(n.RemoteToken),
+			"remoteConfig":              nullableString(n.RemoteConfig),
+			"expiryReminderDismissed":   n.ExpiryReminderDismissed,
 		})
 	}
 	return items, nil
@@ -608,19 +693,36 @@ func (r *Repository) ListUsers() ([]map[string]interface{}, error) {
 		return nil, errors.New("repository not initialized")
 	}
 	var users []model.User
-	if err := r.db.Where("role_id != ?", 0).Order("id ASC").Find(&users).Error; err != nil {
+	if err := r.db.Where("role_id != ?", 0).Order("id DESC").Find(&users).Error; err != nil {
+		return nil, err
+	}
+	userIDs := make([]int64, 0, len(users))
+	for _, u := range users {
+		userIDs = append(userIDs, u.ID)
+	}
+	quotaMap, err := r.ListUserQuotaViewsByUserIDs(userIDs, time.Now())
+	if err != nil {
 		return nil, err
 	}
 	items := make([]map[string]interface{}, 0, len(users))
 	for _, u := range users {
-		items = append(items, map[string]interface{}{
+		item := map[string]interface{}{
 			"id": u.ID, "user": u.User, "name": u.User,
 			"roleId": u.RoleID, "status": u.Status,
 			"flow": u.Flow, "num": u.Num, "expTime": u.ExpTime,
 			"flowResetTime": u.FlowResetTime, "createdTime": u.CreatedTime,
 			"updatedTime": nullableInt64(u.UpdatedTime),
 			"inFlow":      u.InFlow, "outFlow": u.OutFlow,
-		})
+		}
+		if quota := quotaMap[u.ID]; quota != nil {
+			item["dailyQuotaGB"] = quota.DailyLimitGB
+			item["monthlyQuotaGB"] = quota.MonthlyLimitGB
+			item["dailyUsedBytes"] = quota.DailyUsedBytes
+			item["monthlyUsedBytes"] = quota.MonthlyUsedBytes
+			item["disabledByQuota"] = quota.DisabledByQuota
+			item["quotaDisabledAt"] = quota.DisabledAt
+		}
+		items = append(items, item)
 	}
 	return items, nil
 }
@@ -630,17 +732,17 @@ func (r *Repository) ListSpeedLimits() ([]map[string]interface{}, error) {
 		return nil, errors.New("repository not initialized")
 	}
 	var limits []model.SpeedLimit
-	if err := r.db.Order("id ASC").Find(&limits).Error; err != nil {
+	if err := r.db.Order("id DESC").Find(&limits).Error; err != nil {
 		return nil, err
 	}
 	items := make([]map[string]interface{}, 0, len(limits))
 	for _, sl := range limits {
-		items = append(items, map[string]interface{}{
+		item := map[string]interface{}{
 			"id": sl.ID, "name": sl.Name, "speed": sl.Speed,
-			"tunnelId": sl.TunnelID, "tunnelName": sl.TunnelName,
 			"status": sl.Status, "createdTime": sl.CreatedTime,
 			"updatedTime": nullableInt64(sl.UpdatedTime),
-		})
+		}
+		items = append(items, item)
 	}
 	return items, nil
 }
@@ -651,24 +753,26 @@ func (r *Repository) ListForwards() ([]map[string]interface{}, error) {
 	}
 
 	type fwdRow struct {
-		ID          int64
-		UserID      int64
-		UserName    string
-		Name        string
-		TunnelID    int64
-		TunnelName  string
-		RemoteAddr  string
-		Strategy    string
-		InFlow      int64
-		OutFlow     int64
-		CreatedTime int64
-		Status      int
-		Inx         int
+		ID           int64
+		UserID       int64
+		UserName     string
+		Name         string
+		TunnelID     int64
+		TunnelName   string
+		TrafficRatio float64
+		RemoteAddr   string
+		Strategy     string
+		InFlow       int64
+		OutFlow      int64
+		CreatedTime  int64
+		Status       int
+		Inx          int
+		SpeedID      sql.NullInt64
 	}
 
 	var rows []fwdRow
 	err := r.db.Model(&model.Forward{}).
-		Select("forward.id, forward.user_id, forward.user_name, forward.name, forward.tunnel_id, COALESCE(tunnel.name, '') AS tunnel_name, forward.remote_addr, COALESCE(forward.strategy, 'fifo') AS strategy, forward.in_flow, forward.out_flow, forward.created_time, forward.status, forward.inx").
+		Select("forward.id, forward.user_id, forward.user_name, forward.name, forward.tunnel_id, COALESCE(tunnel.name, '') AS tunnel_name, COALESCE(tunnel.traffic_ratio, 1.0) AS traffic_ratio, forward.remote_addr, COALESCE(forward.strategy, 'fifo') AS strategy, forward.in_flow, forward.out_flow, forward.created_time, forward.status, forward.inx, forward.speed_id").
 		Joins("LEFT JOIN tunnel ON tunnel.id = forward.tunnel_id").
 		Order("forward.inx ASC, forward.id ASC").
 		Find(&rows).Error
@@ -682,14 +786,19 @@ func (r *Repository) ListForwards() ([]map[string]interface{}, error) {
 		if err != nil {
 			return nil, err
 		}
-		items = append(items, map[string]interface{}{
+		item := map[string]interface{}{
 			"id": row.ID, "userId": row.UserID, "userName": row.UserName,
 			"name": row.Name, "tunnelId": row.TunnelID, "tunnelName": row.TunnelName,
-			"inIp": nullableForwardIngress(inIP), "inPort": nullableInt64(inPort),
+			"tunnelTrafficRatio": row.TrafficRatio,
+			"inIp":               nullableForwardIngress(inIP), "inPort": nullableInt64(inPort),
 			"remoteAddr": row.RemoteAddr, "strategy": row.Strategy,
 			"inFlow": row.InFlow, "outFlow": row.OutFlow,
 			"createdTime": row.CreatedTime, "status": row.Status, "inx": int64(row.Inx),
-		})
+		}
+		if row.SpeedID.Valid {
+			item["speedId"] = row.SpeedID.Int64
+		}
+		items = append(items, item)
 	}
 	return items, nil
 }
@@ -713,9 +822,21 @@ func (r *Repository) ListUserAccessibleTunnels(userID int64) ([]map[string]inter
 	if err != nil {
 		return nil, err
 	}
+
+	tunnelIDs := make([]int64, 0, len(rows))
+	for _, rw := range rows {
+		tunnelIDs = append(tunnelIDs, rw.ID)
+	}
+	portRangeMap := r.getTunnelEntryPortRanges(tunnelIDs)
+
 	items := make([]map[string]interface{}, 0, len(rows))
-	for _, r := range rows {
-		items = append(items, map[string]interface{}{"id": r.ID, "name": r.Name})
+	for _, rw := range rows {
+		item := map[string]interface{}{"id": rw.ID, "name": rw.Name}
+		if pr, ok := portRangeMap[rw.ID]; ok {
+			item["portRangeMin"] = pr.min
+			item["portRangeMax"] = pr.max
+		}
+		items = append(items, item)
 	}
 	return items, nil
 }
@@ -734,11 +855,144 @@ func (r *Repository) ListEnabledTunnelSummaries() ([]map[string]interface{}, err
 	if err != nil {
 		return nil, err
 	}
+
+	tunnelIDs := make([]int64, 0, len(rows))
+	for _, rw := range rows {
+		tunnelIDs = append(tunnelIDs, rw.ID)
+	}
+	portRangeMap := r.getTunnelEntryPortRanges(tunnelIDs)
+
 	items := make([]map[string]interface{}, 0, len(rows))
-	for _, r := range rows {
-		items = append(items, map[string]interface{}{"id": r.ID, "name": r.Name})
+	for _, rw := range rows {
+		item := map[string]interface{}{"id": rw.ID, "name": rw.Name}
+		if pr, ok := portRangeMap[rw.ID]; ok {
+			item["portRangeMin"] = pr.min
+			item["portRangeMax"] = pr.max
+		}
+		items = append(items, item)
 	}
 	return items, nil
+}
+
+type tunnelPortRange struct {
+	min int
+	max int
+}
+
+func (r *Repository) getTunnelEntryPortRanges(tunnelIDs []int64) map[int64]tunnelPortRange {
+	result := make(map[int64]tunnelPortRange)
+	if len(tunnelIDs) == 0 {
+		return result
+	}
+
+	type entryNode struct {
+		TunnelID int64
+		NodeID   int64
+	}
+	var entries []entryNode
+	r.db.Model(&model.ChainTunnel{}).
+		Select("tunnel_id, node_id").
+		Where("tunnel_id IN (?) AND chain_type = ?", tunnelIDs, "1").
+		Find(&entries)
+
+	nodeIDs := make([]int64, 0, len(entries))
+	nodeSet := make(map[int64]struct{})
+	for _, e := range entries {
+		if _, exists := nodeSet[e.NodeID]; !exists {
+			nodeSet[e.NodeID] = struct{}{}
+			nodeIDs = append(nodeIDs, e.NodeID)
+		}
+	}
+
+	type nodePort struct {
+		ID   int64
+		Port string
+	}
+	var nodePorts []nodePort
+	if len(nodeIDs) > 0 {
+		r.db.Model(&model.Node{}).Select("id, port").Where("id IN (?)", nodeIDs).Find(&nodePorts)
+	}
+
+	nodePortMap := make(map[int64]string)
+	for _, np := range nodePorts {
+		nodePortMap[np.ID] = np.Port
+	}
+
+	for _, e := range entries {
+		portSpec := nodePortMap[e.NodeID]
+		if portSpec == "" {
+			continue
+		}
+		minP, maxP := parsePortRangeMinMax(portSpec)
+		if minP <= 0 || maxP <= 0 {
+			continue
+		}
+		pr, exists := result[e.TunnelID]
+		if !exists {
+			result[e.TunnelID] = tunnelPortRange{min: minP, max: maxP}
+		} else {
+			if minP < pr.min {
+				pr.min = minP
+			}
+			if maxP > pr.max {
+				pr.max = maxP
+			}
+			result[e.TunnelID] = pr
+		}
+	}
+	return result
+}
+
+func parsePortRangeMinMax(input string) (int, int) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return 0, 0
+	}
+	minPort, maxPort := 0, 0
+	parts := strings.Split(input, ",")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if strings.Contains(part, "-") {
+			r := strings.SplitN(part, "-", 2)
+			if len(r) != 2 {
+				continue
+			}
+			start, end := parseIntPort(r[0]), parseIntPort(r[1])
+			if start <= 0 || end <= 0 {
+				continue
+			}
+			if end < start {
+				start, end = end, start
+			}
+			if minPort == 0 || start < minPort {
+				minPort = start
+			}
+			if maxPort == 0 || end > maxPort {
+				maxPort = end
+			}
+			continue
+		}
+		p := parseIntPort(part)
+		if p <= 0 {
+			continue
+		}
+		if minPort == 0 || p < minPort {
+			minPort = p
+		}
+		if maxPort == 0 || p > maxPort {
+			maxPort = p
+		}
+	}
+	return minPort, maxPort
+}
+
+func parseIntPort(s string) int {
+	var p int
+	fmt.Sscanf(strings.TrimSpace(s), "%d", &p)
+	return p
 }
 
 func (r *Repository) ListTunnels() ([]map[string]interface{}, error) {
@@ -810,6 +1064,9 @@ func (r *Repository) ListTunnels() ([]map[string]interface{}, error) {
 		}
 		if c.Strategy.Valid {
 			nodeObj["strategy"] = c.Strategy.String
+		}
+		if c.ConnectIP.Valid {
+			nodeObj["connectIp"] = c.ConnectIP.String
 		}
 
 		switch chainTypeInt {
@@ -1222,6 +1479,175 @@ func (r *Repository) ListActivePeerShareRuntimePorts(shareID int64, nodeID int64
 	return ports, nil
 }
 
+func (r *Repository) ListActiveForwardPeerShareRuntimesByServiceName(serviceName string) ([]model.PeerShareRuntime, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("repository not initialized")
+	}
+	var items []model.PeerShareRuntime
+	err := r.db.Where("service_name = ? AND status = 1 AND role = ?", serviceName, "forward").
+		Order("id ASC").
+		Find(&items).Error
+	if err != nil {
+		return nil, err
+	}
+	if items == nil {
+		items = make([]model.PeerShareRuntime, 0)
+	}
+	return items, nil
+}
+
+func (r *Repository) ListActiveForwardPeerShareRuntimesByNodeAndServiceName(nodeID int64, serviceName string) ([]model.PeerShareRuntime, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("repository not initialized")
+	}
+	serviceName = strings.TrimSpace(serviceName)
+	if serviceName == "" {
+		return []model.PeerShareRuntime{}, nil
+	}
+	var items []model.PeerShareRuntime
+	err := r.db.Where("node_id = ? AND service_name = ? AND status = 1 AND role = ?", nodeID, serviceName, "forward").
+		Order("id ASC").
+		Find(&items).Error
+	if err != nil {
+		return nil, err
+	}
+	if items == nil {
+		items = make([]model.PeerShareRuntime, 0)
+	}
+	return items, nil
+}
+
+func (r *Repository) ListActiveForwardPeerShareRuntimeServiceNamesByNode(nodeID int64) ([]string, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("repository not initialized")
+	}
+	var names []string
+	err := r.db.Model(&model.PeerShareRuntime{}).
+		Where("node_id = ? AND status = 1 AND role = ? AND service_name <> ''", nodeID, "forward").
+		Pluck("service_name", &names).Error
+	if err != nil {
+		return nil, err
+	}
+	if names == nil {
+		names = make([]string, 0)
+	}
+	return names, nil
+}
+
+func (r *Repository) HasRecentUnboundForwardPeerShareRuntimeOnNode(nodeID int64, minUpdatedTime int64) (bool, error) {
+	if r == nil || r.db == nil {
+		return false, errors.New("repository not initialized")
+	}
+	var count int64
+	err := r.db.Model(&model.PeerShareRuntime{}).
+		Where("node_id = ? AND status = 1 AND role = ? AND applied = 0 AND updated_time >= ? AND (service_name = '' OR service_name IS NULL)", nodeID, "forward", minUpdatedTime).
+		Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (r *Repository) GetActiveForwardPeerShareRuntimeByPort(shareID int64, port int) (*model.PeerShareRuntime, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("repository not initialized")
+	}
+	var item model.PeerShareRuntime
+	err := r.db.Where("share_id = ? AND port = ? AND status = 1 AND role = ?", shareID, port, "forward").First(&item).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (r *Repository) GetActiveForwardPeerShareRuntimeByServiceName(shareID int64, serviceName string) (*model.PeerShareRuntime, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("repository not initialized")
+	}
+	serviceName = strings.TrimSpace(serviceName)
+	if shareID <= 0 || serviceName == "" {
+		return nil, nil
+	}
+	var item model.PeerShareRuntime
+	err := r.db.Where("share_id = ? AND service_name = ? AND status = 1 AND role = ?", shareID, serviceName, "forward").
+		Order("id ASC").
+		First(&item).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (r *Repository) ExistsActivePeerShareRuntimeOnNodePort(nodeID int64, port int) (bool, error) {
+	if r == nil || r.db == nil {
+		return false, errors.New("repository not initialized")
+	}
+	var count int64
+	err := r.db.Model(&model.PeerShareRuntime{}).
+		Where("node_id = ? AND port = ? AND status = 1", nodeID, port).
+		Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (r *Repository) UpdatePeerShareRuntimeServiceName(id int64, serviceName string, updatedTime int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("repository not initialized")
+	}
+	return r.db.Model(&model.PeerShareRuntime{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"service_name": serviceName,
+		"applied":      1,
+		"updated_time": updatedTime,
+	}).Error
+}
+
+func (r *Repository) MarkPeerShareRuntimeReleasedByPort(shareID int64, port int, updatedTime int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("repository not initialized")
+	}
+	if shareID <= 0 || port <= 0 {
+		return nil
+	}
+	if updatedTime <= 0 {
+		updatedTime = unixMilliNow()
+	}
+	return r.db.Model(&model.PeerShareRuntime{}).Where("share_id = ? AND port = ? AND status = 1", shareID, port).Updates(map[string]interface{}{
+		"status":       0,
+		"applied":      0,
+		"service_name": "",
+		"updated_time": updatedTime,
+	}).Error
+}
+
+func (r *Repository) MarkForwardPeerShareRuntimeReleasedByServiceName(shareID int64, serviceName string, updatedTime int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("repository not initialized")
+	}
+	serviceName = strings.TrimSpace(serviceName)
+	if shareID <= 0 || serviceName == "" {
+		return nil
+	}
+	if updatedTime <= 0 {
+		updatedTime = unixMilliNow()
+	}
+	return r.db.Model(&model.PeerShareRuntime{}).
+		Where("share_id = ? AND status = 1 AND role = ? AND service_name = ?", shareID, "forward", serviceName).
+		Updates(map[string]interface{}{
+			"status":       0,
+			"applied":      0,
+			"service_name": "",
+			"updated_time": updatedTime,
+		}).Error
+}
+
 // ─── FederationTunnelBinding ─────────────────────────────────────────
 
 func (r *Repository) UpsertFederationTunnelBinding(item *model.FederationTunnelBinding) error {
@@ -1418,6 +1844,14 @@ func (r *Repository) exportUsers() ([]model.UserBackup, error) {
 	if err := r.db.Order("id ASC").Find(&users).Error; err != nil {
 		return nil, err
 	}
+	userIDs := make([]int64, 0, len(users))
+	for _, u := range users {
+		userIDs = append(userIDs, u.ID)
+	}
+	quotaMap, err := r.ListUserQuotaViewsByUserIDs(userIDs, time.Now())
+	if err != nil {
+		return nil, err
+	}
 	out := make([]model.UserBackup, 0, len(users))
 	for _, u := range users {
 		b := model.UserBackup{
@@ -1425,6 +1859,12 @@ func (r *Repository) exportUsers() ([]model.UserBackup, error) {
 			ExpTime: u.ExpTime, Flow: u.Flow, InFlow: u.InFlow, OutFlow: u.OutFlow,
 			FlowResetTime: u.FlowResetTime, Num: u.Num,
 			CreatedTime: u.CreatedTime, Status: u.Status,
+		}
+		if quota := quotaMap[u.ID]; quota != nil {
+			b.DailyQuotaGB = quota.DailyLimitGB
+			b.MonthlyQuotaGB = quota.MonthlyLimitGB
+			b.DisabledByQuota = quota.DisabledByQuota
+			b.QuotaDisabledAt = quota.DisabledAt
 		}
 		if u.UpdatedTime.Valid {
 			b.UpdatedTime = u.UpdatedTime.Int64
@@ -1443,10 +1883,14 @@ func (r *Repository) exportNodes() ([]model.NodeBackup, error) {
 	for _, n := range nodes {
 		b := model.NodeBackup{
 			ID: n.ID, Name: n.Name, Secret: n.Secret, ServerIP: n.ServerIP,
+			Remark: n.Remark.String, RenewalCycle: n.RenewalCycle.String,
 			Port: n.Port, HTTP: n.HTTP, TLS: n.TLS, Socks: n.Socks,
 			CreatedTime: n.CreatedTime, Status: n.Status,
 			TCPListenAddr: n.TCPListenAddr, UDPListenAddr: n.UDPListenAddr,
 			Inx: n.Inx, IsRemote: n.IsRemote,
+		}
+		if n.ExpiryTime.Valid {
+			b.ExpiryTime = n.ExpiryTime.Int64
 		}
 		if n.UpdatedTime.Valid {
 			b.UpdatedTime = n.UpdatedTime.Int64
@@ -1595,7 +2039,6 @@ func (r *Repository) exportSpeedLimits() ([]model.SpeedLimitBackup, error) {
 	for _, sl := range sls {
 		b := model.SpeedLimitBackup{
 			ID: sl.ID, Name: sl.Name, Speed: int64(sl.Speed),
-			TunnelID: sl.TunnelID, TunnelName: sl.TunnelName,
 			CreatedTime: sl.CreatedTime, Status: sl.Status,
 		}
 		if sl.UpdatedTime.Valid {
@@ -1787,6 +2230,39 @@ func importUsers(tx *gorm.DB, users []model.UserBackup, now int64) (int, error) 
 		if err != nil {
 			return count, err
 		}
+		if u.DailyQuotaGB > 0 || u.MonthlyQuotaGB > 0 || u.DisabledByQuota != 0 || u.QuotaDisabledAt > 0 {
+			current := time.UnixMilli(now)
+			dayKey := int64(current.Year()*10000 + int(current.Month())*100 + current.Day())
+			monthKey := int64(current.Year()*100 + int(current.Month()))
+			quotaItem := model.UserQuota{
+				UserID:           u.ID,
+				DailyLimitGB:     u.DailyQuotaGB,
+				MonthlyLimitGB:   u.MonthlyQuotaGB,
+				DailyUsedBytes:   0,
+				MonthlyUsedBytes: 0,
+				DayKey:           dayKey,
+				MonthKey:         monthKey,
+				DisabledByQuota:  u.DisabledByQuota,
+				DisabledAt:       u.QuotaDisabledAt,
+				PausedForwardIDs: "",
+				CreatedTime:      now,
+				UpdatedTime:      now,
+			}
+			err = tx.Clauses(clause.OnConflict{
+				Columns: []clause.Column{{Name: "user_id"}},
+				DoUpdates: clause.AssignmentColumns([]string{
+					"daily_limit_gb", "monthly_limit_gb", "daily_used_bytes", "monthly_used_bytes",
+					"day_key", "month_key", "disabled_by_quota", "disabled_at", "paused_forward_ids", "updated_time",
+				}),
+			}).Create(&quotaItem).Error
+			if err != nil {
+				return count, err
+			}
+		} else {
+			if err := tx.Where("user_id = ?", u.ID).Delete(&model.UserQuota{}).Error; err != nil {
+				return count, err
+			}
+		}
 		count++
 	}
 	return count, nil
@@ -1798,6 +2274,9 @@ func importNodes(tx *gorm.DB, nodes []model.NodeBackup, now int64) (int, error) 
 		item := model.Node{
 			ID:            n.ID,
 			Name:          n.Name,
+			Remark:        sql.NullString{String: n.Remark, Valid: n.Remark != ""},
+			ExpiryTime:    sql.NullInt64{Int64: n.ExpiryTime, Valid: n.ExpiryTime > 0},
+			RenewalCycle:  sql.NullString{String: n.RenewalCycle, Valid: n.RenewalCycle != ""},
 			Secret:        n.Secret,
 			ServerIP:      n.ServerIP,
 			ServerIPV4:    sql.NullString{String: n.ServerIPv4, Valid: true},
@@ -1822,7 +2301,7 @@ func importNodes(tx *gorm.DB, nodes []model.NodeBackup, now int64) (int, error) 
 		err := tx.Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "id"}},
 			DoUpdates: clause.AssignmentColumns([]string{
-				"name", "secret", "server_ip", "server_ip_v4", "server_ip_v6", "port", "interface_name", "version",
+				"name", "remark", "expiry_time", "renewal_cycle", "secret", "server_ip", "server_ip_v4", "server_ip_v6", "port", "interface_name", "version",
 				"http", "tls", "socks", "updated_time", "status", "tcp_listen_addr", "udp_listen_addr",
 				"inx", "is_remote", "remote_url", "remote_token", "remote_config",
 			}),
@@ -1968,8 +2447,8 @@ func importSpeedLimits(tx *gorm.DB, speedLimits []model.SpeedLimitBackup, now in
 			ID:          sl.ID,
 			Name:        sl.Name,
 			Speed:       int(sl.Speed),
-			TunnelID:    sl.TunnelID,
-			TunnelName:  sl.TunnelName,
+			TunnelID:    sql.NullInt64{Int64: 0, Valid: false},
+			TunnelName:  sql.NullString{String: "", Valid: false},
 			CreatedTime: sl.CreatedTime,
 			UpdatedTime: sql.NullInt64{Int64: now, Valid: true},
 			Status:      sl.Status,
@@ -2187,7 +2666,7 @@ func (r *Repository) ListExpiredActiveUserIDs(nowMs int64) ([]int64, error) {
 	}
 	var ids []int64
 	err := r.db.Model(&model.User{}).
-		Where("role_id != 0 AND status = 1 AND exp_time IS NOT NULL AND exp_time < ?", nowMs).
+		Where("role_id != 0 AND status = 1 AND exp_time > 0 AND exp_time < ?", nowMs).
 		Pluck("id", &ids).Error
 	if err != nil {
 		return nil, err
@@ -2207,7 +2686,7 @@ func (r *Repository) ListExpiredActiveUserTunnels(nowMs int64) ([]model.ExpiredU
 		return nil, errors.New("repository not initialized")
 	}
 	var uts []model.UserTunnel
-	err := r.db.Where("status = 1 AND exp_time IS NOT NULL AND exp_time < ?", nowMs).Find(&uts).Error
+	err := r.db.Where("status = 1 AND exp_time > 0 AND exp_time < ?", nowMs).Find(&uts).Error
 	if err != nil {
 		return nil, err
 	}
@@ -2242,9 +2721,13 @@ func (r *Repository) GetUserTunnelByID(id int64) (*model.UserTunnel, error) {
 
 // ─── Migration ───────────────────────────────────────────────────────
 
-const currentSchemaVersion = 2
+const currentSchemaVersion = 6
 
 var ensurePostgresIDDefaultsFn = ensurePostgresIDDefaults
+var migrateViteConfigValueColumnTypeFn = migrateViteConfigValueColumnType
+var migrateSpeedLimitTunnelBindingFn = migrateSpeedLimitTunnelBinding
+var migratePostgresTrafficInt64ColumnsFn = migratePostgresTrafficInt64Columns
+var migrateTunnelMetricBucketUniqueIndexFn = migrateTunnelMetricBucketUniqueIndex
 
 func getSchemaVersion(db *gorm.DB) int {
 	var v model.SchemaVersion
@@ -2296,7 +2779,296 @@ func migrateSchema(db *gorm.DB) error {
 		return err
 	}
 
+	if ver < 3 {
+		if err := migrateViteConfigValueColumnTypeFn(db); err != nil {
+			return err
+		}
+	}
+
+	if ver < 4 {
+		if err := migrateSpeedLimitTunnelBindingFn(db); err != nil {
+			return err
+		}
+	}
+
+	if ver < 5 {
+		if err := migratePostgresTrafficInt64ColumnsFn(db); err != nil {
+			return err
+		}
+	}
+
+	if ver < 6 {
+		if err := migrateTunnelMetricBucketUniqueIndexFn(db); err != nil {
+			return err
+		}
+	}
+
 	setSchemaVersion(db, currentSchemaVersion)
+	return nil
+}
+
+func migrateViteConfigValueColumnType(db *gorm.DB) error {
+	if db == nil {
+		return errors.New("nil db")
+	}
+
+	if !db.Migrator().HasTable(&model.ViteConfig{}) {
+		return nil
+	}
+
+	if db.Dialector.Name() != "postgres" {
+		return nil
+	}
+
+	type columnRow struct {
+		DataType string `gorm:"column:data_type"`
+	}
+
+	var row columnRow
+	if err := db.Raw(
+		`SELECT data_type FROM information_schema.columns
+		 WHERE table_schema = current_schema()
+		   AND table_name = ?
+		   AND column_name = ?`,
+		"vite_config", "value",
+	).Scan(&row).Error; err != nil {
+		return fmt.Errorf("inspect vite_config.value type: %w", err)
+	}
+
+	if strings.EqualFold(row.DataType, "text") {
+		return nil
+	}
+
+	if err := db.Exec(`ALTER TABLE "vite_config" ALTER COLUMN "value" TYPE TEXT`).Error; err != nil {
+		return fmt.Errorf("alter vite_config.value to text: %w", err)
+	}
+
+	return nil
+}
+
+func migrateSpeedLimitTunnelBinding(db *gorm.DB) error {
+	if db == nil {
+		return errors.New("nil db")
+	}
+
+	if !db.Migrator().HasTable(&model.SpeedLimit{}) {
+		return nil
+	}
+
+	if err := db.Model(&model.SpeedLimit{}).
+		Where("tunnel_id IS NOT NULL OR tunnel_name IS NOT NULL").
+		UpdateColumns(map[string]interface{}{
+			"tunnel_id":   nil,
+			"tunnel_name": nil,
+		}).Error; err != nil {
+		return fmt.Errorf("clear speed_limit tunnel binding: %w", err)
+	}
+
+	return nil
+}
+
+func migratePostgresTrafficInt64Columns(db *gorm.DB) error {
+	if db == nil {
+		return errors.New("nil db")
+	}
+
+	if db.Dialector.Name() != "postgres" {
+		return nil
+	}
+
+	type trafficColumn struct {
+		TableName  string
+		ColumnName string
+	}
+
+	columns := []trafficColumn{
+		{TableName: "user", ColumnName: "flow"},
+		{TableName: "user", ColumnName: "in_flow"},
+		{TableName: "user", ColumnName: "out_flow"},
+		{TableName: "forward", ColumnName: "in_flow"},
+		{TableName: "forward", ColumnName: "out_flow"},
+		{TableName: "statistics_flow", ColumnName: "flow"},
+		{TableName: "statistics_flow", ColumnName: "total_flow"},
+		{TableName: "tunnel", ColumnName: "flow"},
+		{TableName: "user_tunnel", ColumnName: "flow"},
+		{TableName: "user_tunnel", ColumnName: "in_flow"},
+		{TableName: "user_tunnel", ColumnName: "out_flow"},
+		{TableName: "peer_share", ColumnName: "max_bandwidth"},
+		{TableName: "peer_share", ColumnName: "current_flow"},
+	}
+
+	for _, column := range columns {
+		if err := alterPostgresColumnToBigIntIfNeeded(db, column.TableName, column.ColumnName); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func migrateTunnelMetricBucketUniqueIndex(db *gorm.DB) error {
+	if db == nil {
+		return errors.New("nil db")
+	}
+
+	if !db.Migrator().HasTable(&model.TunnelMetric{}) {
+		return nil
+	}
+
+	return db.Transaction(func(tx *gorm.DB) error {
+		// Only do the heavier dedupe work when needed.
+		var dupGroups int64
+		q := `
+			SELECT COUNT(1) AS cnt
+			FROM (
+				SELECT 1
+				FROM tunnel_metric
+				GROUP BY tunnel_id, node_id, timestamp
+				HAVING COUNT(*) > 1
+			) t
+		`
+		if err := tx.Raw(q).Scan(&dupGroups).Error; err != nil {
+			return fmt.Errorf("inspect tunnel_metric duplicates: %w", err)
+		}
+
+		if dupGroups > 0 {
+			switch tx.Dialector.Name() {
+			case "postgres":
+				sql := `
+					WITH agg AS (
+						SELECT MIN(id) AS keep_id,
+						       tunnel_id,
+						       node_id,
+						       timestamp,
+						       SUM(bytes_in) AS bytes_in,
+						       SUM(bytes_out) AS bytes_out,
+						       SUM(connections) AS connections,
+						       SUM(errors) AS errors,
+						       AVG(avg_latency_ms) AS avg_latency_ms
+						FROM tunnel_metric
+						GROUP BY tunnel_id, node_id, timestamp
+						HAVING COUNT(*) > 1
+					), updated AS (
+						UPDATE tunnel_metric tm
+						SET bytes_in = agg.bytes_in,
+						    bytes_out = agg.bytes_out,
+						    connections = agg.connections,
+						    errors = agg.errors,
+						    avg_latency_ms = agg.avg_latency_ms
+						FROM agg
+						WHERE tm.id = agg.keep_id
+						RETURNING tm.id
+					)
+					DELETE FROM tunnel_metric tm
+					USING agg
+					WHERE tm.tunnel_id = agg.tunnel_id
+					  AND tm.node_id = agg.node_id
+					  AND tm.timestamp = agg.timestamp
+					  AND tm.id <> agg.keep_id
+				`
+				if err := tx.Exec(sql).Error; err != nil {
+					return fmt.Errorf("dedupe tunnel_metric buckets: %w", err)
+				}
+			default:
+				// SQLite (and other) path.
+				if err := tx.Exec(`DROP TABLE IF EXISTS tunnel_metric_dedupe`).Error; err != nil {
+					return fmt.Errorf("prepare tunnel_metric dedupe table: %w", err)
+				}
+				if err := tx.Exec(`
+					CREATE TEMP TABLE tunnel_metric_dedupe AS
+					SELECT MIN(id) AS keep_id,
+					       tunnel_id,
+					       node_id,
+					       timestamp,
+					       SUM(bytes_in) AS bytes_in,
+					       SUM(bytes_out) AS bytes_out,
+					       SUM(connections) AS connections,
+					       SUM(errors) AS errors,
+					       AVG(avg_latency_ms) AS avg_latency_ms
+					FROM tunnel_metric
+					GROUP BY tunnel_id, node_id, timestamp
+					HAVING COUNT(*) > 1
+				`).Error; err != nil {
+					return fmt.Errorf("build tunnel_metric dedupe table: %w", err)
+				}
+				if err := tx.Exec(`
+					UPDATE tunnel_metric
+					SET bytes_in = (SELECT bytes_in FROM tunnel_metric_dedupe d WHERE d.keep_id = tunnel_metric.id),
+					    bytes_out = (SELECT bytes_out FROM tunnel_metric_dedupe d WHERE d.keep_id = tunnel_metric.id),
+					    connections = (SELECT connections FROM tunnel_metric_dedupe d WHERE d.keep_id = tunnel_metric.id),
+					    errors = (SELECT errors FROM tunnel_metric_dedupe d WHERE d.keep_id = tunnel_metric.id),
+					    avg_latency_ms = (SELECT avg_latency_ms FROM tunnel_metric_dedupe d WHERE d.keep_id = tunnel_metric.id)
+					WHERE id IN (SELECT keep_id FROM tunnel_metric_dedupe)
+				`).Error; err != nil {
+					return fmt.Errorf("update tunnel_metric deduped rows: %w", err)
+				}
+				if err := tx.Exec(`
+					DELETE FROM tunnel_metric
+					WHERE id IN (
+						SELECT tm.id
+						FROM tunnel_metric tm
+						JOIN tunnel_metric_dedupe d
+						  ON tm.tunnel_id = d.tunnel_id
+						 AND tm.node_id = d.node_id
+						 AND tm.timestamp = d.timestamp
+						WHERE tm.id <> d.keep_id
+					)
+				`).Error; err != nil {
+					return fmt.Errorf("delete tunnel_metric duplicates: %w", err)
+				}
+				_ = tx.Exec(`DROP TABLE IF EXISTS tunnel_metric_dedupe`).Error
+			}
+		}
+
+		// Uniqueness is required for safe upsert on (tunnel_id, node_id, timestamp).
+		if err := tx.Exec(
+			`CREATE UNIQUE INDEX IF NOT EXISTS uidx_tunnel_metric_bucket ON tunnel_metric(tunnel_id, node_id, timestamp)`,
+		).Error; err != nil {
+			return fmt.Errorf("create tunnel_metric unique index: %w", err)
+		}
+		return nil
+	})
+}
+
+func alterPostgresColumnToBigIntIfNeeded(db *gorm.DB, tableName, columnName string) error {
+	if db == nil {
+		return errors.New("nil db")
+	}
+
+	if tableName == "" || columnName == "" {
+		return errors.New("empty table or column name")
+	}
+
+	type columnRow struct {
+		DataType string `gorm:"column:data_type"`
+	}
+
+	var row columnRow
+	if err := db.Raw(
+		`SELECT data_type FROM information_schema.columns
+		 WHERE table_schema = current_schema()
+		   AND table_name = ?
+		   AND column_name = ?`,
+		tableName, columnName,
+	).Scan(&row).Error; err != nil {
+		return fmt.Errorf("inspect %s.%s type: %w", tableName, columnName, err)
+	}
+
+	if row.DataType == "" || strings.EqualFold(row.DataType, "bigint") {
+		return nil
+	}
+	if !strings.EqualFold(row.DataType, "integer") {
+		return nil
+	}
+
+	if err := db.Exec(fmt.Sprintf(
+		"ALTER TABLE %s ALTER COLUMN %s TYPE BIGINT",
+		quoteSQLIdentifier(tableName),
+		quoteSQLIdentifier(columnName),
+	)).Error; err != nil {
+		return fmt.Errorf("alter %s.%s to bigint: %w", tableName, columnName, err)
+	}
+
 	return nil
 }
 
@@ -2436,10 +3208,11 @@ func resolveForwardIngress(db *gorm.DB, forwardID int64, tunnelID int64) (string
 	type fpRow struct {
 		Port     sql.NullInt64
 		ServerIP sql.NullString
+		InIP     sql.NullString
 	}
 	var fpRows []fpRow
 	err := db.Model(&model.ForwardPort{}).
-		Select("forward_port.port, node.server_ip").
+		Select("forward_port.port, node.server_ip, forward_port.in_ip").
 		Joins("LEFT JOIN node ON node.id = forward_port.node_id").
 		Where("forward_port.forward_id = ?", forwardID).
 		Order("forward_port.id ASC").
@@ -2449,7 +3222,7 @@ func resolveForwardIngress(db *gorm.DB, forwardID int64, tunnelID int64) (string
 	}
 
 	ports := make([]int64, 0)
-	nodePairs := make([]string, 0)
+	entries := make([]string, 0)
 	seenPorts := make(map[int64]struct{})
 	seenPairs := make(map[string]struct{})
 
@@ -2461,11 +3234,19 @@ func resolveForwardIngress(db *gorm.DB, forwardID int64, tunnelID int64) (string
 			seenPorts[row.Port.Int64] = struct{}{}
 			ports = append(ports, row.Port.Int64)
 		}
-		if row.ServerIP.Valid && strings.TrimSpace(row.ServerIP.String) != "" {
-			pair := fmt.Sprintf("%s:%d", strings.TrimSpace(row.ServerIP.String), row.Port.Int64)
+
+		var ip string
+		if row.InIP.Valid && strings.TrimSpace(row.InIP.String) != "" {
+			ip = strings.TrimSpace(row.InIP.String)
+		} else if row.ServerIP.Valid && strings.TrimSpace(row.ServerIP.String) != "" {
+			ip = strings.TrimSpace(row.ServerIP.String)
+		}
+
+		if ip != "" {
+			pair := formatForwardIngressAddress(ip, row.Port.Int64)
 			if _, ok := seenPairs[pair]; !ok {
 				seenPairs[pair] = struct{}{}
-				nodePairs = append(nodePairs, pair)
+				entries = append(entries, pair)
 			}
 		}
 	}
@@ -2476,28 +3257,18 @@ func resolveForwardIngress(db *gorm.DB, forwardID int64, tunnelID int64) (string
 
 	inPort := sql.NullInt64{Int64: ports[0], Valid: true}
 
-	entries := make([]string, 0)
-	if tunnelInIP.Valid && strings.TrimSpace(tunnelInIP.String) != "" {
-		tunnelIPs := strings.Split(tunnelInIP.String, ",")
-		seen := make(map[string]struct{})
-		for _, ip := range tunnelIPs {
-			ip = strings.TrimSpace(ip)
-			if ip == "" {
-				continue
-			}
-			if _, ok := seen[ip]; ok {
-				continue
-			}
-			seen[ip] = struct{}{}
-			for _, port := range ports {
-				entries = append(entries, fmt.Sprintf("%s:%d", ip, port))
-			}
-		}
-	} else {
-		entries = append(entries, nodePairs...)
-	}
-
 	return strings.Join(entries, ","), inPort, nil
+}
+
+func formatForwardIngressAddress(host string, port int64) string {
+	host = strings.TrimSpace(host)
+	if host == "" || port <= 0 {
+		return ""
+	}
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	}
+	return net.JoinHostPort(host, strconv.FormatInt(port, 10))
 }
 
 func nullableString(v sql.NullString) interface{} {
@@ -2543,3 +3314,395 @@ var osMkdirAll = func(path string) error {
 
 // Suppress unused import warning for log
 var _ = log.Printf
+
+func (r *Repository) InsertNodeMetric(m *model.NodeMetric) error {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	return r.db.Create(m).Error
+}
+
+func (r *Repository) InsertNodeMetricBatch(metrics []*model.NodeMetric) error {
+	if r == nil || r.db == nil || len(metrics) == 0 {
+		return nil
+	}
+	return r.db.CreateInBatches(metrics, 100).Error
+}
+
+func (r *Repository) GetNodeMetrics(nodeID int64, startMs, endMs int64) ([]model.NodeMetric, error) {
+	if r == nil || r.db == nil {
+		return nil, nil
+	}
+
+	rangeMs := endMs - startMs
+	const maxRawRangeMs = int64(60 * 60 * 1000) // 1 hour — return raw data for short ranges
+	const targetPoints = 500                     // target number of chart points for downsampled data
+
+	// For short ranges, return raw data (full resolution).
+	if rangeMs <= maxRawRangeMs {
+		var metrics []model.NodeMetric
+		err := r.db.Where("node_id = ? AND timestamp >= ? AND timestamp <= ?", nodeID, startMs, endMs).
+			Order("timestamp ASC").
+			Limit(5000).
+			Find(&metrics).Error
+		return metrics, err
+	}
+
+	// For longer ranges, downsample via SQL aggregation to keep the response small and fast.
+	bucketMs := rangeMs / targetPoints
+	if bucketMs < 1000 {
+		bucketMs = 1000 // minimum 1-second buckets
+	}
+
+	bucketExpr := fmt.Sprintf("(timestamp / %d * %d)", bucketMs, bucketMs)
+	groupExpr := fmt.Sprintf("timestamp / %d", bucketMs)
+
+	var metrics []model.NodeMetric
+	err := r.db.Model(&model.NodeMetric{}).
+		Select(
+			fmt.Sprintf(
+				"%d AS node_id, "+
+					"CAST(%s AS BIGINT) AS timestamp, "+
+					"AVG(cpu_usage) AS cpu_usage, "+
+					"AVG(mem_usage) AS mem_usage, "+
+					"AVG(disk_usage) AS disk_usage, "+
+					"CAST(AVG(net_in_bytes) AS BIGINT) AS net_in_bytes, "+
+					"CAST(AVG(net_out_bytes) AS BIGINT) AS net_out_bytes, "+
+					"CAST(AVG(net_in_speed) AS BIGINT) AS net_in_speed, "+
+					"CAST(AVG(net_out_speed) AS BIGINT) AS net_out_speed, "+
+					"AVG(load1) AS load1, "+
+					"AVG(load5) AS load5, "+
+					"AVG(load15) AS load15, "+
+					"CAST(AVG(tcp_conns) AS BIGINT) AS tcp_conns, "+
+					"CAST(AVG(udp_conns) AS BIGINT) AS udp_conns, "+
+					"CAST(MAX(uptime) AS BIGINT) AS uptime",
+				nodeID, bucketExpr,
+			),
+		).
+		Where("node_id = ? AND timestamp >= ? AND timestamp <= ?", nodeID, startMs, endMs).
+		Group(groupExpr).
+		Order("timestamp ASC").
+		Limit(targetPoints + 100). // safety margin
+		Scan(&metrics).Error
+
+	if metrics == nil {
+		metrics = make([]model.NodeMetric, 0)
+	}
+	return metrics, err
+}
+
+func (r *Repository) GetLatestNodeMetric(nodeID int64) (*model.NodeMetric, error) {
+	if r == nil || r.db == nil {
+		return nil, nil
+	}
+	var m model.NodeMetric
+	err := r.db.Where("node_id = ?", nodeID).Order("timestamp DESC").First(&m).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &m, nil
+}
+
+func (r *Repository) PruneNodeMetrics(olderThanMs int64) error {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	return r.db.Where("timestamp < ?", olderThanMs).Delete(&model.NodeMetric{}).Error
+}
+
+func (r *Repository) InsertTunnelMetric(m *model.TunnelMetric) error {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	return r.db.Create(m).Error
+}
+
+func (r *Repository) InsertTunnelMetricBatch(metrics []*model.TunnelMetric) error {
+	if r == nil || r.db == nil || len(metrics) == 0 {
+		return nil
+	}
+	return r.db.CreateInBatches(metrics, 100).Error
+}
+
+// UpsertTunnelMetricBuckets adds the provided metric deltas into per-minute buckets.
+// Requires a unique index on (tunnel_id, node_id, timestamp) for safe upserts.
+func (r *Repository) UpsertTunnelMetricBuckets(metrics []*model.TunnelMetric) error {
+	if r == nil || r.db == nil || len(metrics) == 0 {
+		return nil
+	}
+
+	// Postgres rejects a single INSERT ... ON CONFLICT when the input contains
+	// duplicate conflict keys. Pre-aggregate within this batch to keep inserts safe.
+	type bucketKey struct {
+		tunnelID  int64
+		nodeID    int64
+		timestamp int64
+	}
+
+	agg := make(map[bucketKey]*model.TunnelMetric, len(metrics))
+	for _, m := range metrics {
+		if m == nil {
+			continue
+		}
+		if m.TunnelID <= 0 || m.NodeID <= 0 || m.Timestamp <= 0 {
+			continue
+		}
+		if m.BytesIn == 0 && m.BytesOut == 0 && m.Connections == 0 && m.Errors == 0 {
+			continue
+		}
+
+		k := bucketKey{tunnelID: m.TunnelID, nodeID: m.NodeID, timestamp: m.Timestamp}
+		if existing, ok := agg[k]; ok {
+			existing.BytesIn += m.BytesIn
+			existing.BytesOut += m.BytesOut
+			existing.Connections += m.Connections
+			existing.Errors += m.Errors
+			if existing.AvgLatencyMs == 0 && m.AvgLatencyMs != 0 {
+				existing.AvgLatencyMs = m.AvgLatencyMs
+			}
+			continue
+		}
+		cp := *m
+		agg[k] = &cp
+	}
+	if len(agg) == 0 {
+		return nil
+	}
+
+	rows := make([]*model.TunnelMetric, 0, len(agg))
+	for _, v := range agg {
+		rows = append(rows, v)
+	}
+
+	return r.db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "tunnel_id"}, {Name: "node_id"}, {Name: "timestamp"}},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"bytes_in":    gorm.Expr("tunnel_metric.bytes_in + excluded.bytes_in"),
+			"bytes_out":   gorm.Expr("tunnel_metric.bytes_out + excluded.bytes_out"),
+			"connections": gorm.Expr("tunnel_metric.connections + excluded.connections"),
+			"errors":      gorm.Expr("tunnel_metric.errors + excluded.errors"),
+			// avg_latency_ms is not additive; keep the existing bucket value.
+		}),
+	}).CreateInBatches(rows, 100).Error
+}
+
+func (r *Repository) GetTunnelMetrics(tunnelID int64, startMs, endMs int64) ([]model.TunnelMetric, error) {
+	if r == nil || r.db == nil {
+		return nil, nil
+	}
+	var metrics []model.TunnelMetric
+	err := r.db.Where("tunnel_id = ? AND timestamp >= ? AND timestamp <= ?", tunnelID, startMs, endMs).
+		Order("timestamp DESC").
+		Limit(5000).
+		Find(&metrics).Error
+	if len(metrics) > 1 {
+		for i, j := 0, len(metrics)-1; i < j; i, j = i+1, j-1 {
+			metrics[i], metrics[j] = metrics[j], metrics[i]
+		}
+	}
+	return metrics, err
+}
+
+// GetTunnelMetricsAggregated returns tunnel-level aggregated series (one point per timestamp).
+// Storage remains per (tunnel_id, node_id, timestamp) for future drill-down.
+func (r *Repository) GetTunnelMetricsAggregated(tunnelID int64, startMs, endMs int64) ([]model.TunnelMetric, error) {
+	if r == nil || r.db == nil {
+		return nil, nil
+	}
+
+	var metrics []model.TunnelMetric
+	err := r.db.Model(&model.TunnelMetric{}).
+		Select(
+			"tunnel_id, 0 AS node_id, timestamp, "+
+				"SUM(bytes_in) AS bytes_in, "+
+				"SUM(bytes_out) AS bytes_out, "+
+				"SUM(connections) AS connections, "+
+				"SUM(errors) AS errors, "+
+				"AVG(avg_latency_ms) AS avg_latency_ms",
+		).
+		Where("tunnel_id = ? AND timestamp >= ? AND timestamp <= ?", tunnelID, startMs, endMs).
+		Group("tunnel_id, timestamp").
+		Order("timestamp ASC").
+		Limit(5000).
+		Scan(&metrics).Error
+	if metrics == nil {
+		metrics = make([]model.TunnelMetric, 0)
+	}
+	return metrics, err
+}
+
+func (r *Repository) PruneTunnelMetrics(olderThanMs int64) error {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	return r.db.Where("timestamp < ?", olderThanMs).Delete(&model.TunnelMetric{}).Error
+}
+
+func (r *Repository) ListServiceMonitors() ([]model.ServiceMonitor, error) {
+	if r == nil || r.db == nil {
+		return nil, nil
+	}
+	var monitors []model.ServiceMonitor
+	err := r.db.Order("id ASC").Find(&monitors).Error
+	return monitors, err
+}
+
+func (r *Repository) ListEnabledServiceMonitors() ([]model.ServiceMonitor, error) {
+	if r == nil || r.db == nil {
+		return nil, nil
+	}
+	var monitors []model.ServiceMonitor
+	err := r.db.Where("enabled = 1 AND type IN (?)", []string{"tcp", "icmp"}).Order("id ASC").Find(&monitors).Error
+	return monitors, err
+}
+
+func (r *Repository) GetServiceMonitor(id int64) (*model.ServiceMonitor, error) {
+	if r == nil || r.db == nil {
+		return nil, nil
+	}
+	var m model.ServiceMonitor
+	err := r.db.First(&m, id).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &m, nil
+}
+
+func (r *Repository) CreateServiceMonitor(m *model.ServiceMonitor) error {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	return r.db.Create(m).Error
+}
+
+func (r *Repository) UpdateServiceMonitor(m *model.ServiceMonitor) error {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	return r.db.Save(m).Error
+}
+
+func (r *Repository) DeleteServiceMonitor(id int64) error {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	if id <= 0 {
+		return nil
+	}
+
+	// Keep API/UI semantics simple: deleting a monitor also deletes its history.
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("monitor_id = ?", id).Delete(&model.ServiceMonitorResult{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&model.ServiceMonitor{}, id).Error
+	})
+}
+
+func (r *Repository) InsertServiceMonitorResult(result *model.ServiceMonitorResult) error {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	return r.db.Create(result).Error
+}
+
+func (r *Repository) GetServiceMonitorResults(monitorID int64, limit int) ([]model.ServiceMonitorResult, error) {
+	if r == nil || r.db == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	var results []model.ServiceMonitorResult
+	err := r.db.Where("monitor_id = ?", monitorID).
+		Order("timestamp DESC").
+		Limit(limit).
+		Find(&results).Error
+	return results, err
+}
+
+// GetServiceMonitorResultsByTimeRange returns results for a monitor within [startMs, endMs].
+// Mirrors GetNodeMetrics / GetTunnelMetrics pattern for time-range based charting.
+func (r *Repository) GetServiceMonitorResultsByTimeRange(monitorID int64, startMs, endMs int64) ([]model.ServiceMonitorResult, error) {
+	if r == nil || r.db == nil {
+		return nil, nil
+	}
+	var results []model.ServiceMonitorResult
+	err := r.db.Where("monitor_id = ? AND timestamp >= ? AND timestamp <= ?", monitorID, startMs, endMs).
+		Order("timestamp DESC").
+		Limit(5000).
+		Find(&results).Error
+	if len(results) > 1 {
+		for i, j := 0, len(results)-1; i < j; i, j = i+1, j-1 {
+			results[i], results[j] = results[j], results[i]
+		}
+	}
+	return results, err
+}
+
+// GetLatestServiceMonitorResults returns the newest result per monitor_id.
+// This is intended for list rendering (avoid N+1 queries).
+func (r *Repository) GetLatestServiceMonitorResults() ([]model.ServiceMonitorResult, error) {
+	if r == nil || r.db == nil {
+		return nil, nil
+	}
+
+	var results []model.ServiceMonitorResult
+
+	// Prefer a window-function query (works on modern SQLite + Postgres).
+	q1 := `
+		SELECT id, monitor_id, node_id, timestamp, success, latency_ms, status_code, error_message
+		FROM (
+			SELECT *, ROW_NUMBER() OVER (PARTITION BY monitor_id ORDER BY timestamp DESC, id DESC) AS rn
+			FROM service_monitor_result
+		) t
+		WHERE rn = 1
+		ORDER BY monitor_id ASC
+	`
+	if err := r.db.Raw(q1).Scan(&results).Error; err == nil {
+		return results, nil
+	}
+
+	// Fallback: just return newest rows (best-effort). This avoids hard failure on older SQLite builds.
+	// Note: This may not include all monitors if the table is extremely large and skewed.
+	results = nil
+	q2 := `
+		SELECT id, monitor_id, node_id, timestamp, success, latency_ms, status_code, error_message
+		FROM service_monitor_result
+		ORDER BY timestamp DESC, id DESC
+		LIMIT 5000
+	`
+	err := r.db.Raw(q2).Scan(&results).Error
+	if err != nil {
+		return nil, err
+	}
+
+	seen := make(map[int64]struct{}, len(results))
+	out := make([]model.ServiceMonitorResult, 0, len(results))
+	for _, row := range results {
+		if row.MonitorID <= 0 {
+			continue
+		}
+		if _, ok := seen[row.MonitorID]; ok {
+			continue
+		}
+		seen[row.MonitorID] = struct{}{}
+		out = append(out, row)
+	}
+	// Keep response stable for the frontend.
+	sort.Slice(out, func(i, j int) bool { return out[i].MonitorID < out[j].MonitorID })
+	return out, nil
+}
+
+func (r *Repository) PruneServiceMonitorResults(olderThanMs int64) error {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	return r.db.Where("timestamp < ?", olderThanMs).Delete(&model.ServiceMonitorResult{}).Error
+}

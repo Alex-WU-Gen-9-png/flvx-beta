@@ -1,11 +1,21 @@
 import { useState, useEffect } from "react";
-import { Input } from "@heroui/input";
-import { Button } from "@heroui/button";
-import { Card, CardBody } from "@heroui/card";
 import { useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
 
+import { Input } from "@/shadcn-bridge/heroui/input";
+import { Button } from "@/shadcn-bridge/heroui/button";
+import { Card, CardBody } from "@/shadcn-bridge/heroui/card";
+import { Select, SelectItem } from "@/shadcn-bridge/heroui/select";
+import { Switch } from "@/shadcn-bridge/heroui/switch";
 import { reinitializeBaseURL } from "@/api/network";
+import { getConfigByName, updateConfig } from "@/api";
+import { BackIcon } from "@/components/icons";
+import {
+  type UpdateReleaseChannel,
+  getUpdateReleaseChannel,
+  setUpdateReleaseChannel,
+} from "@/utils/version-update";
+import { isAdmin } from "@/utils/auth";
 import {
   getPanelAddresses,
   savePanelAddress,
@@ -20,19 +30,39 @@ interface PanelAddress {
   inx: boolean;
 }
 
+const FORWARD_COMPACT_MODE_CONFIG_KEY = "forward_compact_mode";
+
+const parseBooleanConfig = (value: unknown, defaultValue: boolean) =>
+  typeof value === "string" ? value === "true" : defaultValue;
+
 export const SettingsPage = () => {
   const navigate = useNavigate();
   const [panelAddresses, setPanelAddresses] = useState<PanelAddress[]>([]);
   const [newName, setNewName] = useState("");
   const [newAddress, setNewAddress] = useState("");
+  const [updateChannel, setUpdateChannel] = useState<UpdateReleaseChannel>(
+    getUpdateReleaseChannel(),
+  );
+  const [forwardCompactMode, setForwardCompactMode] = useState(false);
+  const [forwardCompactModeSaving, setForwardCompactModeSaving] =
+    useState(false);
+
+  const admin = isAdmin();
 
   const setPanelAddressesFunc = (newAddress: PanelAddress[]) => {
     setPanelAddresses(newAddress);
   };
 
+  useEffect(() => {
+    (window as any).setPanelAddresses = setPanelAddressesFunc;
+
+    return () => {
+      delete (window as any).setPanelAddresses;
+    };
+  }, []);
+
   // 加载面板地址列表
   const loadPanelAddresses = async () => {
-    (window as any).setPanelAddresses = setPanelAddressesFunc;
     getPanelAddresses();
   };
 
@@ -52,7 +82,6 @@ export const SettingsPage = () => {
 
       return;
     }
-    (window as any).setPanelAddresses = setPanelAddressesFunc;
     savePanelAddress(newName.trim(), newAddress.trim());
     setNewName("");
     setNewAddress("");
@@ -61,14 +90,12 @@ export const SettingsPage = () => {
 
   // 设置当前面板地址
   const setCurrentPanel = async (name: string) => {
-    (window as any).setPanelAddresses = setPanelAddressesFunc;
     setCurrentPanelAddress(name);
     reinitializeBaseURL();
   };
 
   // 删除面板地址
   const handleDeletePanelAddress = async (name: string) => {
-    (window as any).setPanelAddresses = setPanelAddressesFunc;
     deletePanelAddress(name);
     reinitializeBaseURL();
     toast.success("删除成功");
@@ -77,7 +104,59 @@ export const SettingsPage = () => {
   // 页面加载时获取数据
   useEffect(() => {
     loadPanelAddresses();
+    loadForwardCompactMode();
   }, []);
+
+  const loadForwardCompactMode = async () => {
+    try {
+      const res = await getConfigByName(FORWARD_COMPACT_MODE_CONFIG_KEY);
+      setForwardCompactMode(parseBooleanConfig(res.data?.value, false));
+    } catch {
+      setForwardCompactMode(false);
+    }
+  };
+
+  const handleForwardCompactModeChange = async (enabled: boolean) => {
+    if (!admin || forwardCompactModeSaving) {
+      return;
+    }
+
+    const previous = forwardCompactMode;
+
+    setForwardCompactMode(enabled);
+    setForwardCompactModeSaving(true);
+    try {
+      const response = await updateConfig(
+        FORWARD_COMPACT_MODE_CONFIG_KEY,
+        enabled ? "true" : "false",
+      );
+
+      if (response.code === 0) {
+        toast.success(`规则页面精简模式已${enabled ? "开启" : "关闭"}`);
+        window.dispatchEvent(
+          new CustomEvent("forwardCompactModeChanged", {
+            detail: { enabled },
+          }),
+        );
+      } else {
+        setForwardCompactMode(previous);
+        toast.error(response.msg || "保存精简模式失败");
+      }
+    } catch {
+      setForwardCompactMode(previous);
+      toast.error("保存精简模式失败");
+    } finally {
+      setForwardCompactModeSaving(false);
+    }
+  };
+
+  const handleUpdateChannelChange = (channel: UpdateReleaseChannel) => {
+    setUpdateChannel(channel);
+    setUpdateReleaseChannel(channel);
+    toast.success(
+      `更新通道已切换为${channel === "stable" ? "稳定版" : "开发版"}`,
+    );
+  };
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-black">
@@ -87,23 +166,12 @@ export const SettingsPage = () => {
           <div className="flex items-center gap-3">
             <Button
               isIconOnly
+              aria-label="返回上一页"
               className="text-gray-600 dark:text-gray-300"
               variant="light"
-              onClick={() => navigate(-1)}
+              onPress={() => navigate(-1)}
             >
-              <svg
-                className="w-5 h-5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  d="M15 19l-7-7 7-7"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                />
-              </svg>
+              <BackIcon className="w-5 h-5" />
             </Button>
             <h1 className="text-xl font-semibold text-gray-900 dark:text-white">
               面板设置
@@ -115,6 +183,69 @@ export const SettingsPage = () => {
       {/* 内容区域 */}
       <div className="max-w-4xl mx-auto px-4 py-6">
         <div className="space-y-6">
+          <Card className="border border-gray-200 dark:border-gray-700">
+            <CardBody className="p-6">
+              <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4">
+                更新设置
+              </h2>
+              <div className="space-y-2">
+                <Select
+                  label="更新通道"
+                  selectedKeys={[updateChannel]}
+                  onSelectionChange={(keys) => {
+                    const selected =
+                      (Array.from(keys)[0] as UpdateReleaseChannel) || "stable";
+
+                    handleUpdateChannelChange(selected);
+                  }}
+                >
+                  <SelectItem key="stable" textValue="stable">
+                    稳定版（纯数字版本，如 2.1.4）
+                  </SelectItem>
+                  <SelectItem key="dev" textValue="dev">
+                    开发版（含 alpha / beta / rc）
+                  </SelectItem>
+                </Select>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  版本提示会根据该通道检查最新版本。
+                </p>
+              </div>
+            </CardBody>
+          </Card>
+
+          <Card className="border border-gray-200 dark:border-gray-700">
+            <CardBody className="p-6">
+              <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4">
+                显示设置
+              </h2>
+              <div className="space-y-3">
+                <div className="rounded-lg border border-gray-200 dark:border-gray-700 px-4 py-3">
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-medium text-gray-900 dark:text-white">
+                        规则页面精简模式
+                      </p>
+                      <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                        开启后，规则页面列表使用 2.1.6-alpha8 样式。{" "}
+                      </p>
+                    </div>
+                    <Switch
+                      color="primary"
+                      isDisabled={!admin || forwardCompactModeSaving}
+                      isSelected={forwardCompactMode}
+                      onValueChange={handleForwardCompactModeChange}
+                    />
+                  </div>
+                  {!admin && (
+                    <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
+                      仅管理员可修改该全局配置。
+                    </p>
+                  )}
+                </div>
+              </div>
+            </CardBody>
+          </Card>
+
           {/* 添加新地址 */}
           <Card className="border border-gray-200 dark:border-gray-700">
             <CardBody className="p-6">
@@ -136,7 +267,7 @@ export const SettingsPage = () => {
                     onChange={(e) => setNewAddress(e.target.value)}
                   />
                 </div>
-                <Button color="primary" onClick={addPanelAddress}>
+                <Button color="primary" onPress={addPanelAddress}>
                   添加
                 </Button>
               </div>
@@ -182,7 +313,7 @@ export const SettingsPage = () => {
                               color="primary"
                               size="sm"
                               variant="flat"
-                              onClick={() => setCurrentPanel(panel.name)}
+                              onPress={() => setCurrentPanel(panel.name)}
                             >
                               设为当前
                             </Button>
@@ -191,7 +322,7 @@ export const SettingsPage = () => {
                             color="danger"
                             size="sm"
                             variant="light"
-                            onClick={() => handleDeletePanelAddress(panel.name)}
+                            onPress={() => handleDeletePanelAddress(panel.name)}
                           >
                             删除
                           </Button>

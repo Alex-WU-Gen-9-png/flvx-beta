@@ -38,6 +38,14 @@ type FederationBindingRow struct {
 	UpdatedTime     int64
 }
 
+type ActiveForwardPortRow struct {
+	ForwardID   int64
+	TunnelID    int64
+	TunnelName  string
+	Port        int
+	UpdatedTime int64
+}
+
 // ListRemoteNodes returns all nodes with is_remote=1, ordered by id desc.
 func (r *Repository) ListRemoteNodes() ([]RemoteNodeRow, error) {
 	if r == nil || r.db == nil {
@@ -83,6 +91,27 @@ func (r *Repository) ListActiveBindingsForNode(nodeID int64) ([]FederationBindin
 	}
 	if result == nil {
 		result = make([]FederationBindingRow, 0)
+	}
+	return result, nil
+}
+
+func (r *Repository) ListActiveForwardPortsForNode(nodeID int64) ([]ActiveForwardPortRow, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("repository not initialized")
+	}
+	var result []ActiveForwardPortRow
+	err := r.db.Model(&model.ForwardPort{}).
+		Select("forward_port.forward_id, forward.tunnel_id, COALESCE(tunnel.name, '') AS tunnel_name, forward_port.port, forward.updated_time").
+		Joins("JOIN forward ON forward.id = forward_port.forward_id").
+		Joins("LEFT JOIN tunnel ON tunnel.id = forward.tunnel_id").
+		Where("forward_port.node_id = ? AND forward_port.port > 0", nodeID).
+		Order("forward_port.port ASC, forward_port.id ASC").
+		Find(&result).Error
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		result = make([]ActiveForwardPortRow, 0)
 	}
 	return result, nil
 }
@@ -199,7 +228,6 @@ func (r *Repository) ListTunnelIDsByNamePrefix(prefix string) ([]int64, error) {
 	return ids, nil
 }
 
-// NextIndex returns COALESCE(MAX(inx), -1) + 1 for the given table.
 func (r *Repository) NextIndex(table string) int {
 	if r == nil || r.db == nil {
 		return 0
@@ -222,7 +250,7 @@ func (r *Repository) NextIndex(table string) int {
 	var row inxRow
 	err := r.db.Model(modelRef).
 		Select("inx").
-		Order("inx DESC").
+		Order("inx ASC, id ASC").
 		Limit(1).
 		Take(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -231,10 +259,7 @@ func (r *Repository) NextIndex(table string) int {
 	if err != nil {
 		return 0
 	}
-	if row.Inx < 0 {
-		return 0
-	}
-	return row.Inx + 1
+	return row.Inx - 1
 }
 
 // CreateRemoteNode inserts a new remote node.

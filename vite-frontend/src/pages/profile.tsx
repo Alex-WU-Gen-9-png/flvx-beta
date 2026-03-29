@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from "react";
-import { Card, CardBody } from "@heroui/card";
-import { Button } from "@heroui/button";
+import { toast } from "react-hot-toast";
+import { useNavigate } from "react-router-dom";
+
+import { Card, CardBody } from "@/shadcn-bridge/heroui/card";
+import { Button } from "@/shadcn-bridge/heroui/button";
 import {
   Modal,
   ModalContent,
@@ -8,15 +11,14 @@ import {
   ModalBody,
   ModalFooter,
   useDisclosure,
-} from "@heroui/modal";
-import { Input } from "@heroui/input";
-import { toast } from "react-hot-toast";
-import { useNavigate } from "react-router-dom";
-
+} from "@/shadcn-bridge/heroui/modal";
+import { Input } from "@/shadcn-bridge/heroui/input";
 import { isWebViewFunc } from "@/utils/panel";
 import { siteConfig } from "@/config/site";
+import { VersionFooter } from "@/components/version-footer";
 import { updatePassword } from "@/api";
 import { safeLogout } from "@/utils/logout";
+import { getAdminFlag, getSessionName } from "@/utils/session";
 interface PasswordForm {
   newUsername: string;
   currentPassword: string;
@@ -47,21 +49,8 @@ export default function ProfilePage() {
 
   useEffect(() => {
     // 获取用户信息
-    const name = localStorage.getItem("name") || "Admin";
-
-    // 兼容处理：如果没有admin字段，根据role_id判断（0为管理员）
-    let adminFlag = localStorage.getItem("admin") === "true";
-
-    if (localStorage.getItem("admin") === null) {
-      const roleId = parseInt(localStorage.getItem("role_id") || "1", 10);
-
-      adminFlag = roleId === 0;
-      // 补充设置admin字段，避免下次再次判断
-      localStorage.setItem("admin", adminFlag.toString());
-    }
-
-    setUsername(name);
-    setIsAdmin(adminFlag);
+    setUsername(getSessionName() || "Admin");
+    setIsAdmin(getAdminFlag());
   }, []);
 
   // 管理员菜单项
@@ -324,27 +313,23 @@ export default function ProfilePage() {
           </CardBody>
         </Card>
 
-        <div className="fixed inset-x-0 bottom-20 text-center py-4">
-          <p className="text-xs text-gray-400 dark:text-gray-500">
-            Powered by{" "}
-            <a
-              className="text-gray-500 dark:text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
-              href={siteConfig.github_repo}
-              rel="noopener noreferrer"
-              target="_blank"
-            >
-              FLVX
-            </a>
-          </p>
-          <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
-            v{isWebViewFunc() ? siteConfig.app_version : siteConfig.version}
-          </p>
-        </div>
+        <VersionFooter
+          containerClassName="fixed inset-x-0 bottom-20 text-center py-4"
+          poweredClassName="text-xs text-gray-400 dark:text-gray-500"
+          updateBadgeClassName="ml-2 inline-flex items-center rounded-full bg-rose-500/90 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-white"
+          version={
+            isWebViewFunc() ? siteConfig.app_version : siteConfig.version
+          }
+          versionClassName="text-xs text-gray-400 dark:text-gray-500 mt-1"
+        />
       </div>
 
       {/* 修改密码弹窗 */}
       <Modal
         backdrop="blur"
+        classNames={{
+          base: "!w-[calc(100%-32px)] !mx-auto sm:!w-full rounded-2xl overflow-hidden",
+        }}
         isOpen={isOpen}
         placement="center"
         scrollBehavior="outside"

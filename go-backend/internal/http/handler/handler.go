@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,17 +16,21 @@ import (
 	"time"
 
 	"go-backend/internal/auth"
+	"go-backend/internal/health"
 	"go-backend/internal/http/middleware"
 	"go-backend/internal/http/response"
+	"go-backend/internal/metrics"
 	"go-backend/internal/security"
 	"go-backend/internal/store/repo"
 	"go-backend/internal/ws"
 )
 
 type Handler struct {
-	repo      *repo.Repository
-	jwtSecret string
-	wsServer  *ws.Server
+	repo        *repo.Repository
+	jwtSecret   string
+	wsServer    *ws.Server
+	metrics     *metrics.IngestionService
+	healthCheck *health.Checker
 
 	captchaMu     sync.Mutex
 	captchaTokens map[string]int64
@@ -34,7 +39,14 @@ type Handler struct {
 	jobsCancel  context.CancelFunc
 	jobsStarted bool
 	jobsWG      sync.WaitGroup
+
+	upgradeMu              sync.Mutex
+	pendingUpgradeRedeploy map[int64]struct{}
+
+	qualityProber *tunnelQualityProber
 }
+
+const monitorTunnelQualityEnabledConfigKey = "monitor_tunnel_quality_enabled"
 
 type loginRequest struct {
 	Username  string `json:"username"`
@@ -69,13 +81,43 @@ type flowItem struct {
 	D int64  `json:"d"`
 }
 
+const (
+	pngDataURLPrefix          = "data:image/png;base64,"
+	maxBrandAssetDataURLBytes = 1024 * 1024
+)
+
 func New(repo *repo.Repository, jwtSecret string) *Handler {
-	return &Handler{
-		repo:          repo,
-		jwtSecret:     jwtSecret,
-		wsServer:      ws.NewServer(repo, jwtSecret),
-		captchaTokens: make(map[string]int64),
+	h := &Handler{
+		repo:                   repo,
+		jwtSecret:              jwtSecret,
+		wsServer:               ws.NewServer(repo, jwtSecret),
+		metrics:                metrics.NewIngestionService(repo),
+		healthCheck:            nil,
+		captchaTokens:          make(map[string]int64),
+		pendingUpgradeRedeploy: make(map[int64]struct{}),
 	}
+	h.healthCheck = health.NewChecker(repo, h.wsServer)
+	h.qualityProber = newTunnelQualityProber(h)
+	h.wsServer.SetNodeOnlineHook(h.onNodeOnline)
+	h.wsServer.SetNodeMetricHook(func(nodeID int64, info ws.SystemInfo) {
+		metricInfo := metrics.SystemInfo{
+			Uptime:           info.Uptime,
+			BytesReceived:    info.BytesReceived,
+			BytesTransmitted: info.BytesTransmitted,
+			CPUUsage:         info.CPUUsage,
+			MemoryUsage:      info.MemoryUsage,
+			DiskUsage:        info.DiskUsage,
+			Load1:            info.Load1,
+			Load5:            info.Load5,
+			Load15:           info.Load15,
+			TCPConns:         info.TCPConns,
+			UDPConns:         info.UDPConns,
+			NetInSpeed:       info.NetInSpeed,
+			NetOutSpeed:      info.NetOutSpeed,
+		}
+		h.metrics.RecordNodeMetric(nodeID, metricInfo)
+	})
+	return h
 }
 
 func (h *Handler) WebSocketHandler() http.Handler {
@@ -89,6 +131,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/user/update", h.userUpdate)
 	mux.HandleFunc("/api/v1/user/delete", h.userDelete)
 	mux.HandleFunc("/api/v1/user/reset", h.userResetFlow)
+	mux.HandleFunc("/api/v1/user/quota/reset", h.userQuotaReset)
+	mux.HandleFunc("/api/v1/user/groups", h.userGroups)
 	mux.HandleFunc("/api/v1/config/get", h.getConfigByName)
 	mux.HandleFunc("/api/v1/config/list", h.getConfigs)
 	mux.HandleFunc("/api/v1/config/update", h.updateConfigs)
@@ -109,6 +153,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/node/delete", h.nodeDelete)
 	mux.HandleFunc("/api/v1/node/install", h.nodeInstall)
 	mux.HandleFunc("/api/v1/node/update-order", h.nodeUpdateOrder)
+	mux.HandleFunc("/api/v1/node/dismiss-expiry-reminder", h.nodeDismissExpiryReminder)
 	mux.HandleFunc("/api/v1/node/batch-delete", h.nodeBatchDelete)
 	mux.HandleFunc("/api/v1/node/check-status", h.nodeCheckStatus)
 	mux.HandleFunc("/api/v1/node/upgrade", h.nodeUpgrade)
@@ -120,7 +165,12 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/tunnel/get", h.tunnelGet)
 	mux.HandleFunc("/api/v1/tunnel/update", h.tunnelUpdate)
 	mux.HandleFunc("/api/v1/tunnel/delete", h.tunnelDelete)
+	mux.HandleFunc("/api/v1/tunnel/delete-preview", h.tunnelDeletePreview)
+	mux.HandleFunc("/api/v1/tunnel/delete-with-forwards", h.tunnelDeleteWithForwards)
+	mux.HandleFunc("/api/v1/tunnel/batch-delete-preview", h.tunnelBatchDeletePreview)
+	mux.HandleFunc("/api/v1/tunnel/batch-delete-with-forwards", h.tunnelBatchDeleteWithForwards)
 	mux.HandleFunc("/api/v1/tunnel/diagnose", h.tunnelDiagnose)
+	mux.HandleFunc("/api/v1/tunnel/diagnose/stream", h.tunnelDiagnoseStream)
 	mux.HandleFunc("/api/v1/tunnel/update-order", h.tunnelUpdateOrder)
 	mux.HandleFunc("/api/v1/tunnel/batch-delete", h.tunnelBatchDelete)
 	mux.HandleFunc("/api/v1/tunnel/batch-redeploy", h.tunnelBatchRedeploy)
@@ -136,6 +186,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/forward/pause", h.forwardPause)
 	mux.HandleFunc("/api/v1/forward/resume", h.forwardResume)
 	mux.HandleFunc("/api/v1/forward/diagnose", h.forwardDiagnose)
+	mux.HandleFunc("/api/v1/forward/diagnose/stream", h.forwardDiagnoseStream)
 	mux.HandleFunc("/api/v1/forward/update-order", h.forwardUpdateOrder)
 	mux.HandleFunc("/api/v1/forward/batch-delete", h.forwardBatchDelete)
 	mux.HandleFunc("/api/v1/forward/batch-pause", h.forwardBatchPause)
@@ -146,7 +197,6 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/speed-limit/create", h.speedLimitCreate)
 	mux.HandleFunc("/api/v1/speed-limit/update", h.speedLimitUpdate)
 	mux.HandleFunc("/api/v1/speed-limit/delete", h.speedLimitDelete)
-	mux.HandleFunc("/api/v1/speed-limit/tunnels", h.tunnelList)
 	mux.HandleFunc("/api/v1/tunnel/user/tunnel", h.userTunnelVisibleList)
 	mux.HandleFunc("/api/v1/tunnel/user/list", h.userTunnelList)
 	mux.HandleFunc("/api/v1/group/tunnel/list", h.tunnelGroupList)
@@ -180,6 +230,24 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/announcement/get", h.getAnnouncement)
 	mux.HandleFunc("/api/v1/announcement/update", h.updateAnnouncement)
 
+	mux.HandleFunc("/api/v1/monitor/access", h.monitorAccessHandler)
+	mux.HandleFunc("/api/v1/monitor/nodes/", h.monitorNodeMetricsHandler)
+	mux.HandleFunc("/api/v1/monitor/nodes", h.monitorNodeListHandler)
+	mux.HandleFunc("/api/v1/monitor/tunnels", h.monitorTunnelListHandler)
+	mux.HandleFunc("/api/v1/monitor/tunnels/quality", h.monitorTunnelQualityHandler)
+	mux.HandleFunc("/api/v1/monitor/tunnels/", h.monitorTunnelMetrics)
+	mux.HandleFunc("/api/v1/monitor/services", h.monitorServiceListHandler)
+	mux.HandleFunc("/api/v1/monitor/services/create", h.monitorServiceCreate)
+	mux.HandleFunc("/api/v1/monitor/services/update", h.monitorServiceUpdate)
+	mux.HandleFunc("/api/v1/monitor/services/delete", h.monitorServiceDelete)
+	mux.HandleFunc("/api/v1/monitor/services/run", h.monitorServiceRun)
+	mux.HandleFunc("/api/v1/monitor/services/latest-results", h.monitorServiceLatestResultsHandler)
+	mux.HandleFunc("/api/v1/monitor/services/limits", h.monitorServiceLimitsHandler)
+	mux.HandleFunc("/api/v1/monitor/services/", h.monitorServiceResultsHandler)
+	mux.HandleFunc("/api/v1/monitor/permission/list", h.monitorPermissionList)
+	mux.HandleFunc("/api/v1/monitor/permission/assign", h.monitorPermissionAssign)
+	mux.HandleFunc("/api/v1/monitor/permission/remove", h.monitorPermissionRemove)
+
 	mux.HandleFunc("/flow/test", h.flowTest)
 	mux.HandleFunc("/flow/config", h.flowConfig)
 	mux.HandleFunc("/flow/upload", h.flowUpload)
@@ -212,7 +280,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
-	if captchaEnabled {
+	if captchaEnabled && !h.apiClientCaptchaBypassEnabled(r) {
 		captchaID := strings.TrimSpace(req.CaptchaID)
 		if captchaID == "" {
 			response.WriteJSON(w, response.ErrDefault("验证码校验失败"))
@@ -557,7 +625,7 @@ func (h *Handler) userTunnelList(w http.ResponseWriter, r *http.Request) {
 			"userId":         t.UserID,
 			"tunnelId":       t.TunnelID,
 			"tunnelName":     t.TunnelName,
-			"status":         1,
+			"status":         t.Status,
 			"flow":           t.Flow,
 			"num":            t.Num,
 			"expTime":        t.ExpTime,
@@ -697,7 +765,8 @@ func (h *Handler) flowConfig(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) flowUpload(w http.ResponseWriter, r *http.Request) {
 	secret := r.URL.Query().Get("secret")
-	if ok, _ := h.repo.NodeExistsBySecret(secret); !ok {
+	node, _ := h.repo.GetNodeBySecret(secret)
+	if node == nil {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok"))
 		return
@@ -707,8 +776,10 @@ func (h *Handler) flowUpload(w http.ResponseWriter, r *http.Request) {
 	if err == nil && strings.TrimSpace(raw) != "" {
 		var items []flowItem
 		if json.Unmarshal([]byte(raw), &items) == nil {
+			nowMs := time.Now().UnixMilli()
+			h.recordTunnelMetricsFromFlowItems(node.ID, items, nowMs)
 			for _, item := range items {
-				h.processFlowItem(item)
+				h.processFlowItem(node.ID, item)
 			}
 		}
 	}
@@ -739,7 +810,14 @@ func (h *Handler) updateConfigs(w http.ResponseWriter, r *http.Request) {
 		if key == "" {
 			continue
 		}
-		if err := h.repo.UpsertConfig(key, v, now); err != nil {
+
+		value, err := normalizeAndValidateConfigValue(key, v)
+		if err != nil {
+			response.WriteJSON(w, response.ErrDefault(err.Error()))
+			return
+		}
+
+		if err := h.repo.UpsertConfig(key, value, now); err != nil {
 			response.WriteJSON(w, response.Err(-2, err.Error()))
 			return
 		}
@@ -759,21 +837,81 @@ func (h *Handler) updateSingleConfig(w http.ResponseWriter, r *http.Request) {
 		response.WriteJSON(w, response.ErrDefault("配置名称不能为空"))
 		return
 	}
-	if strings.TrimSpace(req.Name) == "" {
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
 		response.WriteJSON(w, response.ErrDefault("配置名称不能为空"))
 		return
 	}
-	if strings.TrimSpace(req.Value) == "" {
+
+	value, err := normalizeAndValidateConfigValue(name, req.Value)
+	if err != nil {
+		response.WriteJSON(w, response.ErrDefault(err.Error()))
+		return
+	}
+
+	if value == "" && name != "app_logo" && name != "app_favicon" {
 		response.WriteJSON(w, response.ErrDefault("配置值不能为空"))
 		return
 	}
 
-	if err := h.repo.UpsertConfig(strings.TrimSpace(req.Name), req.Value, time.Now().UnixMilli()); err != nil {
+	if err := h.repo.UpsertConfig(name, value, time.Now().UnixMilli()); err != nil {
 		response.WriteJSON(w, response.Err(-2, err.Error()))
 		return
 	}
 
 	response.WriteJSON(w, response.OKEmpty())
+}
+
+func normalizeAndValidateConfigValue(key, value string) (string, error) {
+	switch strings.TrimSpace(key) {
+	case "app_logo", "app_favicon":
+		normalized := strings.TrimSpace(value)
+		if normalized == "" {
+			return "", nil
+		}
+
+		if !strings.HasPrefix(normalized, pngDataURLPrefix) {
+			return "", fmt.Errorf("品牌图片必须通过上传生成 PNG 数据")
+		}
+
+		if len(normalized) > maxBrandAssetDataURLBytes {
+			return "", fmt.Errorf("品牌图片过大，请上传更小图片")
+		}
+
+		payload := strings.TrimSpace(strings.TrimPrefix(normalized, pngDataURLPrefix))
+		if payload == "" {
+			return "", fmt.Errorf("品牌图片数据不能为空")
+		}
+
+		if _, err := base64.StdEncoding.DecodeString(payload); err != nil {
+			return "", fmt.Errorf("品牌图片数据格式无效")
+		}
+
+		return pngDataURLPrefix + payload, nil
+	case monitorTunnelQualityEnabledConfigKey:
+		normalized := strings.TrimSpace(strings.ToLower(value))
+		switch normalized {
+		case "true", "false":
+			return normalized, nil
+		default:
+			return "", fmt.Errorf("隧道质量检测开关配置值无效")
+		}
+	default:
+		return value, nil
+	}
+}
+
+func (h *Handler) isTunnelQualityMonitoringEnabled() bool {
+	if h == nil || h.repo == nil {
+		return true
+	}
+
+	cfg, err := h.repo.GetConfigByName(monitorTunnelQualityEnabledConfigKey)
+	if err != nil || cfg == nil {
+		return true
+	}
+
+	return strings.TrimSpace(strings.ToLower(cfg.Value)) != "false"
 }
 
 func (h *Handler) userPackage(w http.ResponseWriter, r *http.Request) {
@@ -981,10 +1119,41 @@ func (h *Handler) captchaEnabled() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if cfg == nil {
+	if cfg == nil || !strings.EqualFold(strings.TrimSpace(cfg.Value), "true") {
 		return false, nil
 	}
-	return strings.EqualFold(cfg.Value, "true"), nil
+
+	siteCfg, err := h.repo.GetConfigByName("cloudflare_site_key")
+	if err != nil {
+		return false, err
+	}
+	if siteCfg == nil || strings.TrimSpace(siteCfg.Value) == "" {
+		return false, nil
+	}
+
+	secretCfg, err := h.repo.GetConfigByName("cloudflare_secret_key")
+	if err != nil {
+		return false, err
+	}
+	if secretCfg == nil || strings.TrimSpace(secretCfg.Value) == "" {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func (h *Handler) apiClientCaptchaBypassEnabled(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+
+	client := strings.ToLower(strings.TrimSpace(r.Header.Get("X-FLVX-API-Client")))
+	switch client {
+	case "whmcs", "whmcs-module":
+		return true
+	default:
+		return false
+	}
 }
 
 func (h *Handler) markCaptchaToken(token string) {
@@ -1092,6 +1261,21 @@ func nullableNullInt64(v sql.NullInt64) interface{} {
 	return nil
 }
 
+// flowCryptoCache caches AES crypto instances by secret to avoid per-request SHA256+GCM init.
+var flowCryptoCache sync.Map
+
+func getOrCreateFlowCrypto(secret string) *security.AESCrypto {
+	if v, ok := flowCryptoCache.Load(secret); ok {
+		return v.(*security.AESCrypto)
+	}
+	c, err := security.NewAESCrypto(secret)
+	if err != nil {
+		return nil
+	}
+	flowCryptoCache.Store(secret, c)
+	return c
+}
+
 func readAndDecryptFlowBody(body io.ReadCloser, secret string) (string, error) {
 	defer body.Close()
 	raw, err := io.ReadAll(body)
@@ -1112,8 +1296,8 @@ func readAndDecryptFlowBody(body io.ReadCloser, secret string) (string, error) {
 		return text, nil
 	}
 
-	crypto, err := security.NewAESCrypto(secret)
-	if err != nil {
+	crypto := getOrCreateFlowCrypto(secret)
+	if crypto == nil {
 		return text, nil
 	}
 	plain, err := crypto.Decrypt(wrap.Data)

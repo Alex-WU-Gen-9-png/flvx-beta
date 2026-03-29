@@ -2,10 +2,13 @@ package contract_test
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,7 +31,7 @@ func TestForwardOwnershipAndScopeContracts(t *testing.T) {
 	if err := repo.DB().Exec(`
 		INSERT INTO tunnel(name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, "contract-tunnel", 1.0, 1, "tls", 99999, now, now, 1, nil, 0).Error; err != nil {
+	`, "contract-tunnel", 2.5, 1, "tls", 99999, now, now, 1, nil, 0).Error; err != nil {
 		t.Fatalf("insert tunnel: %v", err)
 	}
 	tunnelID := mustLastInsertID(t, repo, "contract-tunnel")
@@ -108,8 +111,19 @@ func TestForwardOwnershipAndScopeContracts(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected object item, got %T", arr[0])
 		}
-		if got := int64(item["id"].(float64)); got != userForwardID {
+		idFloat, ok := item["id"].(float64)
+		if !ok {
+			t.Fatalf("expected id to be float64, got %T", item["id"])
+		}
+		if got := int64(idFloat); got != userForwardID {
 			t.Fatalf("expected forward id %d, got %d", userForwardID, got)
+		}
+		ratioFloat, ok := item["tunnelTrafficRatio"].(float64)
+		if !ok {
+			t.Fatalf("expected tunnelTrafficRatio to be float64, got %T", item["tunnelTrafficRatio"])
+		}
+		if ratioFloat != 2.5 {
+			t.Fatalf("expected tunnelTrafficRatio 2.5, got %v", ratioFloat)
 		}
 	})
 
@@ -143,7 +157,11 @@ func TestForwardOwnershipAndScopeContracts(t *testing.T) {
 		if _, ok := first["message"]; !ok {
 			t.Fatalf("expected message field in diagnosis result")
 		}
-		if got := int(first["fromChainType"].(float64)); got != 1 {
+		fromChainTypeFloat, ok := first["fromChainType"].(float64)
+		if !ok {
+			t.Fatalf("expected fromChainType to be float64, got %T", first["fromChainType"])
+		}
+		if got := int(fromChainTypeFloat); got != 1 {
 			t.Fatalf("expected fromChainType=1, got %d", got)
 		}
 	})
@@ -471,6 +489,896 @@ func TestUserTunnelReassignmentKeepsStableID(t *testing.T) {
 	}
 }
 
+func TestUserTunnelSaveIgnoresDeletedSpeedLimitContract(t *testing.T) {
+	secret := "contract-jwt-secret"
+	router, repo := setupContractRouter(t, secret)
+	now := time.Now().UnixMilli()
+
+	adminToken, err := auth.GenerateToken(1, "admin_user", 0, secret)
+	if err != nil {
+		t.Fatalf("generate admin token: %v", err)
+	}
+
+	if err := repo.DB().Exec(`
+		INSERT INTO user(id, user, pwd, role_id, exp_time, flow, in_flow, out_flow, flow_reset_time, num, created_time, updated_time, status)
+		VALUES(101, 'user_tunnel_speed_user_a', 'pwd', 1, 2727251700000, 99999, 0, 0, 1, 99999, ?, ?, 1)
+	`, now, now).Error; err != nil {
+		t.Fatalf("insert user a: %v", err)
+	}
+
+	if err := repo.DB().Exec(`
+		INSERT INTO tunnel(name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "user-tunnel-missing-speed-tunnel", 1.0, 1, "tls", 99999, now, now, 1, nil, 0).Error; err != nil {
+		t.Fatalf("insert tunnel: %v", err)
+	}
+	tunnelID := mustLastInsertID(t, repo, "user-tunnel-missing-speed-tunnel")
+
+	if err := repo.DB().Exec(`
+		INSERT INTO speed_limit(name, speed, tunnel_id, tunnel_name, created_time, updated_time, status)
+		VALUES(?, ?, NULL, NULL, ?, NULL, ?)
+	`, "user-tunnel-missing-speed-limit", 2048, now, 1).Error; err != nil {
+		t.Fatalf("insert speed limit: %v", err)
+	}
+	speedID := mustLastInsertID(t, repo, "user-tunnel-missing-speed-limit")
+
+	if err := repo.DB().Exec(`
+		INSERT INTO user_tunnel(id, user_id, tunnel_id, speed_id, num, flow, in_flow, out_flow, flow_reset_time, exp_time, status)
+		VALUES(31, 101, ?, ?, 999, 99999, 0, 0, 1, 2727251700000, 1)
+	`, tunnelID, speedID).Error; err != nil {
+		t.Fatalf("insert user_tunnel: %v", err)
+	}
+
+	if err := repo.DB().Exec(`DELETE FROM speed_limit WHERE id = ?`, speedID).Error; err != nil {
+		t.Fatalf("delete speed limit: %v", err)
+	}
+
+	t.Run("user tunnel update auto clears missing speed", func(t *testing.T) {
+		updatePayload := map[string]interface{}{
+			"id":            31,
+			"flow":          99999,
+			"num":           999,
+			"expTime":       int64(2727251700000),
+			"flowResetTime": 1,
+			"status":        1,
+			"speedId":       speedID,
+		}
+		updateBody, err := json.Marshal(updatePayload)
+		if err != nil {
+			t.Fatalf("marshal update payload: %v", err)
+		}
+		updateReq := httptest.NewRequest(http.MethodPost, "/api/v1/tunnel/user/update", bytes.NewReader(updateBody))
+		updateReq.Header.Set("Authorization", adminToken)
+		updateReq.Header.Set("Content-Type", "application/json")
+		updateRes := httptest.NewRecorder()
+		router.ServeHTTP(updateRes, updateReq)
+		assertCode(t, updateRes, 0)
+
+		var updatedSpeed sql.NullInt64
+		if err := repo.DB().Raw(`SELECT speed_id FROM user_tunnel WHERE id = 31`).Row().Scan(&updatedSpeed); err != nil {
+			t.Fatalf("query updated user_tunnel speed_id: %v", err)
+		}
+		if updatedSpeed.Valid {
+			t.Fatalf("expected updated user_tunnel speed_id to be NULL, got %d", updatedSpeed.Int64)
+		}
+	})
+
+	t.Run("user tunnel batch assign auto clears missing speed", func(t *testing.T) {
+		if err := repo.DB().Exec(`UPDATE user_tunnel SET speed_id = ? WHERE id = 31`, speedID).Error; err != nil {
+			t.Fatalf("prepare user_tunnel speed_id for batch assign: %v", err)
+		}
+
+		assignPayload := map[string]interface{}{
+			"userId": 101,
+			"tunnels": []map[string]interface{}{{
+				"tunnelId": tunnelID,
+				"speedId":  speedID,
+			}},
+		}
+		assignBody, err := json.Marshal(assignPayload)
+		if err != nil {
+			t.Fatalf("marshal assign payload: %v", err)
+		}
+		assignReq := httptest.NewRequest(http.MethodPost, "/api/v1/tunnel/user/batch-assign", bytes.NewReader(assignBody))
+		assignReq.Header.Set("Authorization", adminToken)
+		assignReq.Header.Set("Content-Type", "application/json")
+		assignRes := httptest.NewRecorder()
+		router.ServeHTTP(assignRes, assignReq)
+		assertCode(t, assignRes, 0)
+
+		var assignedSpeed sql.NullInt64
+		if err := repo.DB().Raw(`SELECT speed_id FROM user_tunnel WHERE id = 31`).Row().Scan(&assignedSpeed); err != nil {
+			t.Fatalf("query assigned user_tunnel speed_id: %v", err)
+		}
+		if assignedSpeed.Valid {
+			t.Fatalf("expected assigned user_tunnel speed_id to be NULL, got %d", assignedSpeed.Int64)
+		}
+	})
+}
+
+func TestForwardSpeedIDWriteAndClearContracts(t *testing.T) {
+	secret := "contract-jwt-secret"
+	router, repo := setupContractRouter(t, secret)
+	now := time.Now().UnixMilli()
+
+	adminToken, err := auth.GenerateToken(1, "admin_user", 0, secret)
+	if err != nil {
+		t.Fatalf("generate admin token: %v", err)
+	}
+
+	if err := repo.DB().Exec(`
+		INSERT INTO user(id, user, pwd, role_id, exp_time, flow, in_flow, out_flow, flow_reset_time, num, created_time, updated_time, status)
+		VALUES(2, 'speed_user', '3c85cdebade1c51cf64ca9f3c09d182d', 1, 2727251700000, 99999, 0, 0, 1, 99999, ?, ?, 1)
+	`, now, now).Error; err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	if err := repo.DB().Exec(`
+		INSERT INTO tunnel(name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "forward-speed-tunnel", 1.0, 1, "tls", 99999, now, now, 1, nil, 0).Error; err != nil {
+		t.Fatalf("insert tunnel: %v", err)
+	}
+	tunnelID := mustLastInsertID(t, repo, "forward-speed-tunnel")
+
+	if err := repo.DB().Exec(`
+		INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "forward-speed-node", "forward-speed-secret", "10.30.0.1", "10.30.0.1", "", "31000-31010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0).Error; err != nil {
+		t.Fatalf("insert node: %v", err)
+	}
+	nodeID := mustLastInsertID(t, repo, "forward-speed-node")
+
+	if err := repo.DB().Exec(`
+		INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol)
+		VALUES(?, 1, ?, 31001, 'round', 1, 'tls')
+	`, tunnelID, nodeID).Error; err != nil {
+		t.Fatalf("insert chain_tunnel: %v", err)
+	}
+
+	if err := repo.DB().Exec(`
+		INSERT INTO speed_limit(name, speed, tunnel_id, tunnel_name, created_time, updated_time, status)
+		VALUES(?, ?, NULL, NULL, ?, NULL, ?)
+	`, "forward-speed-limit-a", 2048, now, 1).Error; err != nil {
+		t.Fatalf("insert speed limit a: %v", err)
+	}
+	speedIDA := mustLastInsertID(t, repo, "forward-speed-limit-a")
+
+	if err := repo.DB().Exec(`
+		INSERT INTO speed_limit(name, speed, tunnel_id, tunnel_name, created_time, updated_time, status)
+		VALUES(?, ?, NULL, NULL, ?, NULL, ?)
+	`, "forward-speed-limit-b", 4096, now, 1).Error; err != nil {
+		t.Fatalf("insert speed limit b: %v", err)
+	}
+	speedIDB := mustLastInsertID(t, repo, "forward-speed-limit-b")
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+	stopNode := startMockNodeSession(t, server.URL, "forward-speed-secret")
+	defer stopNode()
+
+	createPayload := map[string]interface{}{
+		"name":       "forward-speed-target",
+		"tunnelId":   tunnelID,
+		"remoteAddr": "1.1.1.1:443",
+		"strategy":   "fifo",
+		"speedId":    speedIDA,
+	}
+	createBody, err := json.Marshal(createPayload)
+	if err != nil {
+		t.Fatalf("marshal create payload: %v", err)
+	}
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/forward/create", bytes.NewReader(createBody))
+	createReq.Header.Set("Authorization", adminToken)
+	createReq.Header.Set("Content-Type", "application/json")
+	createRes := httptest.NewRecorder()
+	router.ServeHTTP(createRes, createReq)
+	assertCode(t, createRes, 0)
+
+	forwardID := mustLastInsertID(t, repo, "forward-speed-target")
+	storedSpeed := repo.DB().Raw(`SELECT speed_id FROM forward WHERE id = ?`, forwardID).Row()
+	var createdSpeed sql.NullInt64
+	if err := storedSpeed.Scan(&createdSpeed); err != nil {
+		t.Fatalf("query created forward speed_id: %v", err)
+	}
+	if !createdSpeed.Valid || createdSpeed.Int64 != speedIDA {
+		t.Fatalf("expected created speed_id=%d, got valid=%v value=%d", speedIDA, createdSpeed.Valid, createdSpeed.Int64)
+	}
+
+	updateToBPayload := map[string]interface{}{
+		"id":      forwardID,
+		"speedId": speedIDB,
+	}
+	updateToBBody, err := json.Marshal(updateToBPayload)
+	if err != nil {
+		t.Fatalf("marshal update-to-b payload: %v", err)
+	}
+	updateToBReq := httptest.NewRequest(http.MethodPost, "/api/v1/forward/update", bytes.NewReader(updateToBBody))
+	updateToBReq.Header.Set("Authorization", adminToken)
+	updateToBReq.Header.Set("Content-Type", "application/json")
+	updateToBRes := httptest.NewRecorder()
+	router.ServeHTTP(updateToBRes, updateToBReq)
+	assertCode(t, updateToBRes, 0)
+
+	storedSpeed = repo.DB().Raw(`SELECT speed_id FROM forward WHERE id = ?`, forwardID).Row()
+	var updatedSpeed sql.NullInt64
+	if err := storedSpeed.Scan(&updatedSpeed); err != nil {
+		t.Fatalf("query updated forward speed_id: %v", err)
+	}
+	if !updatedSpeed.Valid || updatedSpeed.Int64 != speedIDB {
+		t.Fatalf("expected updated speed_id=%d, got valid=%v value=%d", speedIDB, updatedSpeed.Valid, updatedSpeed.Int64)
+	}
+
+	clearPayload := map[string]interface{}{
+		"id":      forwardID,
+		"speedId": nil,
+	}
+	clearBody, err := json.Marshal(clearPayload)
+	if err != nil {
+		t.Fatalf("marshal clear payload: %v", err)
+	}
+	clearReq := httptest.NewRequest(http.MethodPost, "/api/v1/forward/update", bytes.NewReader(clearBody))
+	clearReq.Header.Set("Authorization", adminToken)
+	clearReq.Header.Set("Content-Type", "application/json")
+	clearRes := httptest.NewRecorder()
+	router.ServeHTTP(clearRes, clearReq)
+	assertCode(t, clearRes, 0)
+
+	storedSpeed = repo.DB().Raw(`SELECT speed_id FROM forward WHERE id = ?`, forwardID).Row()
+	var clearedSpeed sql.NullInt64
+	if err := storedSpeed.Scan(&clearedSpeed); err != nil {
+		t.Fatalf("query cleared forward speed_id: %v", err)
+	}
+	if clearedSpeed.Valid {
+		t.Fatalf("expected cleared speed_id to be NULL, got %d", clearedSpeed.Int64)
+	}
+}
+
+func TestForwardUpdateIgnoresDeletedSpeedLimitContract(t *testing.T) {
+	secret := "contract-jwt-secret"
+	router, repo := setupContractRouter(t, secret)
+
+	adminToken, err := auth.GenerateToken(1, "admin_user", 0, secret)
+	if err != nil {
+		t.Fatalf("generate admin token: %v", err)
+	}
+
+	now := time.Now().UnixMilli()
+	if err := repo.DB().Exec(`
+		INSERT INTO tunnel(name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "forward-update-missing-speed-tunnel", 1.0, 1, "tls", 99999, now, now, 1, nil, 0).Error; err != nil {
+		t.Fatalf("insert tunnel: %v", err)
+	}
+	tunnelID := mustLastInsertID(t, repo, "forward-update-missing-speed-tunnel")
+
+	if err := repo.DB().Exec(`
+		INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "forward-update-missing-speed-node", "forward-update-missing-speed-secret", "10.32.0.1", "10.32.0.1", "", "42000-42010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0).Error; err != nil {
+		t.Fatalf("insert node: %v", err)
+	}
+	nodeID := mustLastInsertID(t, repo, "forward-update-missing-speed-node")
+
+	if err := repo.DB().Exec(`
+		INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol)
+		VALUES(?, 1, ?, 42001, 'round', 1, 'tls')
+	`, tunnelID, nodeID).Error; err != nil {
+		t.Fatalf("insert chain_tunnel: %v", err)
+	}
+
+	if err := repo.DB().Exec(`
+		INSERT INTO speed_limit(name, speed, tunnel_id, tunnel_name, created_time, updated_time, status)
+		VALUES(?, ?, NULL, NULL, ?, NULL, ?)
+	`, "forward-update-missing-speed-limit", 2048, now, 1).Error; err != nil {
+		t.Fatalf("insert speed limit: %v", err)
+	}
+	speedID := mustLastInsertID(t, repo, "forward-update-missing-speed-limit")
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+	stopNode := startMockNodeSession(t, server.URL, "forward-update-missing-speed-secret")
+	defer stopNode()
+
+	createPayload := map[string]interface{}{
+		"name":       "forward-update-missing-speed-target",
+		"tunnelId":   tunnelID,
+		"remoteAddr": "1.1.1.1:443",
+		"strategy":   "fifo",
+		"speedId":    speedID,
+	}
+	createBody, err := json.Marshal(createPayload)
+	if err != nil {
+		t.Fatalf("marshal create payload: %v", err)
+	}
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/forward/create", bytes.NewReader(createBody))
+	createReq.Header.Set("Authorization", adminToken)
+	createReq.Header.Set("Content-Type", "application/json")
+	createRes := httptest.NewRecorder()
+	router.ServeHTTP(createRes, createReq)
+	assertCode(t, createRes, 0)
+
+	forwardID := mustLastInsertID(t, repo, "forward-update-missing-speed-target")
+
+	if err := repo.DB().Exec(`DELETE FROM speed_limit WHERE id = ?`, speedID).Error; err != nil {
+		t.Fatalf("delete speed limit: %v", err)
+	}
+
+	updatePayload := map[string]interface{}{
+		"id":         forwardID,
+		"name":       "forward-update-missing-speed-target-updated",
+		"tunnelId":   tunnelID,
+		"remoteAddr": "1.1.1.1:443",
+		"strategy":   "fifo",
+		"speedId":    speedID,
+	}
+	updateBody, err := json.Marshal(updatePayload)
+	if err != nil {
+		t.Fatalf("marshal update payload: %v", err)
+	}
+	updateReq := httptest.NewRequest(http.MethodPost, "/api/v1/forward/update", bytes.NewReader(updateBody))
+	updateReq.Header.Set("Authorization", adminToken)
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateRes := httptest.NewRecorder()
+	router.ServeHTTP(updateRes, updateReq)
+	assertCode(t, updateRes, 0)
+
+	storedSpeed := repo.DB().Raw(`SELECT speed_id FROM forward WHERE id = ?`, forwardID).Row()
+	var updatedSpeed sql.NullInt64
+	if err := storedSpeed.Scan(&updatedSpeed); err != nil {
+		t.Fatalf("query updated forward speed_id: %v", err)
+	}
+	if updatedSpeed.Valid {
+		t.Fatalf("expected updated speed_id to be NULL after missing speed limit, got %d", updatedSpeed.Int64)
+	}
+}
+
+func TestForwardCreateThenPauseResumeContract(t *testing.T) {
+	secret := "contract-jwt-secret"
+	router, repo := setupContractRouter(t, secret)
+
+	adminToken, err := auth.GenerateToken(1, "admin_user", 0, secret)
+	if err != nil {
+		t.Fatalf("generate admin token: %v", err)
+	}
+
+	now := time.Now().UnixMilli()
+	if err := repo.DB().Exec(`
+		INSERT INTO tunnel(name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "forward-toggle-tunnel", 1.0, 1, "tls", 99999, now, now, 1, nil, 0).Error; err != nil {
+		t.Fatalf("insert tunnel: %v", err)
+	}
+	tunnelID := mustLastInsertID(t, repo, "forward-toggle-tunnel")
+
+	if err := repo.DB().Exec(`
+		INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "forward-toggle-node", "forward-toggle-secret", "10.31.0.1", "10.31.0.1", "", "41000-41010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0).Error; err != nil {
+		t.Fatalf("insert node: %v", err)
+	}
+	nodeID := mustLastInsertID(t, repo, "forward-toggle-node")
+
+	if err := repo.DB().Exec(`
+		INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol)
+		VALUES(?, 1, ?, 41001, 'round', 1, 'tls')
+	`, tunnelID, nodeID).Error; err != nil {
+		t.Fatalf("insert chain_tunnel: %v", err)
+	}
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+	stopNode := startMockNodeSession(t, server.URL, "forward-toggle-secret")
+	defer stopNode()
+
+	createPayload := map[string]interface{}{
+		"name":       "forward-toggle-target",
+		"tunnelId":   tunnelID,
+		"remoteAddr": "1.1.1.1:443",
+		"strategy":   "fifo",
+	}
+	createBody, err := json.Marshal(createPayload)
+	if err != nil {
+		t.Fatalf("marshal create payload: %v", err)
+	}
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/forward/create", bytes.NewReader(createBody))
+	createReq.Header.Set("Authorization", adminToken)
+	createReq.Header.Set("Content-Type", "application/json")
+	createRes := httptest.NewRecorder()
+	router.ServeHTTP(createRes, createReq)
+	assertCode(t, createRes, 0)
+
+	forwardID := mustLastInsertID(t, repo, "forward-toggle-target")
+
+	pauseBody, err := json.Marshal(map[string]interface{}{"id": forwardID})
+	if err != nil {
+		t.Fatalf("marshal pause payload: %v", err)
+	}
+	pauseReq := httptest.NewRequest(http.MethodPost, "/api/v1/forward/pause", bytes.NewReader(pauseBody))
+	pauseReq.Header.Set("Authorization", adminToken)
+	pauseReq.Header.Set("Content-Type", "application/json")
+	pauseRes := httptest.NewRecorder()
+	router.ServeHTTP(pauseRes, pauseReq)
+	assertCode(t, pauseRes, 0)
+
+	pausedStatus := mustQueryInt(t, repo, `SELECT status FROM forward WHERE id = ?`, forwardID)
+	if pausedStatus != 0 {
+		t.Fatalf("expected status=0 after pause, got %d", pausedStatus)
+	}
+
+	resumeBody, err := json.Marshal(map[string]interface{}{"id": forwardID})
+	if err != nil {
+		t.Fatalf("marshal resume payload: %v", err)
+	}
+	resumeReq := httptest.NewRequest(http.MethodPost, "/api/v1/forward/resume", bytes.NewReader(resumeBody))
+	resumeReq.Header.Set("Authorization", adminToken)
+	resumeReq.Header.Set("Content-Type", "application/json")
+	resumeRes := httptest.NewRecorder()
+	router.ServeHTTP(resumeRes, resumeReq)
+	assertCode(t, resumeRes, 0)
+
+	resumedStatus := mustQueryInt(t, repo, `SELECT status FROM forward WHERE id = ?`, forwardID)
+	if resumedStatus != 1 {
+		t.Fatalf("expected status=1 after resume, got %d", resumedStatus)
+	}
+}
+
+func TestForwardUpdateRecoversFromAddressInUseContract(t *testing.T) {
+	secret := "contract-jwt-secret"
+	router, repo := setupContractRouter(t, secret)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	adminToken, err := auth.GenerateToken(1, "admin_user", 0, secret)
+	if err != nil {
+		t.Fatalf("generate admin token: %v", err)
+	}
+
+	now := time.Now().UnixMilli()
+	if err := repo.DB().Exec(`
+		INSERT INTO user(id, user, pwd, role_id, exp_time, flow, in_flow, out_flow, flow_reset_time, num, created_time, updated_time, status)
+		VALUES(202, 'forward_bind_retry_user', 'pwd', 1, 2727251700000, 99999, 0, 0, 1, 99999, ?, ?, 1)
+	`, now, now).Error; err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	if err := repo.DB().Exec(`
+		INSERT INTO tunnel(name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "forward-bind-retry-tunnel", 1.0, 1, "tls", 99999, now, now, 1, nil, 0).Error; err != nil {
+		t.Fatalf("insert tunnel: %v", err)
+	}
+	tunnelID := mustLastInsertID(t, repo, "forward-bind-retry-tunnel")
+
+	if err := repo.DB().Exec(`
+		INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "forward-bind-retry-node", "forward-bind-retry-secret", "10.42.0.1", "10.42.0.1", "", "44000-44010", "", "v1", 1, 1, 1, now, now, 1, "10.42.0.9", "[::]", 0).Error; err != nil {
+		t.Fatalf("insert node: %v", err)
+	}
+	nodeID := mustLastInsertID(t, repo, "forward-bind-retry-node")
+
+	if err := repo.DB().Exec(`
+		INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol)
+		VALUES(?, 1, ?, 44001, 'round', 1, 'tls')
+	`, tunnelID, nodeID).Error; err != nil {
+		t.Fatalf("insert chain_tunnel: %v", err)
+	}
+
+	if err := repo.DB().Exec(`
+		INSERT INTO user_tunnel(id, user_id, tunnel_id, speed_id, num, flow, in_flow, out_flow, flow_reset_time, exp_time, status)
+		VALUES(41, 202, ?, NULL, 999, 99999, 0, 0, 1, 2727251700000, 1)
+	`, tunnelID).Error; err != nil {
+		t.Fatalf("insert user_tunnel: %v", err)
+	}
+
+	createPayload := map[string]interface{}{
+		"name":       "forward-bind-retry-target",
+		"tunnelId":   tunnelID,
+		"remoteAddr": "1.1.1.1:443",
+		"strategy":   "fifo",
+	}
+	createBody, err := json.Marshal(createPayload)
+	if err != nil {
+		t.Fatalf("marshal create payload: %v", err)
+	}
+
+	var mu sync.Mutex
+	counts := map[string]int{}
+	var addServiceAddrs []string
+	triggerConflict := false
+	stopNode := startMockNodeSessionWithCommandRecorder(t, server.URL, "forward-bind-retry-secret", func(cmdType string, data json.RawMessage) (bool, string) {
+		key := strings.ToLower(strings.TrimSpace(cmdType))
+		mu.Lock()
+		counts[key]++
+		attempt := counts[key]
+		if strings.EqualFold(strings.TrimSpace(cmdType), "AddService") || strings.EqualFold(strings.TrimSpace(cmdType), "UpdateService") {
+			var services []map[string]interface{}
+			if err := json.Unmarshal(data, &services); err == nil {
+				for _, svc := range services {
+					if addr, _ := svc["addr"].(string); strings.TrimSpace(addr) != "" {
+						addServiceAddrs = append(addServiceAddrs, addr)
+					}
+				}
+			}
+		}
+		shouldFail := false
+		if triggerConflict {
+			if strings.EqualFold(strings.TrimSpace(cmdType), "UpdateService") && attempt == 1 {
+				shouldFail = true
+			}
+			if strings.EqualFold(strings.TrimSpace(cmdType), "AddService") && attempt == 1 {
+				shouldFail = true
+			}
+		}
+		mu.Unlock()
+		if shouldFail {
+			return true, "create service 57_7_7_tcp failed: listen tcp4 0.0.0.0:46222: bind: address alreadyin use"
+		}
+		return false, ""
+	})
+	defer stopNode()
+	waitNodeStatus(t, repo, nodeID, 1)
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/forward/create", bytes.NewReader(createBody))
+	createReq.Header.Set("Authorization", adminToken)
+	createReq.Header.Set("Content-Type", "application/json")
+	createRes := httptest.NewRecorder()
+	router.ServeHTTP(createRes, createReq)
+	assertCode(t, createRes, 0)
+	mu.Lock()
+	counts = map[string]int{}
+	addServiceAddrs = nil
+	triggerConflict = true
+	mu.Unlock()
+
+	forwardID := mustLastInsertID(t, repo, "forward-bind-retry-target")
+
+	updatePayload := map[string]interface{}{
+		"id":         forwardID,
+		"name":       "forward-bind-retry-target-updated",
+		"tunnelId":   tunnelID,
+		"remoteAddr": "9.9.9.9:8443",
+		"strategy":   "fifo",
+	}
+	updateBody, err := json.Marshal(updatePayload)
+	if err != nil {
+		t.Fatalf("marshal update payload: %v", err)
+	}
+	updateReq := httptest.NewRequest(http.MethodPost, "/api/v1/forward/update", bytes.NewReader(updateBody))
+	updateReq.Header.Set("Authorization", adminToken)
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateRes := httptest.NewRecorder()
+	router.ServeHTTP(updateRes, updateReq)
+	assertCode(t, updateRes, 0)
+
+	mu.Lock()
+	defer mu.Unlock()
+	boundPort := mustQueryInt(t, repo, `SELECT port FROM forward_port WHERE forward_id = ? LIMIT 1`, forwardID)
+	if counts["updateservice"] != 1 {
+		t.Fatalf("expected one UpdateService attempt, got %d (%v)", counts["updateservice"], counts)
+	}
+	if counts["deleteservice"] == 0 {
+		t.Fatalf("expected DeleteService cleanup after address-in-use (%v)", counts)
+	}
+	if counts["addservice"] < 2 {
+		t.Fatalf("expected AddService retry path to run at least twice total, got %d (%v)", counts["addservice"], counts)
+	}
+	foundBindAddr := false
+	for _, addr := range addServiceAddrs {
+		if addr == "10.42.0.9:"+strconv.Itoa(boundPort) {
+			foundBindAddr = true
+			break
+		}
+	}
+	if !foundBindAddr {
+		t.Fatalf("expected forward runtime to keep node listen addr 10.42.0.9:%d, got %v", boundPort, addServiceAddrs)
+	}
+
+	storedRemoteAddr := mustQueryString(t, repo, `SELECT remote_addr FROM forward WHERE id = ?`, forwardID)
+	if storedRemoteAddr != "9.9.9.9:8443" {
+		t.Fatalf("expected remote_addr update to persist, got %q", storedRemoteAddr)
+	}
+}
+
 func jsonNumber(v int64) string {
 	return strconv.FormatInt(v, 10)
+}
+
+func TestNonAdminCannotSetSpeedIdOrPort(t *testing.T) {
+	secret := "contract-jwt-secret-perm"
+	router, repo := setupContractRouter(t, secret)
+	server := httptest.NewServer(router)
+	defer server.Close()
+	now := time.Now().UnixMilli()
+
+	if err := repo.DB().Exec(`
+		INSERT INTO user(id, user, pwd, role_id, exp_time, flow, in_flow, out_flow, flow_reset_time, num, created_time, updated_time, status)
+		VALUES(2, 'normal_user_perm', '3c85cdebade1c51cf64ca9f3c09d182d', 1, 2727251700000, 99999, 0, 0, 1, 99999, ?, ?, 1)
+	`, now, now).Error; err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+
+	if err := repo.DB().Exec(`
+		INSERT INTO tunnel(name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip, inx)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "perm-tunnel", 1.0, 1, "tls", 99999, now, now, 1, nil, 0).Error; err != nil {
+		t.Fatalf("insert tunnel: %v", err)
+	}
+	tunnelID := mustLastInsertID(t, repo, "perm-tunnel")
+
+	if err := repo.DB().Exec(`
+		INSERT INTO node(name, secret, server_ip, server_ip_v4, server_ip_v6, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr, inx)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, "perm-node", "perm-secret", "10.0.0.20", "10.0.0.20", "", "30000-30010", "", "v1", 1, 1, 1, now, now, 1, "[::]", "[::]", 0).Error; err != nil {
+		t.Fatalf("insert node: %v", err)
+	}
+	entryNodeID := mustLastInsertID(t, repo, "perm-node")
+
+	if err := repo.DB().Exec(`
+		INSERT INTO chain_tunnel(tunnel_id, chain_type, node_id, port, strategy, inx, protocol)
+		VALUES(?, 1, ?, 30001, 'round', 1, 'tls')
+	`, tunnelID, entryNodeID).Error; err != nil {
+		t.Fatalf("insert chain_tunnel: %v", err)
+	}
+
+	if err := repo.DB().Exec(`
+		INSERT INTO user_tunnel(user_id, tunnel_id, speed_id, num, flow, in_flow, out_flow, flow_reset_time, exp_time, status)
+		VALUES(?, ?, NULL, 10, 99999, 0, 0, 1, 2727251700000, 1)
+	`, 2, tunnelID).Error; err != nil {
+		t.Fatalf("insert user_tunnel: %v", err)
+	}
+
+	if err := repo.DB().Exec(`
+		INSERT INTO speed_limit(name, speed, tunnel_id, tunnel_name, created_time, updated_time, status)
+		VALUES(?, ?, ?, ?, ?, ?, 1)
+	`, "perm-speed-limit", 2048, tunnelID, "perm-tunnel", now, now).Error; err != nil {
+		t.Fatalf("insert speed limit: %v", err)
+	}
+	speedID := mustLastInsertID(t, repo, "perm-speed-limit")
+
+	userToken, err := auth.GenerateToken(2, "normal_user_perm", 1, secret)
+	if err != nil {
+		t.Fatalf("generate user token: %v", err)
+	}
+
+	stopNode := startMockNodeSession(t, server.URL, "perm-secret")
+	defer stopNode()
+
+	t.Run("non-admin cannot set speedId on create", func(t *testing.T) {
+		createPayload := map[string]interface{}{
+			"name":       "perm-forward-speed",
+			"tunnelId":   tunnelID,
+			"remoteAddr": "1.2.3.4:443",
+			"strategy":   "fifo",
+			"speedId":    speedID,
+		}
+		createBody, err := json.Marshal(createPayload)
+		if err != nil {
+			t.Fatalf("marshal create payload: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/forward/create", bytes.NewReader(createBody))
+		req.Header.Set("Authorization", userToken)
+		req.Header.Set("Content-Type", "application/json")
+		res := httptest.NewRecorder()
+		router.ServeHTTP(res, req)
+		assertCodeMsg(t, res, -1, "普通用户无法设置限速规则")
+	})
+
+	t.Run("non-admin cannot set inPort out of range on create", func(t *testing.T) {
+		createPayload := map[string]interface{}{
+			"name":       "perm-forward-port-out",
+			"tunnelId":   tunnelID,
+			"remoteAddr": "1.2.3.4:443",
+			"strategy":   "fifo",
+			"inPort":     12345,
+		}
+		createBody, err := json.Marshal(createPayload)
+		if err != nil {
+			t.Fatalf("marshal create payload: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/forward/create", bytes.NewReader(createBody))
+		req.Header.Set("Authorization", userToken)
+		req.Header.Set("Content-Type", "application/json")
+		res := httptest.NewRecorder()
+		router.ServeHTTP(res, req)
+		var out response.R
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if out.Code >= 0 {
+			t.Errorf("expected port out of range error, got code=%d msg=%s", out.Code, out.Msg)
+		}
+	})
+
+	t.Run("non-admin can set inPort within range on create", func(t *testing.T) {
+		createPayload := map[string]interface{}{
+			"name":       "perm-forward-port-in",
+			"tunnelId":   tunnelID,
+			"remoteAddr": "1.2.3.4:443",
+			"strategy":   "fifo",
+			"inPort":     30005,
+		}
+		createBody, err := json.Marshal(createPayload)
+		if err != nil {
+			t.Fatalf("marshal create payload: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/forward/create", bytes.NewReader(createBody))
+		req.Header.Set("Authorization", userToken)
+		req.Header.Set("Content-Type", "application/json")
+		res := httptest.NewRecorder()
+		router.ServeHTTP(res, req)
+		assertCode(t, res, 0)
+	})
+
+	t.Run("non-admin can create without speedId and inPort", func(t *testing.T) {
+		createPayload := map[string]interface{}{
+			"name":       "perm-forward-ok",
+			"tunnelId":   tunnelID,
+			"remoteAddr": "1.2.3.4:443",
+			"strategy":   "fifo",
+		}
+		createBody, err := json.Marshal(createPayload)
+		if err != nil {
+			t.Fatalf("marshal create payload: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/forward/create", bytes.NewReader(createBody))
+		req.Header.Set("Authorization", userToken)
+		req.Header.Set("Content-Type", "application/json")
+		res := httptest.NewRecorder()
+		router.ServeHTTP(res, req)
+		assertCode(t, res, 0)
+	})
+
+	forwardID := mustLastInsertID(t, repo, "perm-forward-ok")
+
+	t.Run("non-admin cannot update speedId", func(t *testing.T) {
+		updatePayload := map[string]interface{}{
+			"id":         forwardID,
+			"name":       "perm-forward-updated",
+			"tunnelId":   tunnelID,
+			"remoteAddr": "5.6.7.8:443",
+			"speedId":    speedID,
+		}
+		updateBody, err := json.Marshal(updatePayload)
+		if err != nil {
+			t.Fatalf("marshal update payload: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/forward/update", bytes.NewReader(updateBody))
+		req.Header.Set("Authorization", userToken)
+		req.Header.Set("Content-Type", "application/json")
+		res := httptest.NewRecorder()
+		router.ServeHTTP(res, req)
+		assertCodeMsg(t, res, -1, "普通用户无法修改限速规则")
+	})
+
+	t.Run("non-admin cannot update inPort out of range", func(t *testing.T) {
+		updatePayload := map[string]interface{}{
+			"id":         forwardID,
+			"name":       "perm-forward-updated2",
+			"tunnelId":   tunnelID,
+			"remoteAddr": "5.6.7.8:443",
+			"inPort":     54321,
+		}
+		updateBody, err := json.Marshal(updatePayload)
+		if err != nil {
+			t.Fatalf("marshal update payload: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/forward/update", bytes.NewReader(updateBody))
+		req.Header.Set("Authorization", userToken)
+		req.Header.Set("Content-Type", "application/json")
+		res := httptest.NewRecorder()
+		router.ServeHTTP(res, req)
+		var out response.R
+		if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if out.Code >= 0 {
+			t.Errorf("expected port out of range error, got code=%d msg=%s", out.Code, out.Msg)
+		}
+	})
+
+	t.Run("non-admin can update inPort within range", func(t *testing.T) {
+		updatePayload := map[string]interface{}{
+			"id":         forwardID,
+			"name":       "perm-forward-updated3",
+			"tunnelId":   tunnelID,
+			"remoteAddr": "5.6.7.8:443",
+			"inPort":     30006,
+		}
+		updateBody, err := json.Marshal(updatePayload)
+		if err != nil {
+			t.Fatalf("marshal update payload: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/forward/update", bytes.NewReader(updateBody))
+		req.Header.Set("Authorization", userToken)
+		req.Header.Set("Content-Type", "application/json")
+		res := httptest.NewRecorder()
+		router.ServeHTTP(res, req)
+		assertCode(t, res, 0)
+	})
+
+	t.Run("non-admin can update without speedId and inPort", func(t *testing.T) {
+		updatePayload := map[string]interface{}{
+			"id":         forwardID,
+			"name":       "perm-forward-updated-ok",
+			"tunnelId":   tunnelID,
+			"remoteAddr": "9.10.11.12:443",
+		}
+		updateBody, err := json.Marshal(updatePayload)
+		if err != nil {
+			t.Fatalf("marshal update payload: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/forward/update", bytes.NewReader(updateBody))
+		req.Header.Set("Authorization", userToken)
+		req.Header.Set("Content-Type", "application/json")
+		res := httptest.NewRecorder()
+		router.ServeHTTP(res, req)
+		assertCode(t, res, 0)
+	})
+
+	t.Run("non-admin can update when request keeps existing speedId", func(t *testing.T) {
+		if err := repo.DB().Exec(`UPDATE forward SET speed_id = ? WHERE id = ?`, speedID, forwardID).Error; err != nil {
+			t.Fatalf("assign forward speed limit: %v", err)
+		}
+
+		updatePayload := map[string]interface{}{
+			"id":         forwardID,
+			"name":       "perm-forward-keep-speed",
+			"tunnelId":   tunnelID,
+			"remoteAddr": "9.10.11.12:443",
+			"speedId":    speedID,
+		}
+		updateBody, err := json.Marshal(updatePayload)
+		if err != nil {
+			t.Fatalf("marshal update payload: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/forward/update", bytes.NewReader(updateBody))
+		req.Header.Set("Authorization", userToken)
+		req.Header.Set("Content-Type", "application/json")
+		res := httptest.NewRecorder()
+		router.ServeHTTP(res, req)
+		assertCode(t, res, 0)
+	})
+
+	t.Run("non-admin can create with speedId null and inPort 0", func(t *testing.T) {
+		createPayload := map[string]interface{}{
+			"name":       "perm-forward-null-values",
+			"tunnelId":   tunnelID,
+			"remoteAddr": "1.2.3.4:443",
+			"strategy":   "fifo",
+			"speedId":    nil,
+			"inPort":     0,
+		}
+		createBody, err := json.Marshal(createPayload)
+		if err != nil {
+			t.Fatalf("marshal create payload: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/forward/create", bytes.NewReader(createBody))
+		req.Header.Set("Authorization", userToken)
+		req.Header.Set("Content-Type", "application/json")
+		res := httptest.NewRecorder()
+		router.ServeHTTP(res, req)
+		assertCode(t, res, 0)
+	})
+
+	t.Run("non-admin can update with speedId null", func(t *testing.T) {
+		updatePayload := map[string]interface{}{
+			"id":         forwardID,
+			"name":       "perm-forward-null-speed",
+			"tunnelId":   tunnelID,
+			"remoteAddr": "9.10.11.12:443",
+			"speedId":    nil,
+		}
+		updateBody, err := json.Marshal(updatePayload)
+		if err != nil {
+			t.Fatalf("marshal update payload: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/forward/update", bytes.NewReader(updateBody))
+		req.Header.Set("Authorization", userToken)
+		req.Header.Set("Content-Type", "application/json")
+		res := httptest.NewRecorder()
+		router.ServeHTTP(res, req)
+		assertCode(t, res, 0)
+	})
 }
